@@ -6,9 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +50,15 @@ jobs:
           $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--selftest' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "SELFTEST process exited with $($process.ExitCode)" }
           if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'SELFTEST PASSED' -Quiet)) { throw 'SELFTEST PASSED not found in sender.log' }
+
+      - name: Run mock-phone protocol check
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender\sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--mockphone' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "MOCKPHONE process exited with $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKPHONE PASSED' -Quiet)) { throw 'MOCKPHONE PASSED not found in sender.log' }
 
       - name: Build Flutter Windows release
         working-directory: catshare_gui
