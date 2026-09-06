@@ -1,0 +1,526 @@
+using System.Buffers;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using System.IO.Compression;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Server.Kestrel;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace CatShareSender;
+
+/// <summary>
+/// HTTPS Kestrel server the phone connects to:
+///   wss://&lt;pc-ip&gt;:&lt;port&gt;/websocket         envelope handshake (versionNegotiation, sendRequest, status)
+///   https://&lt;pc-ip&gt;:&lt;port&gt;/download?taskId=..  ZIP ("folder-stream") download
+///   https://&lt;pc-ip&gt;:&lt;port&gt;/thumbnail?taskId=.. 404 (no thumbnails yet)
+/// TLS: self-signed; the OShare client uses InsecureTrustManagerFactory and the
+/// CatShare app trusts everything, so no cert prep is needed on the phone.
+/// </summary>
+public sealed class TransferServer : IAsyncDisposable
+{
+    private WebApplication? _app;
+    private readonly SemaphoreSlim _startStop = new(1, 1);
+
+    public int Port { get; private set; }
+    public bool IsRunning { get; private set; }
+
+    /// <summary>True after a stock-alliance credential write; controls the raw "files"
+    /// trigger, which the CatShare app's strict parser would reject.</summary>
+    public volatile bool PeerLooksStock = true;
+
+    /// <summary>True while a phone WebSocket session is open (used by the OConnect
+    /// flow to detect that the phone accepted the ip/port offer).</summary>
+    public volatile bool WsConnected;
+
+    /// <summary>The task offered on the active websocket session (null until sending).</summary>
+    private volatile TransferTask? _activeTask;
+    private CancellationTokenSource _cancelCts = new();
+
+    /// <summary>Raised when the phone accepts and the ZIP download begins.</summary>
+    public event Action<string>? DownloadStarted;
+    public event Action<long, long>? DownloadProgress;      // (sent, total)
+    public event Action<string>? DownloadFinished;          // taskId
+    public event Action<string, int, string>? StatusReceived; // (taskId, type, reason)
+
+    public void SetTask(TransferTask? task) => _activeTask = task;
+
+    public void CancelActiveTransfer()
+    {
+        _cancelCts.Cancel();
+        _cancelCts.Dispose();
+        _cancelCts = new CancellationTokenSource();
+        Log.Info("TransferServer: active transfer cancellation requested");
+    }
+
+    public async Task StartAsync(int port)
+    {
+        await _startStop.WaitAsync();
+        try
+        {
+            if (IsRunning) return;
+            Port = port;
+
+            var builder = WebApplication.CreateBuilder();
+            builder.Logging.ClearProviders();
+            builder.Logging.AddProvider(new ForwardingLoggerProvider());
+            builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(o =>
+            {
+                o.AddServerHeader = false;
+                // ZipArchive writes the response body synchronously; async-only mode would
+                // abort mid-transfer, so allow sync IO (single transfer at a time anyway).
+                o.AllowSynchronousIO = true;
+                // explicit IPv4 + IPv6 bindings: ListenAnyIP ended up IPv6-only here.
+                // PLAINTEXT on purpose: the pad connects ws:// (no TLS) when the sender's
+                // state-1 version >= 10015 (d8/v n(): O=false -> b9.a ssl flag false).
+                // TLS here would close the pad's plaintext upgrade mid-handshake (208).
+                o.Listen(System.Net.IPAddress.Any, port);
+                o.Listen(System.Net.IPAddress.IPv6Any, port);
+            });
+            // no ASP.NET routing features needed; keep it lean
+            builder.Services.AddRouting();
+
+            var app = builder.Build();
+            app.UseWebSockets();
+
+            app.Map("/websocket", HandleWebSocket);
+            app.MapGet("/download", HandleDownload);
+            app.MapGet("/thumbnail", async ctx =>
+            {
+                Log.Info("HTTP GET /thumbnail (not supported, empty)");
+                ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                await ctx.Response.CompleteAsync();
+            });
+
+            _app = app;
+            await app.StartAsync();
+            IsRunning = true;
+            TryAddFirewallRule(port);
+            Log.Info($"TransferServer listening on http://0.0.0.0:{port} (ws /websocket, /download)");
+        }
+        finally
+        {
+            _startStop.Release();
+        }
+    }
+
+    public async Task StopAsync()
+    {
+        await _startStop.WaitAsync();
+        try
+        {
+            if (_app is not null)
+            {
+                try { await _app.StopAsync(TimeSpan.FromSeconds(2)); } catch { }
+                await _app.DisposeAsync();
+                _app = null;
+            }
+            IsRunning = false;
+            Log.Info("TransferServer stopped");
+        }
+        finally
+        {
+            _startStop.Release();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
+        _startStop.Dispose();
+    }
+
+    // ---------------------------------------------------------------- websocket
+
+    /// <summary>Best-effort inbound rule for the transfer port. Without it Windows
+    /// Firewall silently drops every inbound connection (the phone can never reach the
+    /// WSS server). Tries directly first (works when elevated); on failure relaunches
+    /// netsh via UAC so a normal user session still gets the rule with one prompt.</summary>
+    private static void TryAddFirewallRule(int port)
+    {
+        AddFirewallRule("CatShareSender",
+            $"advfirewall firewall add rule name=\"CatShareSender\" dir=in action=allow protocol=TCP localport={port}",
+            $"the phone will NOT be able to connect — allow TCP {port} in Windows Firewall (run once as administrator)");
+
+        // The phone's LAN band check floods UDP at a per-task port it picks
+        // at random (its own task port + 1), so the allow rule must be
+        // program-scoped instead of port-scoped. If the probe is dropped the
+        // phone times out and falls back to its own hotspot.
+        var exe = Environment.ProcessPath;
+        if (!string.IsNullOrEmpty(exe))
+            AddFirewallRule("CatShareSenderBandEcho",
+                $"advfirewall firewall add rule name=\"CatShareSenderBandEcho\" dir=in action=allow program=\"{exe}\" protocol=UDP remoteip=localsubnet",
+                "the phone's LAN check times out and it falls back to hotspot mode");
+    }
+
+    private static void AddFirewallRule(string ruleName, string args, string failureHint)
+    {
+        var (_, existing) = RunNetsh($"advfirewall firewall show rule name=\"{ruleName}\"", elevate: false);
+        if (existing.Contains(ruleName, StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Info($"firewall rule '{ruleName}': reused existing rule");
+            return;
+        }
+
+        var (ok, output) = RunNetsh(args, elevate: false, ruleName);
+        if (!ok)
+            (ok, output) = RunNetsh(args, elevate: true, ruleName);
+        if (ok)
+            Log.Info($"firewall rule '{ruleName}': created");
+        else
+            Log.Warn($"firewall rule '{ruleName}' missing — {failureHint} ({output.Trim()})");
+    }
+
+    private static (bool ok, string output) RunNetsh(string args, bool elevate, string? verifyRuleName = null)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "netsh",
+                Arguments = args,
+                UseShellExecute = elevate,
+                CreateNoWindow = true,
+            };
+            if (!elevate)
+            {
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+            }
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            string output = "";
+            if (!elevate)
+            {
+                output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                p.WaitForExit(5000);
+                return (output.Contains("Ok") || output.Contains("确定") || output.Contains("OK"), output);
+            }
+            // UAC path: no stdout capture; verify by querying the rule afterwards.
+            p.WaitForExit(30000);
+            var name = verifyRuleName ?? "CatShareSender";
+            var (chk, chkOut) = RunNetsh($"advfirewall firewall show rule name=\"{name}\"", elevate: false);
+            return (chk && chkOut.Contains(name), "added via UAC prompt");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    private async Task HandleWebSocket(HttpContext ctx)
+    {
+        var peer = ctx.Connection.RemoteIpAddress?.ToString() ?? "?";
+        Log.Info($"WS: phone connected from {peer}");
+
+        if (!ctx.WebSockets.IsWebSocketRequest)
+        {
+            ctx.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+            return;
+        }
+
+        using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+        WsConnected = true;
+        var session = new WsSession(this, ws)
+        {
+            PeerLooksStock = PeerLooksStock
+        };
+        int seq = 1;
+
+        try
+        {
+            // SENDER initiates versionNegotiation (decompiled j9/l.java:138).
+            // CatShare receiver accepts {"version":n} and replies {"version":min(n,1),"threadLimit":5}.
+            await session.SendText(Envelope.Build("action", seq++, "versionNegotiation", new { version = 2 }));
+            var vnAck = await session.ReceiveUntilAsync(e => e.IsAck && e.Method == "versionNegotiation", TimeSpan.FromSeconds(10));
+            if (vnAck is null) { Log.Warn("WS: no versionNegotiation ack within 10s"); return; }
+            Log.Info($"WS: version ack: {vnAck}");
+
+            var task = _activeTask;
+            if (task is null)
+            {
+                Log.Warn("WS: connected but no task staged; closing");
+                return;
+            }
+
+            var sendReq = Envelope.Build("action", seq++, "sendRequest", task.BuildSendRequest());
+            Log.Info($"WS: -> {sendReq}");
+            await session.SendText(sendReq);
+            var srAck = await session.ReceiveUntilAsync(e => e.IsAck && e.Method == "sendRequest", TimeSpan.FromSeconds(60));
+            if (srAck is null) { Log.Warn("WS: no sendRequest ack within 60s (phone user may not have accepted)"); return; }
+            Log.Info($"WS: sendRequest ack: {srAck}");
+
+            // The stock receiver starts downloading when it receives the bare
+            // string "files" (j9/g.java:898). The CatShare receiver parses every
+            // text frame strictly, so we only send it to stock peers.
+            if (session.PeerLooksStock)
+            {
+                await session.SendText("files");
+                Log.Info("WS: sent raw trigger 'files'");
+            }
+            else
+            {
+                Log.Info("WS: CatShare-style peer, skipping raw 'files' trigger");
+            }
+
+            // Wait for the download + final status.
+            var done = await session.ReceiveLoopAsync(TimeSpan.FromMinutes(30));
+            Log.Info($"WS: session ended ({done})");
+        }
+        catch (Exception ex)
+        {
+            Log.Error("WS: session error", ex);
+        }
+        finally
+        {
+            WsConnected = false;
+        }
+    }
+
+    private sealed class WsSession
+    {
+        private readonly System.Net.WebSockets.WebSocket _ws;
+        private readonly TransferServer _owner;
+        public bool PeerLooksStock = true;   // refine later if needed
+
+        public WsSession(TransferServer owner, System.Net.WebSockets.WebSocket ws)
+        {
+            _owner = owner;
+            _ws = ws;
+        }
+
+        public async Task SendText(string text)
+        {
+            var bytes = Encoding.UTF8.GetBytes(text);
+            await _ws.SendAsync(bytes, System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+
+        public async Task<Envelope?> ReceiveUntilAsync(Func<Envelope, bool> predicate, TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            while (true)
+            {
+                var (e, closed) = await ReadFrameAsync(cts.Token);
+                if (closed) return null;
+                if (e is null) continue;
+                if (predicate(e)) return e;
+                Log.Info($"WS: (skip) {e}");
+            }
+        }
+
+        /// <summary>Pumps frames, acking status actions, until the peer closes or the
+        /// download completes. Returns a human reason.</summary>
+        public async Task<string> ReceiveLoopAsync(TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            while (true)
+            {
+                var (e, closed) = await ReadFrameAsync(cts.Token);
+                if (closed) return "peer closed";
+                if (e is null) continue;
+
+                if (e.IsAction && e.Method == "status")
+                {
+                    var type = e.PayloadInt("type");
+                    var reason = e.PayloadString("reason");
+                    var taskId = e.PayloadString("taskId");
+                    Log.Info($"WS: status type={type} reason='{reason}'");
+                    _owner.OnStatus(taskId, type, reason);
+                    await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
+                    if (type == 1 && reason == "ok") return "transfer completed";
+                    if (type == 3) return $"refused: {reason}";
+                }
+                else if (e.IsAction)
+                {
+                    await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+                }
+                else
+                {
+                    Log.Info($"WS: raw frame '{e.Method}'");
+                }
+            }
+        }
+
+        private async Task<(Envelope?, bool)> ReadFrameAsync(CancellationToken ct)
+        {
+            var buf = ArrayPool<byte>.Shared.Rent(64 * 1024);
+            try
+            {
+                while (true)
+                {
+                    var result = await _ws.ReceiveAsync(buf, ct);
+                    if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
+                        return (null, true);
+                    var text = Encoding.UTF8.GetString(buf, 0, result.Count);
+                    if (!result.EndOfMessage)
+                    {
+                        // large frames (unlikely for control messages) — accumulate
+                        using var ms = new MemoryStream();
+                        ms.Write(buf, 0, result.Count);
+                        while (!result.EndOfMessage)
+                        {
+                            result = await _ws.ReceiveAsync(buf, ct);
+                            ms.Write(buf, 0, result.Count);
+                        }
+                        text = Encoding.UTF8.GetString(ms.ToArray());
+                    }
+                    var env = Envelope.Parse(text);
+                    if (env is { IsRaw: true }) return (env, false);
+                    if (env is not null) return (env, false);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buf);
+            }
+        }
+    }
+
+    private void OnStatus(string taskId, int type, string reason)
+    {
+        try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+    }
+
+    /// <summary>Routes ASP.NET/Kestrel internal logs (TLS failures etc.) into our log.</summary>
+    private sealed class ForwardingLoggerProvider : ILoggerProvider
+    {
+        public ILogger CreateLogger(string category) => new ForwardingLogger(category);
+        public void Dispose() { }
+
+        private sealed class ForwardingLogger(string category) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+                Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                var msg = $"[kestrel:{category.Split('.').LastOrDefault()}] {formatter(state, exception)}";
+                if (exception is not null) msg += $" :: {exception.Message}";
+                switch (logLevel)
+                {
+                    case LogLevel.Error or LogLevel.Critical: CatShareSender.Log.Error(msg); break;
+                    case LogLevel.Warning: CatShareSender.Log.Warn(msg); break;
+                    default: CatShareSender.Log.Info(msg); break;
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- download
+
+    private async Task HandleDownload(HttpContext ctx)
+    {
+        var taskId = ctx.Request.Query["taskId"].FirstOrDefault() ?? "";
+        var fileId = ctx.Request.Query["fileId"].FirstOrDefault();
+        var ndZip = ctx.Request.Headers["nd_zip"].FirstOrDefault();
+        Log.Info($"HTTP GET /download taskId='{taskId}' fileId='{fileId}' nd_zip='{ndZip}' from {ctx.Connection.RemoteIpAddress}");
+
+        var task = _activeTask;
+        if (task is null || string.IsNullOrEmpty(taskId) || task.TaskId != taskId)
+        {
+            Log.Warn("HTTP: unknown or stale taskId");
+            ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+            await ctx.Response.WriteAsync("unknown task");
+            return;
+        }
+
+        try { DownloadStarted?.Invoke(task.TaskId); } catch { }
+
+        if (fileId is not null)
+        {
+            // An explicit fileId must be valid: falling through to the whole-batch
+            // zip here would hand a single-file receiver the entire batch.
+            if (!int.TryParse(fileId, out var idx) || idx < 0 || idx >= task.Files.Count)
+            {
+                Log.Warn($"HTTP: fileId '{fileId}' out of range (0..{task.Files.Count - 1})");
+                ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                await ctx.Response.WriteAsync("unknown fileId");
+                return;
+            }
+            // per-file mode. The pad's iOS receiver zip-iterates EVERY /download body
+            // (iOSReceiveFileManager "create file:" per entry, basename flattened), so
+            // raw bytes are fatal: a raw pptx gets exploded into its internal entries.
+            // Always answer with a zip whose entries are the transfer files (stock
+            // sender does the same for nd_zip != false, aa/b.java -> ga.c).
+            var single = new List<string> { task.Files[idx] };
+            ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+            ctx.Response.ContentType = "application/zip";
+            ctx.Response.Headers["nd_zip"] = "true";
+            ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+            ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(Path.GetFileName(single[0]))}\"";
+            await WriteFolderStreamZip(ctx, single, new FileInfo(single[0]).Length, _cancelCts.Token);
+            Log.Info($"HTTP: per-file zip done: {single[0]}");
+            try { DownloadFinished?.Invoke(task.TaskId); } catch { }
+            return;
+        }
+
+        // whole-batch mode — same zip layout
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/zip";
+        ctx.Response.Headers["nd_zip"] = "true";
+        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(task.FirstFileName)}\"";
+        await WriteFolderStreamZip(ctx, task.Files, task.TotalSize, _cancelCts.Token);
+        try { DownloadFinished?.Invoke(task.TaskId); } catch { }
+    }
+
+    /// <summary>Streams the given files as a zip (entries under 0/) — the ONLY body
+    /// shape the pad's receiver parses correctly.</summary>
+    private async Task WriteFolderStreamZip(HttpContext ctx, IReadOnlyList<string> files, long total, CancellationToken cancelToken)
+    {
+        long sent = 0;
+        await using (var zip = new ZipArchive(ctx.Response.Body, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var file in files)
+            {
+                var entryName = "0/" + SanitizeEntryName(Path.GetFileName(file));
+                var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
+                // MUST be Deflate, NOT NoCompression/STORED: streaming entries are written
+                // with bit-3 data descriptors and a ZERO size in the local header. Java's
+                // ZipInputStream (the pad's iOSReceiveFileManager) trusts the local-header
+                // size for STORED entries -> reads 0 bytes -> the file lands 0-byte and the
+                // rest of the stream (the stored file's own bytes) gets parsed as phantom
+                // zip entries. Deflate entries are length-self-terminating via Inflater.
+                // ZIP timestamps only support 1980..2107 — files with invalid/older
+                // timestamps (placeholders, some system files) threw and aborted the
+                // whole transfer, so clamp them.
+                var mtime = File.GetLastWriteTime(file);
+                if (mtime.Year < 1980 || mtime.Year > 2107) mtime = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Local);
+                entry.LastWriteTime = mtime;
+                try
+                {
+                    await using var es = entry.Open();
+                    await using var fs = File.OpenRead(file);
+                    var buf = new byte[256 * 1024];
+                    int n;
+                    using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+                    while ((n = await fs.ReadAsync(buf, linked.Token)) > 0)
+                    {
+                        await es.WriteAsync(buf.AsMemory(0, n), linked.Token);
+                        sent += n;
+                        try { DownloadProgress?.Invoke(sent, total); } catch { }
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // e.g. reading the RUNNING exe can hit a sharing violation — without
+                    // this log the transfer just dies silently mid-stream.
+                    Log.Error($"HTTP: failed streaming '{file}': {ex.Message}");
+                    throw;
+                }
+            }
+        }
+        Log.Info($"HTTP: ZIP stream complete, {sent}/{total} bytes, {files.Count} files");
+    }
+
+    private static string SanitizeEntryName(string name)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+        return string.IsNullOrWhiteSpace(name) ? "file" : name;
+    }
+}

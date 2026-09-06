@@ -1,0 +1,60 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.44.3'
+          cache: true
+
+      - name: Restore Flutter dependencies
+        working-directory: catshare_gui
+        run: flutter pub get
+
+      - name: Analyze Flutter project
+        working-directory: catshare_gui
+        run: flutter analyze
+
+      - name: Publish backend
+        shell: pwsh
+        run: dotnet publish CatShareSender.csproj -c Release -r win-x64 --self-contained true -o artifacts/backend
+
+      - name: Run backend selftest
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender\sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--selftest' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "SELFTEST process exited with $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'SELFTEST PASSED' -Quiet)) { throw 'SELFTEST PASSED not found in sender.log' }
+
+      - name: Run backend mockphone test
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender\sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--mockphone' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "MOCKPHONE process exited with $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKPHONE PASSED' -Quiet)) { throw 'MOCKPHONE PASSED not found in sender.log' }
+
+      - name: Build Flutter Windows release
+        working-directory: catshare_gui
+        run: flutter build windows --release
