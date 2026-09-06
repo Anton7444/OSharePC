@@ -58,19 +58,10 @@ To assemble the production runtime, copy the Flutter release output to `deploy-g
 
 For offline backend checks, run `CatShareSender.exe --selftest` and `CatShareSender.exe --mockphone`. Because the backend is a Windows GUI executable, inspect `%LOCALAPPDATA%\CatShareSender\sender.log` for `SELFTEST PASSED` and `MOCKPHONE PASSED`.
 
-## Privacy
-
-Transfers are designed to occur locally between the Windows PC and the connected device. The application writes operational logs and received files locally; review the configured destination and log path before sharing diagnostic data.
-
 ## Known Limitations
 
 - Device discovery and transfer compatibility depends on the phone's OShare implementation and Windows Bluetooth/Wi-Fi environment.
 - Physical phone testing is required to validate a particular phone model and transfer direction.
-- The project currently has no published open-source license.
-
-## Contributing
-
-Please open an issue with reproducible steps, Windows version, phone/app version, and relevant redacted log excerpts. Pull requests should preserve the existing transfer protocol behavior and include appropriate build or test evidence.
 
 ## Disclaimer
 
