@@ -18,6 +18,7 @@ class BridgeClient extends ChangeNotifier {
   final Set<String> _dismissedTransferIds = {};
   int _lastEventSeq = 0;
   bool _isConnecting = true;
+  bool _pollInFlight = false;
   Timer? _pollTimer;
   Process? _backendProcess;
   bool _backendStartInFlight = false;
@@ -73,6 +74,8 @@ class BridgeClient extends ChangeNotifier {
   }
 
   Future<void> _poll() async {
+    if (_pollInFlight || _disposed) return;
+    _pollInFlight = true;
     try {
       final statusResp = await http
           .get(Uri.parse('$baseUrl/api/status'))
@@ -125,14 +128,19 @@ class BridgeClient extends ChangeNotifier {
           _processEvents(events);
         }
 
-        notifyListeners();
+        if (!_disposed) notifyListeners();
         return;
       }
+
+      _isConnecting = true;
+      if (!_disposed) notifyListeners();
     } catch (_) {
       // Server not reachable yet
       _isConnecting = true;
-      notifyListeners();
+      if (!_disposed) notifyListeners();
       _ensureBackendRunning();
+    } finally {
+      _pollInFlight = false;
     }
   }
 
