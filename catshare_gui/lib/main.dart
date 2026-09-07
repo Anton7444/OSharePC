@@ -7,13 +7,16 @@ import 'pages/home_page.dart';
 import 'services/bridge_client.dart';
 import 'services/tray_service.dart';
 
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
 
   final bridgeClient = BridgeClient();
   final trayService = TrayService(bridgeClient: bridgeClient);
   bridgeClient.onNotification = trayService.showNotification;
   await trayService.init();
+
 
   final startup = Platform.executableArguments.contains('--startup');
   final prefs = await SharedPreferences.getInstance();
@@ -27,10 +30,12 @@ void main() async {
   );
 }
 
+
 class CatShareApp extends StatefulWidget {
   final BridgeClient bridgeClient;
   final TrayService trayService;
   final bool startHidden;
+
 
   const CatShareApp({
     super.key,
@@ -39,13 +44,16 @@ class CatShareApp extends StatefulWidget {
     required this.startHidden,
   });
 
+
   @override
   State<CatShareApp> createState() => _CatShareAppState();
 }
 
+
 class _CatShareAppState extends State<CatShareApp> {
   ThemeMode _themeMode = ThemeMode.dark;
   AppLanguage _language = AppLanguage.english;
+
 
   @override
   void initState() {
@@ -59,25 +67,26 @@ class _CatShareAppState extends State<CatShareApp> {
     }
   }
 
+
   Future<void> _loadLanguage() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       var index = prefs.getInt('language');
+    final marker = File(
+      '${File(Platform.resolvedExecutable).parent.path}/installer-language.txt',
+    );
+    if (await marker.exists()) {
+      final code = (await marker.readAsString()).trim();
       if (index == null) {
-        final marker = File(
-          '${File(Platform.resolvedExecutable).parent.path}\\installer-language.txt',
-        );
-        if (await marker.exists()) {
-          final code = (await marker.readAsString()).trim();
-          index = switch (code) {
-            'zh-CN' => AppLanguage.simplifiedChinese.index,
-            'zh-TW' => AppLanguage.traditionalChinese.index,
-            _ => AppLanguage.english.index,
-          };
-          await prefs.setInt('language', index);
-          await marker.delete();
-        }
+        index = switch (code) {
+          'zh-CN' => AppLanguage.simplifiedChinese.index,
+          'zh-TW' => AppLanguage.traditionalChinese.index,
+          _ => AppLanguage.english.index,
+        };
+        await prefs.setInt('language', index);
       }
+      await marker.delete();
+    }
       final languageIndex = index ?? AppLanguage.english.index;
       setState(() {
         _language =
@@ -86,11 +95,13 @@ class _CatShareAppState extends State<CatShareApp> {
     } catch (_) {}
   }
 
+
   Future<void> _onLanguageChanged(AppLanguage language) async {
     setState(() => _language = language);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('language', language.index);
   }
+
 
   Future<void> _loadThemeMode() async {
     try {
@@ -102,12 +113,14 @@ class _CatShareAppState extends State<CatShareApp> {
     } catch (_) {}
   }
 
+
   Future<void> _onThemeChanged(ThemeMode mode) async {
     setState(() => _themeMode = mode);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('theme_mode', mode.index);
     await widget.bridgeClient.updateSettings(themeMode: mode.index);
   }
+
 
   @override
   void dispose() {
@@ -116,30 +129,6 @@ class _CatShareAppState extends State<CatShareApp> {
     super.dispose();
   }
 
+
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: widget.bridgeClient,
-      builder: (context, _) {
-        return MaterialApp(
-          title: 'OsharePC',
-          debugShowCheckedModeBanner: false,
-          theme: AppTheme.lightTheme,
-          darkTheme: AppTheme.darkTheme,
-          themeMode: _themeMode,
-          locale: _language.locale,
-          supportedLocales: AppLanguage.values.map(
-            (language) => language.locale,
-          ),
-          home: HomePage(
-            client: widget.bridgeClient,
-            currentThemeMode: _themeMode,
-            onThemeChanged: _onThemeChanged,
-            currentLanguage: _language,
-            onLanguageChanged: _onLanguageChanged,
-          ),
-        );
-      },
-    );
-  }
-}
