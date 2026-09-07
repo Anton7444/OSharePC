@@ -51,11 +51,10 @@ jobs:
       - name: Assemble portable runtime
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path 'deploy-gui' -Force | Out-Null
-          Copy-Item -Path 'catshare_gui/build/windows/x64/runner/Release/*' -Destination 'deploy-gui' -Recurse -Force
-          New-Item -ItemType Directory -Path 'deploy-gui/engine' -Force | Out-Null
-          Copy-Item -LiteralPath 'artifacts/backend/CatShareSender.exe' -Destination 'deploy-gui/engine/CatShareSender.exe' -Force
-          Get-ChildItem -Path 'deploy-gui' -Recurse -Include '*.pdb','*.log','gui_out.txt','gui_err.txt' | Remove-Item -Force
+          ./scripts/assemble-portable.ps1 `
+            -GuiRelease 'catshare_gui/build/windows/x64/runner/Release' `
+            -BackendPublish 'artifacts/backend' `
+            -OutputDirectory 'deploy-gui'
       - name: Create portable package
         shell: pwsh
         run: Compress-Archive -Path 'deploy-gui/*' -DestinationPath "OSharePC-Portable-${{ env.RELEASE_VERSION }}-win-x64.zip"

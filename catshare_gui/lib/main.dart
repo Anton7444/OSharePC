@@ -62,7 +62,23 @@ class _CatShareAppState extends State<CatShareApp> {
   Future<void> _loadLanguage() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final index = prefs.getInt('language') ?? 0;
+      var index = prefs.getInt('language');
+      if (index == null) {
+        final marker = File(
+          '${File(Platform.resolvedExecutable).parent.path}\\installer-language.txt',
+        );
+        if (await marker.exists()) {
+          final code = (await marker.readAsString()).trim();
+          index = switch (code) {
+            'zh-CN' => AppLanguage.simplifiedChinese.index,
+            'zh-TW' => AppLanguage.traditionalChinese.index,
+            _ => AppLanguage.english.index,
+          };
+          await prefs.setInt('language', index);
+          await marker.delete();
+        }
+      }
+      index ??= AppLanguage.english.index;
       setState(() {
         _language =
             AppLanguage.values[index.clamp(0, AppLanguage.values.length - 1)];

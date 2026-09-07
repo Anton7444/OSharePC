@@ -23,6 +23,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "startup"; Description: "Launch OShare PC when Windows starts"; GroupDescription: "Startup options:"; Flags: unchecked
@@ -40,3 +41,13 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch OShare PC"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    if ActiveLanguage = 'chinesesimp' then
+      SaveStringToFile(ExpandConstant('{app}\installer-language.txt'), 'zh-CN', False)
+    else
+      SaveStringToFile(ExpandConstant('{app}\installer-language.txt'), 'en', False);
+end;
