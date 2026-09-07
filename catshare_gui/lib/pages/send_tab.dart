@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../config/theme.dart';
@@ -18,6 +19,7 @@ class SendTab extends StatefulWidget {
 
 class _SendTabState extends State<SendTab> {
   final List<String> _selectedFiles = [];
+  bool _isDragging = false;
 
   String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
@@ -39,36 +41,95 @@ class _SendTabState extends State<SendTab> {
     return sum;
   }
 
+  Future<void> _addPaths(List<String> rawPaths) async {
+    if (widget.client.transferState.active) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(appText(widget.language, 'dragDropUnavailable')),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (rawPaths.isEmpty) return;
+
+    final newFiles = <String>[];
+    bool hasError = false;
+
+    for (final rawPath in rawPaths) {
+      final path = rawPath.trim();
+      if (path.isEmpty) continue;
+
+      try {
+        final type = FileSystemEntity.typeSync(path);
+        if (type == FileSystemEntityType.file) {
+          final f = File(path);
+          if (f.existsSync()) {
+            if (!_selectedFiles.contains(path) && !newFiles.contains(path)) {
+              newFiles.add(path);
+            }
+          } else {
+            hasError = true;
+          }
+        } else if (type == FileSystemEntityType.directory) {
+          final dir = Directory(path);
+          if (dir.existsSync()) {
+            final entities = dir.listSync(recursive: true, followLinks: false);
+            for (final entity in entities) {
+              if (entity is File && entity.existsSync()) {
+                if (!_selectedFiles.contains(entity.path) &&
+                    !newFiles.contains(entity.path)) {
+                  newFiles.add(entity.path);
+                }
+              }
+            }
+          } else {
+            hasError = true;
+          }
+        } else {
+          hasError = true;
+        }
+      } catch (e) {
+        debugPrint('Error inspecting path "$path": $e');
+        hasError = true;
+      }
+    }
+
+    if (newFiles.isNotEmpty) {
+      setState(() {
+        _selectedFiles.addAll(newFiles);
+      });
+      _stage();
+    }
+
+    if (hasError && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(appText(widget.language, 'unableToAddDropped')),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   Future<void> _pickFiles() async {
     final files = await FilePicker.pickFiles();
     if (files.isNotEmpty) {
-      setState(() {
-        for (final file in files) {
-          if (file.path != null && !_selectedFiles.contains(file.path!)) {
-            _selectedFiles.add(file.path!);
-          }
-        }
-      });
-      _stage();
+      final paths = files
+          .map((file) => file.path)
+          .whereType<String>()
+          .toList();
+      await _addPaths(paths);
     }
   }
 
   Future<void> _pickFolder() async {
     final dir = await FilePicker.getDirectoryPath();
     if (dir != null) {
-      try {
-        final entities = Directory(dir).listSync(recursive: true);
-        setState(() {
-          for (final entity in entities) {
-            if (entity is File && !_selectedFiles.contains(entity.path)) {
-              _selectedFiles.add(entity.path);
-            }
-          }
-        });
-        _stage();
-      } catch (e) {
-        debugPrint('Folder reading error: $e');
-      }
+      await _addPaths([dir]);
     }
   }
 
@@ -204,197 +265,292 @@ class _SendTabState extends State<SendTab> {
   }
 
   Widget _buildEmptySelection(bool isDark) {
-    return Row(
-      children: [
-        Expanded(
-          child: _buildBigButton(
-            icon: Icons.description_rounded,
-            label: appText(widget.language, 'file'),
-            onTap: _pickFiles,
-            isDark: isDark,
-          ),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: _buildBigButton(
-            icon: Icons.folder_rounded,
-            label: appText(widget.language, 'folder'),
-            onTap: _pickFolder,
-            isDark: isDark,
-          ),
-        ),
-      ],
-    );
-  }
+    final isTransferActive = widget.client.transferState.active;
+    final borderColor = _isDragging
+        ? (isDark ? AppColors.darkAccent : AppColors.lightAccent)
+        : (isDark ? AppColors.darkBorder : AppColors.lightBorder);
+    final bgColor = _isDragging
+        ? (isDark
+            ? const Color(0xFF1B382F)
+            : const Color(0xFFE2F3EC))
+        : (isDark ? AppColors.darkCard : AppColors.lightCard);
 
-  Widget _buildBigButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-    required bool isDark,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        height: 100,
-        decoration: BoxDecoration(
-          color: isDark ? AppColors.darkCard : AppColors.lightCard,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            width: 1,
+    return DropTarget(
+      enable: !isTransferActive,
+      onDragEntered: (_) => setState(() => _isDragging = true),
+      onDragExited: (_) => setState(() => _isDragging = false),
+      onDragDone: (detail) {
+        setState(() => _isDragging = false);
+        _addPaths(detail.files.map((f) => f.path).toList());
+      },
+      child: InkWell(
+        onTap: isTransferActive ? null : _pickFiles,
+        borderRadius: BorderRadius.circular(16),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: double.infinity,
+          height: 140,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: borderColor,
+              width: _isDragging ? 2 : 1,
+            ),
           ),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              icon,
-              size: 32,
-              color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: isDark ? AppColors.darkText : AppColors.lightText,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                _isDragging
+                    ? Icons.file_download_rounded
+                    : Icons.drive_folder_upload_rounded,
+                size: 36,
+                color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
               ),
-            ),
-          ],
+              const SizedBox(height: 10),
+              Text(
+                _isDragging
+                    ? appText(widget.language, 'releaseToAdd')
+                    : appText(widget.language, 'dropFilesHere'),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: isTransferActive ? null : _pickFiles,
+                    icon: const Icon(Icons.description_rounded, size: 16),
+                    label: Text(appText(widget.language, 'file')),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: isDark
+                          ? AppColors.darkAccent
+                          : AppColors.lightAccent,
+                      side: BorderSide(
+                        color: isDark
+                            ? AppColors.darkBorder
+                            : AppColors.lightBorder,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton.icon(
+                    onPressed: isTransferActive ? null : _pickFolder,
+                    icon: const Icon(Icons.folder_rounded, size: 16),
+                    label: Text(appText(widget.language, 'folder')),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: isDark
+                          ? AppColors.darkAccent
+                          : AppColors.lightAccent,
+                      side: BorderSide(
+                        color: isDark
+                            ? AppColors.darkBorder
+                            : AppColors.lightBorder,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildStagedFilesCard(bool isDark) {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: isDark ? AppColors.darkCard : AppColors.lightCard,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-          width: 1,
+    final isTransferActive = widget.client.transferState.active;
+    final borderColor = _isDragging
+        ? (isDark ? AppColors.darkAccent : AppColors.lightAccent)
+        : (isDark ? AppColors.darkBorder : AppColors.lightBorder);
+    final bgColor = _isDragging
+        ? (isDark
+            ? const Color(0xFF1B382F)
+            : const Color(0xFFE2F3EC))
+        : (isDark ? AppColors.darkCard : AppColors.lightCard);
+
+    return DropTarget(
+      enable: !isTransferActive,
+      onDragEntered: (_) => setState(() => _isDragging = true),
+      onDragExited: (_) => setState(() => _isDragging = false),
+      onDragDone: (detail) {
+        setState(() => _isDragging = false);
+        _addPaths(detail.files.map((f) => f.path).toList());
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: borderColor,
+            width: _isDragging ? 2 : 1,
+          ),
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.folder_copy_rounded,
-                size: 20,
-                color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
-              ),
-              const SizedBox(width: 10),
-              Text(
-                '${_selectedFiles.length} ${appText(widget.language, 'files')}',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.folder_copy_rounded,
+                  size: 20,
+                  color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
                 ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '•  ${_formatSize(_totalSize)}',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
+                const SizedBox(width: 10),
+                Text(
+                  '${_selectedFiles.length} ${appText(widget.language, 'files')}',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: isDark ? AppColors.darkText : AppColors.lightText,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '•  ${_formatSize(_totalSize)}',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: isDark
+                        ? AppColors.darkTextMuted
+                        : AppColors.lightTextMuted,
+                  ),
+                ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: isTransferActive ? null : _pickFiles,
+                  icon: const Icon(Icons.add, size: 16),
+                  label: Text(appText(widget.language, 'add')),
+                  style: TextButton.styleFrom(
+                    foregroundColor: isDark
+                        ? AppColors.darkAccent
+                        : AppColors.lightAccent,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  onPressed: isTransferActive ? null : _clearSelection,
+                  icon: const Icon(Icons.close, size: 18),
+                  tooltip: appText(widget.language, 'clear'),
                   color: isDark
                       ? AppColors.darkTextMuted
                       : AppColors.lightTextMuted,
                 ),
-              ),
-              const Spacer(),
-              TextButton.icon(
-                onPressed: _pickFiles,
-                icon: const Icon(Icons.add, size: 16),
-                label: Text(appText(widget.language, 'add')),
-                style: TextButton.styleFrom(
-                  foregroundColor: isDark
-                      ? AppColors.darkAccent
-                      : AppColors.lightAccent,
+              ],
+            ),
+            if (_isDragging) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? AppColors.darkAccent.withOpacity(0.15)
+                      : AppColors.lightAccent.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  appText(widget.language, 'releaseToAdd'),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isDark
+                        ? AppColors.darkAccent
+                        : AppColors.lightAccent,
+                  ),
                 ),
               ),
-              const SizedBox(width: 4),
-              IconButton(
-                onPressed: _clearSelection,
-                icon: const Icon(Icons.close, size: 18),
-                tooltip: appText(widget.language, 'clear'),
-                color: isDark
-                    ? AppColors.darkTextMuted
-                    : AppColors.lightTextMuted,
-              ),
             ],
-          ),
-          const SizedBox(height: 12),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 140),
-            child: ListView.separated(
-              shrinkWrap: true,
-              itemCount: _selectedFiles.length,
-              separatorBuilder: (context, index) => const SizedBox(height: 6),
-              itemBuilder: (context, index) {
-                final filePath = _selectedFiles[index];
-                final fileName = filePath.split(Platform.pathSeparator).last;
-                return Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? const Color(0xFF162520)
-                        : const Color(0xFFEFF5F2),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.insert_drive_file_outlined,
-                        size: 16,
-                        color: isDark
-                            ? AppColors.darkTextMuted
-                            : AppColors.lightTextMuted,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          fileName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 140),
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: _selectedFiles.length,
+                separatorBuilder: (context, index) => const SizedBox(height: 6),
+                itemBuilder: (context, index) {
+                  final filePath = _selectedFiles[index];
+                  final fileName = filePath.split(Platform.pathSeparator).last;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? const Color(0xFF162520)
+                          : const Color(0xFFEFF5F2),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.insert_drive_file_outlined,
+                          size: 16,
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : AppColors.lightTextMuted,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            fileName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: isDark
+                                  ? AppColors.darkText
+                                  : AppColors.lightText,
+                            ),
                           ),
                         ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 14),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                        color: isDark
-                            ? AppColors.darkTextSubtle
-                            : AppColors.lightTextMuted,
-                        onPressed: () {
-                          setState(() => _selectedFiles.removeAt(index));
-                          _stage();
-                        },
-                      ),
-                    ],
-                  ),
-                );
-              },
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 14),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          color: isDark
+                              ? AppColors.darkTextSubtle
+                              : AppColors.lightTextMuted,
+                          onPressed: isTransferActive
+                              ? null
+                              : () {
+                                  setState(() => _selectedFiles.removeAt(index));
+                                  _stage();
+                                },
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

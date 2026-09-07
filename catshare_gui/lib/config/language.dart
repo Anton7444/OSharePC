@@ -89,6 +89,10 @@ String appText(AppLanguage language, String key) {
       'wantsToSend': 'wants to send',
       'decline': 'Decline',
       'accept': 'Accept',
+      'dropFilesHere': 'Drop files or folders here',
+      'releaseToAdd': 'Release to add files',
+      'unableToAddDropped': 'Unable to add dropped item',
+      'dragDropUnavailable': 'Drag and drop is unavailable during transfer',
     },
     'zh-CN': {
       'receive': '接收',
@@ -149,6 +153,10 @@ String appText(AppLanguage language, String key) {
       'wantsToSend': '想要发送',
       'decline': '拒绝',
       'accept': '接受',
+      'dropFilesHere': '将文件或文件夹拖到这里',
+      'releaseToAdd': '松开以添加文件',
+      'unableToAddDropped': '无法添加拖入的项目',
+      'dragDropUnavailable': '传输过程中无法拖放文件',
     },
     'zh-TW': {
       'receive': '接收',
@@ -209,6 +217,10 @@ String appText(AppLanguage language, String key) {
       'wantsToSend': '想要傳送',
       'decline': '拒絕',
       'accept': '接受',
+      'dropFilesHere': '將檔案或資料夾拖到這裡',
+      'releaseToAdd': '放開以新增檔案',
+      'unableToAddDropped': '無法新增拖入的項目',
+      'dragDropUnavailable': '傳送過程中無法拖放檔案',
     },
   };
   final code = switch (language) {

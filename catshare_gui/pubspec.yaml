@@ -43,6 +43,7 @@ dependencies:
   window_manager: ^0.5.2
   ffi: ^2.1.4
   win32: ^6.4.0
+  desktop_drop: ^0.8.4
 
 dev_dependencies:
   flutter_test:
