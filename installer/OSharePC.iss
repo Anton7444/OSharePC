@@ -29,6 +29,10 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 
 
 [Languages]
+; Supported installer languages:
+; - English
+; - 简体中文
+; - 繁體中文
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "{#SourcePath}\languages\ChineseSimplified.isl"
 Name: "chinesetraditional"; MessagesFile: "{#SourcePath}\languages\ChineseTraditional.isl"
