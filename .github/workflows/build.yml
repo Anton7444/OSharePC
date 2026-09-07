@@ -49,3 +49,18 @@ jobs:
       - name: Build Flutter Windows release
         working-directory: catshare_gui
         run: flutter build windows --release
+
+      - name: Assemble runnable Windows build
+        shell: pwsh
+        run: |
+          $release = Join-Path $env:GITHUB_WORKSPACE 'catshare_gui\build\windows\x64\runner\Release'
+          $engine = Join-Path $release 'engine'
+          New-Item -ItemType Directory -Path $engine -Force | Out-Null
+          Copy-Item -Path 'artifacts\backend\*' -Destination $engine -Recurse -Force
+
+      - name: Upload runnable Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: OSharePC-win-x64
+          path: catshare_gui/build/windows/x64/runner/Release
+          if-no-files-found: error
