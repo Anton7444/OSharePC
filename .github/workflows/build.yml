@@ -39,7 +39,7 @@ jobs:
       - name: Run backend selftest
         shell: pwsh
         run: |
-          $log = Join-Path $env:LOCALAPPDATA 'CatShareSendersender.log'
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
           Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
           $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--selftest' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "SELFTEST process exited with $($process.ExitCode)" }
@@ -64,7 +64,7 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          & 'C:Program Files (x86)Inno Setup 6ISCC.exe' '/DMyAppVersion=1.0.0-dev' 'installer/OSharePC.iss'
+          & 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' '/DMyAppVersion=1.0.0-dev' 'installer/OSharePC.iss'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $builtInstaller = 'installer-output/OSharePC-Setup-1.0.0-dev.exe'
           if (-not (Test-Path -LiteralPath $builtInstaller)) { throw "Expected installer output missing: $builtInstaller" }
