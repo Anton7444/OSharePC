@@ -78,10 +78,10 @@ class _CatShareAppState extends State<CatShareApp> {
           await marker.delete();
         }
       }
-      index ??= AppLanguage.english.index;
+      final languageIndex = index ?? AppLanguage.english.index;
       setState(() {
         _language =
-            AppLanguage.values[index.clamp(0, AppLanguage.values.length - 1)];
+            AppLanguage.values[languageIndex.clamp(0, AppLanguage.values.length - 1)];
       });
     } catch (_) {}
   }
