@@ -25,9 +25,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     CreateAndAttachConsole();
   }
 
-  // Initialize COM, so that it is available for use in the library and/or
-  // plugins.
-  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // Initialize OLE and COM, so that OLE drag-and-drop and COM are available
+  // for use in the library and plugins.
+  ::OleInitialize(nullptr);
 
   flutter::DartProject project(L"data");
 
@@ -43,6 +43,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"catshare_gui", origin, size)) {
+    ::OleUninitialize();
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
@@ -53,7 +54,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
-  ::CoUninitialize();
+  ::OleUninitialize();
   if (hMutex) {
     CloseHandle(hMutex);
   }

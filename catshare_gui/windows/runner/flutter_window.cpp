@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "drag_drop_bridge.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project,
                              bool start_hidden)
@@ -26,7 +27,9 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-  SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  HWND content_hwnd = flutter_controller_->view()->GetNativeWindow();
+  SetChildContent(content_hwnd);
+  DragDropBridge::Register(flutter_controller_->engine()->messenger(), content_hwnd);
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     if (!start_hidden_) {

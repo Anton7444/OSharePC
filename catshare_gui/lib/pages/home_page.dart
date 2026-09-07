@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../config/theme.dart';
 import '../config/language.dart';
 import '../services/bridge_client.dart';
+import '../services/outgoing_staging_controller.dart';
 import 'receive_tab.dart';
 import 'send_tab.dart';
 import 'settings_tab.dart';
@@ -28,6 +29,19 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   int _currentIndex = 0;
+  late final OutgoingStagingController _stagingController;
+
+  @override
+  void initState() {
+    super.initState();
+    _stagingController = OutgoingStagingController(bridgeClient: widget.client);
+  }
+
+  @override
+  void dispose() {
+    _stagingController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -182,10 +196,15 @@ class _HomePageState extends State<HomePage> {
                 ReceiveTab(
                   client: widget.client,
                   language: widget.currentLanguage,
+                  stagingController: _stagingController,
+                  isCurrentTab: _currentIndex == 0,
+                  onNavigateToSend: () => setState(() => _currentIndex = 1),
                 ),
                 SendTab(
                   client: widget.client,
                   language: widget.currentLanguage,
+                  stagingController: _stagingController,
+                  isCurrentTab: _currentIndex == 1,
                 ),
                 SettingsTab(
                   client: widget.client,
