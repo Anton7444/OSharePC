@@ -11,31 +11,25 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: '3.44.3'
           cache: true
-
       - name: Restore Flutter dependencies
         working-directory: catshare_gui
         run: flutter pub get
-
       - name: Analyze Flutter project
         working-directory: catshare_gui
         run: flutter analyze
-
       - name: Publish backend
         shell: pwsh
         run: dotnet publish CatShareSender.csproj -c Release -r win-x64 --self-contained true -o artifacts/backend
-
       - name: Run backend selftest
         shell: pwsh
         run: |
@@ -44,23 +38,18 @@ jobs:
           $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--selftest' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "SELFTEST process exited with $($process.ExitCode)" }
           if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'SELFTEST PASSED' -Quiet)) { throw 'SELFTEST PASSED not found in sender.log' }
-
       - name: Build Flutter Windows release
         working-directory: catshare_gui
         run: flutter build windows --release
-
       - name: Assemble runnable Windows build
         shell: pwsh
         run: ./scripts/assemble-portable.ps1 -GuiRelease 'catshare_gui/build/windows/x64/runner/Release' -BackendPublish 'artifacts/backend' -OutputDirectory 'deploy-gui'
-
       - name: Create portable package
         shell: pwsh
         run: Compress-Archive -Path 'deploy-gui/*' -DestinationPath 'OSharePC-Portable-win-x64.zip'
-
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y
-
       - name: Build installer
         shell: pwsh
         run: |
@@ -69,7 +58,6 @@ jobs:
           $builtInstaller = 'installer-output/OSharePC-Setup-1.0.0-dev.exe'
           if (-not (Test-Path -LiteralPath $builtInstaller)) { throw "Expected installer output missing: $builtInstaller" }
           Copy-Item -LiteralPath $builtInstaller -Destination 'OSharePC-Setup-win-x64.exe' -Force
-
       - name: Validate CI packages
         shell: pwsh
         run: |
@@ -82,14 +70,12 @@ jobs:
           if (-not (Test-Path -LiteralPath 'deploy-gui/engine/CatShareSender.exe')) { throw 'Missing deploy-gui/engine/CatShareSender.exe' }
           if (-not (Test-Path -LiteralPath $setup)) { throw "Missing $setup" }
           if ((Get-Item -LiteralPath $setup).Length -le 0) { throw "$setup is empty" }
-
       - name: Upload portable package
         uses: actions/upload-artifact@v4
         with:
           name: OSharePC-Portable-win-x64
           path: OSharePC-Portable-win-x64.zip
           if-no-files-found: error
-
       - name: Upload setup package
         uses: actions/upload-artifact@v4
         with:
