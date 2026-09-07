@@ -1,5 +1,7 @@
 name: Build
 
+# CI packages use one shared assembled runtime.
+
 on:
   push:
     branches: [main]
