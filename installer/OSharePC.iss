@@ -22,6 +22,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
+CloseApplications=yes
 ShowLanguageDialog=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
@@ -40,9 +41,34 @@ Name: "chinesetraditional"; MessagesFile: "{#SourcePath}\languages\ChineseTradit
 
 
 
+[CustomMessages]
+english.StartupGroup=Startup options:
+english.StartupTask=Launch OShare PC when Windows starts
+english.DesktopGroup=Additional shortcuts:
+english.DesktopTask=Create a desktop shortcut
+english.LaunchProgram=Launch OShare PC
+english.UninstallPrompt=Remove OShare PC application data, settings and logs?
+
+chinesesimplified.StartupGroup=启动选项：
+chinesesimplified.StartupTask=Windows 启动时运行 OShare PC
+chinesesimplified.DesktopGroup=附加快捷方式：
+chinesesimplified.DesktopTask=创建桌面快捷方式
+chinesesimplified.LaunchProgram=启动 OShare PC
+chinesesimplified.UninstallPrompt=是否同时删除 OShare PC 的应用数据、设置和日志？
+
+chinesetraditional.StartupGroup=啟動選項：
+chinesetraditional.StartupTask=Windows 啟動時執行 OShare PC
+chinesetraditional.DesktopGroup=其他捷徑：
+chinesetraditional.DesktopTask=建立桌面捷徑
+chinesetraditional.LaunchProgram=啟動 OShare PC
+chinesetraditional.UninstallPrompt=是否同時刪除 OShare PC 的應用程式資料、設定和記錄？
+
+
+
+
 [Tasks]
-Name: "startup"; Description: "Launch OShare PC when Windows starts"; GroupDescription: "Startup options:"; Flags: unchecked
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "startup"; Description: "{cm:StartupTask}"; GroupDescription: "{cm:StartupGroup}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:DesktopTask}"; GroupDescription: "{cm:DesktopGroup}"; Flags: unchecked
 
 
 
@@ -67,19 +93,113 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch OShare PC"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram}"; Flags: nowait postinstall skipifsilent
 
 
 
 
 [Code]
+var
+  UninstallRemoveAllData: Boolean;
+
+procedure StopOShareProcesses(AppDir: String);
+var
+  ResultCode: Integer;
+  PowerShellCmd: String;
+  PowerShellExe: String;
+  CleanAppDir: String;
+begin
+  CleanAppDir := AppDir;
+  if CleanAppDir = '' then
+    Exit;
+  StringChange(CleanAppDir, '''', '''''');
+
+  PowerShellCmd :=
+    '$target = ''' + CleanAppDir + '''.TrimEnd(''\''); ' +
+    'try { ' +
+      '$wr = [System.Net.WebRequest]::Create(''http://127.0.0.1:8960/api/shutdown''); ' +
+      '$wr.Method = ''POST''; ' +
+      '$wr.Timeout = 1500; ' +
+      '$wr.ContentLength = 0; ' +
+      '$res = $wr.GetResponse(); ' +
+      '$res.Close(); ' +
+    '} catch {}; ' +
+    'Get-Process -Name ''catshare_gui'' -ErrorAction SilentlyContinue | Where-Object { ' +
+      'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
+    '} | ForEach-Object { try { $_.CloseMainWindow() } catch {} }; ' +
+    'Start-Sleep -Milliseconds 1200; ' +
+    'Get-Process -Name ''catshare_gui'', ''CatShareSender'' -ErrorAction SilentlyContinue | Where-Object { ' +
+      'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
+    '} | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} }; ' +
+    'Start-Sleep -Milliseconds 300;';
+
+  PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+  if not FileExists(PowerShellExe) then
+    PowerShellExe := 'powershell.exe';
+
+  Exec(PowerShellExe,
+    '-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + PowerShellCmd + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  StopOShareProcesses(ExpandConstant('{app}'));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
     if ActiveLanguage = 'chinesesimplified' then
       SaveStringToFile(ExpandConstant('{app}\installer-language.txt'), 'zh-CN', False)
     else if ActiveLanguage = 'chinesetraditional' then
       SaveStringToFile(ExpandConstant('{app}\installer-language.txt'), 'zh-TW', False)
     else
       SaveStringToFile(ExpandConstant('{app}\installer-language.txt'), 'en', False);
+
+    if not WizardIsTaskSelected('startup') then
+      RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OsharePC');
+  end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  UninstallRemoveAllData := False;
+  Result := True;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+  NetshExe: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    StopOShareProcesses(ExpandConstant('{app}'));
+    if not UninstallSilent then
+      UninstallRemoveAllData := (MsgBox(CustomMessage('UninstallPrompt'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES);
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OsharePC');
+    DeleteFile(ExpandConstant('{app}\installer-language.txt'));
+
+    if UninstallRemoveAllData then
+    begin
+      DelTree(ExpandConstant('{localappdata}\CatShareSender'), True, True, True);
+      DelTree(ExpandConstant('{userappdata}\com.catshare\catshare_gui'), True, True, True);
+      RemoveDir(ExpandConstant('{userappdata}\com.catshare'));
+      DelTree(ExpandConstant('{userappdata}\CatShare'), True, True, True);
+
+      NetshExe := ExpandConstant('{sys}\netsh.exe');
+      if not FileExists(NetshExe) then
+        NetshExe := 'netsh.exe';
+      Exec(NetshExe, 'advfirewall firewall delete rule name="CatShareSender"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(NetshExe, 'advfirewall firewall delete rule name="CatShareSenderBandEcho"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
+
+    RemoveDir(ExpandConstant('{app}'));
+  end;
 end;

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'config/theme.dart';
 import 'config/language.dart';
@@ -21,11 +22,39 @@ void main() async {
   final startup = Platform.executableArguments.contains('--startup');
   final prefs = await SharedPreferences.getInstance();
   final startMinimized = prefs.getBool('start_minimized') ?? false;
+
+  AppLanguage initialLanguage = AppLanguage.english;
+  final hasSavedLanguage = prefs.containsKey('language');
+
+  try {
+    final exeDir = p.dirname(Platform.resolvedExecutable);
+    final marker = File(p.join(exeDir, 'installer-language.txt'));
+    if (await marker.exists()) {
+      final code = (await marker.readAsString()).trim();
+      if (!hasSavedLanguage) {
+        initialLanguage = switch (code) {
+          'zh-CN' => AppLanguage.simplifiedChinese,
+          'zh-TW' => AppLanguage.traditionalChinese,
+          _ => AppLanguage.english,
+        };
+        await prefs.setInt('language', initialLanguage.index);
+      }
+      await marker.delete();
+    }
+  } catch (_) {}
+
+  if (hasSavedLanguage) {
+    final savedIndex = prefs.getInt('language') ?? AppLanguage.english.index;
+    initialLanguage = AppLanguage.values[
+        savedIndex.clamp(0, AppLanguage.values.length - 1)];
+  }
+
   runApp(
     CatShareApp(
       bridgeClient: bridgeClient,
       trayService: trayService,
       startHidden: startup || startMinimized,
+      initialLanguage: initialLanguage,
     ),
   );
 }
@@ -35,6 +64,7 @@ class CatShareApp extends StatefulWidget {
   final BridgeClient bridgeClient;
   final TrayService trayService;
   final bool startHidden;
+  final AppLanguage initialLanguage;
 
 
   const CatShareApp({
@@ -42,6 +72,7 @@ class CatShareApp extends StatefulWidget {
     required this.bridgeClient,
     required this.trayService,
     required this.startHidden,
+    required this.initialLanguage,
   });
 
 
@@ -52,47 +83,19 @@ class CatShareApp extends StatefulWidget {
 
 class _CatShareAppState extends State<CatShareApp> {
   ThemeMode _themeMode = ThemeMode.dark;
-  AppLanguage _language = AppLanguage.english;
+  late AppLanguage _language;
 
 
   @override
   void initState() {
     super.initState();
+    _language = widget.initialLanguage;
     _loadThemeMode();
-    _loadLanguage();
     if (widget.startHidden) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         widget.trayService.setStartHidden(true);
       });
     }
-  }
-
-
-  Future<void> _loadLanguage() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      var index = prefs.getInt('language');
-      final marker = File(
-        '${File(Platform.resolvedExecutable).parent.path}\\installer-language.txt',
-      );
-      if (await marker.exists()) {
-        final code = (await marker.readAsString()).trim();
-        if (index == null) {
-          index = switch (code) {
-            'zh-CN' => AppLanguage.simplifiedChinese.index,
-            'zh-TW' => AppLanguage.traditionalChinese.index,
-            _ => AppLanguage.english.index,
-          };
-          await prefs.setInt('language', index);
-        }
-        await marker.delete();
-      }
-      final languageIndex = index ?? AppLanguage.english.index;
-      setState(() {
-        _language =
-            AppLanguage.values[languageIndex.clamp(0, AppLanguage.values.length - 1)];
-      });
-    } catch (_) {}
   }
 
   Future<void> _onLanguageChanged(AppLanguage language) async {
