@@ -468,8 +468,8 @@ class _SendTabState extends State<SendTab> {
                 padding: const EdgeInsets.symmetric(vertical: 6),
                 decoration: BoxDecoration(
                   color: isDark
-                      ? AppColors.darkAccent.withOpacity(0.15)
-                      : AppColors.lightAccent.withOpacity(0.15),
+                      ? const Color(0xFF1E3F35)
+                      : const Color(0xFFD4EDE5),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
