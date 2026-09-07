@@ -60,22 +60,6 @@ class _HomePageState extends State<HomePage> {
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Row(
                     children: [
-                      Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: isDark
-                              ? AppColors.darkAccent
-                              : AppColors.lightAccent,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Icon(
-                          Icons.pets_rounded,
-                          size: 20,
-                          color: Color(0xFF072920),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
                       Text(
                         'OsharePC',
                         style: TextStyle(
