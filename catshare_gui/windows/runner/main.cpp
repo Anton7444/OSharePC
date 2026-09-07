@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <iostream>
 
 #include "flutter_window.h"
 #include "utils.h"
@@ -27,7 +28,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   // Initialize OLE and COM, so that OLE drag-and-drop and COM are available
   // for use in the library and plugins.
-  ::OleInitialize(nullptr);
+  HRESULT ole_hr = ::OleInitialize(nullptr);
+  const bool ole_initialized = SUCCEEDED(ole_hr);
+  if (!ole_initialized) {
+    std::cerr << "[Main] OleInitialize failed with HRESULT: 0x"
+              << std::hex << ole_hr << std::dec << std::endl;
+  }
 
   flutter::DartProject project(L"data");
 
@@ -43,7 +49,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"catshare_gui", origin, size)) {
-    ::OleUninitialize();
+    if (ole_initialized) {
+      ::OleUninitialize();
+    }
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
@@ -54,7 +62,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
-  ::OleUninitialize();
+  if (ole_initialized) {
+    ::OleUninitialize();
+  }
   if (hMutex) {
     CloseHandle(hMutex);
   }

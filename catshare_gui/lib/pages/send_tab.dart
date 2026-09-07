@@ -1,4 +1,4 @@
-﻿import 'dart:io';
+import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../config/theme.dart';
@@ -42,20 +42,6 @@ class _SendTabState extends State<SendTab> {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
-  }
-
-  int get _computedTotalSize {
-    if (widget.stagingController.totalBytes > 0) {
-      return widget.stagingController.totalBytes;
-    }
-    int sum = 0;
-    for (final path in widget.stagingController.selectedFiles) {
-      try {
-        final f = File(path);
-        if (f.existsSync()) sum += f.lengthSync();
-      } catch (_) {}
-    }
-    return sum;
   }
 
   Future<void> _handleDroppedPaths(List<String> paths) async {
@@ -104,6 +90,22 @@ class _SendTabState extends State<SendTab> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+      return;
+    }
+    if (widget.stagingController.isStaging ||
+        !widget.stagingController.hasValidStagedSelection) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.stagingController.stagingError ??
+                appText(widget.language, 'stagingFailed'),
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+    if (_isTransferActive) {
       return;
     }
     widget.client.sendToDevice(device);
@@ -352,7 +354,7 @@ class _SendTabState extends State<SendTab> {
               ),
               const SizedBox(width: 10),
               Text(
-                '${selectedFiles.length} ${appText(widget.language, 'files')}',
+                '${widget.stagingController.totalCount} ${appText(widget.language, 'files')}',
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w700,
@@ -361,7 +363,7 @@ class _SendTabState extends State<SendTab> {
               ),
               const SizedBox(width: 8),
               Text(
-                '•  ${_formatSize(_computedTotalSize)}',
+                '•  ${_formatSize(widget.stagingController.totalBytes)}',
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w500,

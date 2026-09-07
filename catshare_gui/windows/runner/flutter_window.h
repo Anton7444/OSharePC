@@ -8,6 +8,8 @@
 
 #include "win32_window.h"
 
+class DragDropBridge;
+
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
  public:
@@ -28,6 +30,9 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // The native OLE drag & drop bridge.
+  DragDropBridge* drag_drop_bridge_ = nullptr;
 
   // Startup launches stay hidden while the tray service is initialized.
   bool start_hidden_;

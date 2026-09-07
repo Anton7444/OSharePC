@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import '../config/theme.dart';
 import '../config/language.dart';
 import '../models/models.dart';
@@ -66,6 +66,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
       language: widget.language,
     );
     if (success && mounted) {
+      widget.client.dismissTransferModal();
       widget.onNavigateToSend();
     } else if (widget.stagingController.stagingError != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -86,7 +87,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
     final ipParts = _formatIpAsHashes(status.lanIp);
 
     return NativeDropZone(
-      enabled: widget.isCurrentTab,
+      enabled: widget.isCurrentTab && _isDropAllowed,
       onDragStateChanged: (isDragging) {
         setState(() => _isDragging = isDragging);
       },

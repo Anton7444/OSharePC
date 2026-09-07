@@ -9,7 +9,13 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project,
                              bool start_hidden)
     : project_(project), start_hidden_(start_hidden) {}
 
-FlutterWindow::~FlutterWindow() {}
+FlutterWindow::~FlutterWindow() {
+  if (drag_drop_bridge_) {
+    drag_drop_bridge_->Revoke();
+    drag_drop_bridge_->Release();
+    drag_drop_bridge_ = nullptr;
+  }
+}
 
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
@@ -29,7 +35,7 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   HWND content_hwnd = flutter_controller_->view()->GetNativeWindow();
   SetChildContent(content_hwnd);
-  DragDropBridge::Register(flutter_controller_->engine()->messenger(), content_hwnd);
+  drag_drop_bridge_ = DragDropBridge::Register(flutter_controller_->engine()->messenger(), content_hwnd);
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     if (!start_hidden_) {
@@ -46,6 +52,12 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (drag_drop_bridge_) {
+    drag_drop_bridge_->Revoke();
+    drag_drop_bridge_->Release();
+    drag_drop_bridge_ = nullptr;
+  }
+
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

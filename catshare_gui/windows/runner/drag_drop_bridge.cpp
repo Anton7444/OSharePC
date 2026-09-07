@@ -1,4 +1,4 @@
-﻿#include "drag_drop_bridge.h"
+#include "drag_drop_bridge.h"
 
 #include <iostream>
 
@@ -15,15 +15,13 @@ std::string WideToUtf8(const std::wstring& wstr) {
   return result;
 }
 
-static DragDropBridge* g_instance = nullptr;
-
 }  // namespace
 
-void DragDropBridge::Register(flutter::BinaryMessenger* messenger, HWND window_handle) {
+DragDropBridge* DragDropBridge::Register(flutter::BinaryMessenger* messenger, HWND window_handle) {
   auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       messenger, "catshare/drag_drop", &flutter::StandardMethodCodec::GetInstance());
   auto bridge = new DragDropBridge(std::move(channel), window_handle);
-  g_instance = bridge;
+  return bridge;
 }
 
 DragDropBridge::DragDropBridge(
@@ -34,22 +32,28 @@ DragDropBridge::DragDropBridge(
 }
 
 DragDropBridge::~DragDropBridge() {
+  Revoke();
+}
+
+void DragDropBridge::Revoke() {
   if (registered_ && window_handle_ != nullptr) {
     RevokeDragDrop(window_handle_);
     registered_ = false;
+    std::cout << "[DragDropBridge] RevokeDragDrop called for HWND " << window_handle_ << std::endl;
   }
 }
 
 void DragDropBridge::EnsureRegistered() {
-  if (window_handle_ == nullptr) return;
+  if (window_handle_ == nullptr || registered_) return;
   HRESULT hr = RegisterDragDrop(window_handle_, this);
   if (SUCCEEDED(hr)) {
     registered_ = true;
     std::cout << "[DragDropBridge] RegisterDragDrop succeeded on HWND " << window_handle_ << std::endl;
   } else if (hr == DRAGDROP_E_ALREADYREGISTERED) {
-    registered_ = true;
-    std::cout << "[DragDropBridge] Already registered on HWND " << window_handle_ << std::endl;
+    registered_ = false;
+    std::cout << "[DragDropBridge] HWND " << window_handle_ << " already has a registered drop target" << std::endl;
   } else {
+    registered_ = false;
     std::cout << "[DragDropBridge] RegisterDragDrop failed with hr: 0x" << std::hex << hr << std::dec << std::endl;
   }
 }
@@ -122,40 +126,33 @@ void DragDropBridge::HandleDragPosition(const char* method, POINTL pt) {
 }
 
 HRESULT __stdcall DragDropBridge::DragEnter(IDataObject* pDataObj, DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) {
+  if (pdwEffect == nullptr) {
+    return E_INVALIDARG;
+  }
+
   FORMATETC fmt = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
   has_files_ = (pDataObj && pDataObj->QueryGetData(&fmt) == S_OK);
 
-  if (has_files_) {
-    if (pdwEffect) {
-      if (*pdwEffect & DROPEFFECT_COPY) {
-        *pdwEffect = DROPEFFECT_COPY;
-      } else if (*pdwEffect & DROPEFFECT_LINK) {
-        *pdwEffect = DROPEFFECT_LINK;
-      }
-    }
+  if (has_files_ && (*pdwEffect & DROPEFFECT_COPY)) {
+    *pdwEffect = DROPEFFECT_COPY;
+    std::cout << "[DragDropBridge] DragEnter: files detected, advertising DROPEFFECT_COPY" << std::endl;
     HandleDragPosition("entered", pt);
   } else {
-    if (pdwEffect) {
-      *pdwEffect = DROPEFFECT_NONE;
-    }
+    *pdwEffect = DROPEFFECT_NONE;
   }
   return S_OK;
 }
 
 HRESULT __stdcall DragDropBridge::DragOver(DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) {
-  if (has_files_) {
-    if (pdwEffect) {
-      if (*pdwEffect & DROPEFFECT_COPY) {
-        *pdwEffect = DROPEFFECT_COPY;
-      } else if (*pdwEffect & DROPEFFECT_LINK) {
-        *pdwEffect = DROPEFFECT_LINK;
-      }
-    }
+  if (pdwEffect == nullptr) {
+    return E_INVALIDARG;
+  }
+
+  if (has_files_ && (*pdwEffect & DROPEFFECT_COPY)) {
+    *pdwEffect = DROPEFFECT_COPY;
     HandleDragPosition("updated", pt);
   } else {
-    if (pdwEffect) {
-      *pdwEffect = DROPEFFECT_NONE;
-    }
+    *pdwEffect = DROPEFFECT_NONE;
   }
   return S_OK;
 }
@@ -167,18 +164,17 @@ HRESULT __stdcall DragDropBridge::DragLeave() {
 }
 
 HRESULT __stdcall DragDropBridge::Drop(IDataObject* pDataObj, DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) {
-  if (!has_files_) {
-    if (pdwEffect) *pdwEffect = DROPEFFECT_NONE;
+  if (pdwEffect == nullptr) {
+    return E_INVALIDARG;
+  }
+
+  if (!has_files_ || !(*pdwEffect & DROPEFFECT_COPY)) {
+    *pdwEffect = DROPEFFECT_NONE;
+    has_files_ = false;
     return S_OK;
   }
 
-  if (pdwEffect) {
-    if (*pdwEffect & DROPEFFECT_COPY) {
-      *pdwEffect = DROPEFFECT_COPY;
-    } else if (*pdwEffect & DROPEFFECT_LINK) {
-      *pdwEffect = DROPEFFECT_LINK;
-    }
-  }
+  *pdwEffect = DROPEFFECT_COPY;
 
   POINT client_pt = {pt.x, pt.y};
   if (window_handle_ != nullptr) {
@@ -186,7 +182,7 @@ HRESULT __stdcall DragDropBridge::Drop(IDataObject* pDataObj, DWORD grfKeyState,
   }
 
   std::vector<std::string> paths = ExtractFilePaths(pDataObj);
-  std::cout << "[DragDropBridge] Drop received with " << paths.size() << " files" << std::endl;
+  std::cout << "[DragDropBridge] Drop accepted with " << paths.size() << " files" << std::endl;
 
   flutter::EncodableList encodable_paths;
   encodable_paths.reserve(paths.size());

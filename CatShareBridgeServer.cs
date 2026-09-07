@@ -198,7 +198,12 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
 
         app.MapPost("/api/stage", (StageRequest body) =>
         {
-            var files = body.Files?.Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? [];
+            if (body.Files is null || body.Files.Length == 0)
+            {
+                _engine.ClearStaged();
+                return Results.Ok(new { taskId = "", fileCount = 0, totalSize = 0L, cleared = true });
+            }
+            var files = body.Files.Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (files.Length == 0)
             {
                 _engine.ClearStaged();

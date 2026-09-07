@@ -1,4 +1,4 @@
-﻿#ifndef RUNNER_DRAG_DROP_BRIDGE_H_
+#ifndef RUNNER_DRAG_DROP_BRIDGE_H_
 #define RUNNER_DRAG_DROP_BRIDGE_H_
 
 #include <flutter/binary_messenger.h>
@@ -14,7 +14,7 @@
 
 class DragDropBridge : public IDropTarget {
  public:
-  static void Register(flutter::BinaryMessenger* messenger, HWND window_handle);
+  static DragDropBridge* Register(flutter::BinaryMessenger* messenger, HWND window_handle);
 
   DragDropBridge(std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel,
                  HWND window_handle);
@@ -31,6 +31,8 @@ class DragDropBridge : public IDropTarget {
   HRESULT __stdcall Drop(IDataObject* pDataObj, DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) override;
 
   void EnsureRegistered();
+  void Revoke();
+  bool IsRegistered() const { return registered_; }
 
  private:
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
