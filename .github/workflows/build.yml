@@ -9,7 +9,6 @@ on:
 jobs:
   build:
     runs-on: windows-2022
-
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +39,7 @@ jobs:
       - name: Run backend selftest
         shell: pwsh
         run: |
-          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender\sender.log'
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSendersender.log'
           Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
           $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--selftest' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "SELFTEST process exited with $($process.ExitCode)" }
@@ -52,19 +51,48 @@ jobs:
 
       - name: Assemble runnable Windows build
         shell: pwsh
-        run: |
-          ./scripts/assemble-portable.ps1 `
-            -GuiRelease 'catshare_gui/build/windows/x64/runner/Release' `
-            -BackendPublish 'artifacts/backend' `
-            -OutputDirectory 'artifacts/portable'
+        run: ./scripts/assemble-portable.ps1 -GuiRelease 'catshare_gui/build/windows/x64/runner/Release' -BackendPublish 'artifacts/backend' -OutputDirectory 'deploy-gui'
 
       - name: Create portable package
         shell: pwsh
-        run: Compress-Archive -Path 'artifacts/portable/*' -DestinationPath 'OSharePC-Portable-win-x64.zip'
+        run: Compress-Archive -Path 'deploy-gui/*' -DestinationPath 'OSharePC-Portable-win-x64.zip'
 
-      - name: Upload runnable Windows build
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & 'C:Program Files (x86)Inno Setup 6ISCC.exe' '/DMyAppVersion=1.0.0-dev' 'installer/OSharePC.iss'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $builtInstaller = 'installer-output/OSharePC-Setup-1.0.0-dev.exe'
+          if (-not (Test-Path -LiteralPath $builtInstaller)) { throw "Expected installer output missing: $builtInstaller" }
+          Copy-Item -LiteralPath $builtInstaller -Destination 'OSharePC-Setup-win-x64.exe' -Force
+
+      - name: Validate CI packages
+        shell: pwsh
+        run: |
+          $zip = 'OSharePC-Portable-win-x64.zip'
+          $setup = 'OSharePC-Setup-win-x64.exe'
+          if (-not (Test-Path -LiteralPath $zip)) { throw "Missing $zip" }
+          if ((Get-Item -LiteralPath $zip).Length -le 0) { throw "$zip is empty" }
+          if (-not (Test-Path -LiteralPath 'deploy-gui/catshare_gui.exe')) { throw 'Missing deploy-gui/catshare_gui.exe' }
+          if (-not (Test-Path -LiteralPath 'deploy-gui/data/flutter_assets')) { throw 'Missing deploy-gui/data/flutter_assets' }
+          if (-not (Test-Path -LiteralPath 'deploy-gui/engine/CatShareSender.exe')) { throw 'Missing deploy-gui/engine/CatShareSender.exe' }
+          if (-not (Test-Path -LiteralPath $setup)) { throw "Missing $setup" }
+          if ((Get-Item -LiteralPath $setup).Length -le 0) { throw "$setup is empty" }
+
+      - name: Upload portable package
         uses: actions/upload-artifact@v4
         with:
-          name: OSharePC-win-x64
+          name: OSharePC-Portable-win-x64
           path: OSharePC-Portable-win-x64.zip
+          if-no-files-found: error
+
+      - name: Upload setup package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OSharePC-Setup-win-x64
+          path: OSharePC-Setup-win-x64.exe
           if-no-files-found: error
