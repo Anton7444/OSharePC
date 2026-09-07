@@ -335,7 +335,15 @@ public sealed class SenderEngine : IDisposable
 
             TransferStateChanged?.Invoke(_staged.TaskId, "OConnect transfer starting…");
             Server.PeerLooksStock = true;   // OConnect peers are stock 互传 receivers
-            await link.OConnectLanSendAsync(Lan, Port, _crypto, Advertiser.DeviceName, _staged.FileCount, s => TransferStateChanged?.Invoke(_staged.TaskId, s), ct: ct);
+            await link.OConnectLanSendAsync(
+                Lan,
+                Port,
+                _crypto,
+                Advertiser.DeviceName,
+                _staged.FileCount,
+                s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                phoneConnected: () => Server.WsConnected,
+                ct: ct);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
             return;
         }
