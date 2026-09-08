@@ -238,9 +238,24 @@ public sealed class TransferServer : IAsyncDisposable
                 return;
             }
 
-            object sendPayload = task.IsUrl
-                ? new { taskId = task.TaskId, isMessageSend = "true", messageId = task.MessageId }
-                : task.BuildSendRequest();
+            object sendPayload;
+            if (task.IsUrl)
+            {
+                // Android/ColorOS 16 does not fetch the desktop-style /bigmessage
+                // endpoint after isMessageSend. Real-device traces show it can go
+                // straight to /download with an empty taskId. Include the complete
+                // URL TaskInfo inline so receivers that understand http/* need no
+                // second metadata request; keep messageId for desktop compatibility.
+                var urlPayload = task.BuildUrlBigMessage();
+                urlPayload["isMessageSend"] = "true";
+                urlPayload["messageId"] = task.MessageId;
+                sendPayload = urlPayload;
+            }
+            else
+            {
+                sendPayload = task.BuildSendRequest();
+            }
+
             var sendReq = Envelope.Build("action", seq++, "sendRequest", sendPayload);
             Log.Info($"WS: -> {sendReq}");
             await session.SendText(sendReq);
@@ -255,7 +270,7 @@ public sealed class TransferServer : IAsyncDisposable
             }
             else if (task.IsUrl)
             {
-                Log.Info("WS: URL share uses /bigmessage; skipping raw 'files' trigger");
+                Log.Info("WS: URL metadata sent inline; /bigmessage and Android /download compatibility endpoints remain available");
             }
             else
             {
@@ -409,6 +424,27 @@ public sealed class TransferServer : IAsyncDisposable
 
     // ---------------------------------------------------------------- HTTP payloads
 
+    private static Dictionary<string, object> BuildUrlHttpPayload(TransferTask task)
+    {
+        var payload = task.BuildUrlBigMessage();
+        payload["isMessageSend"] = "true";
+        payload["messageId"] = task.MessageId;
+        return payload;
+    }
+
+    private async Task WriteUrlPayloadAsync(HttpContext ctx, TransferTask task, string endpoint)
+    {
+        var json = JsonSerializer.Serialize(BuildUrlHttpPayload(task));
+        var bytes = Encoding.UTF8.GetBytes(json);
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/json; charset=utf-8";
+        ctx.Response.ContentLength = bytes.Length;
+        ctx.Response.Headers["Cache-Control"] = "no-store";
+        await ctx.Response.Body.WriteAsync(bytes, ctx.RequestAborted);
+        await ctx.Response.CompleteAsync();
+        Log.Info($"HTTP: URL payload served via {endpoint} for taskId={task.TaskId}, {bytes.Length} bytes");
+    }
+
     private async Task HandleBigMessage(HttpContext ctx)
     {
         var taskId = ctx.Request.Query["taskId"].FirstOrDefault() ?? "";
@@ -424,10 +460,7 @@ public sealed class TransferServer : IAsyncDisposable
             return;
         }
 
-        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
-        ctx.Response.ContentType = "application/json; charset=utf-8";
-        await ctx.Response.WriteAsync(JsonSerializer.Serialize(task.BuildUrlBigMessage()));
-        Log.Info($"HTTP: URL big-message served for taskId={task.TaskId}");
+        await WriteUrlPayloadAsync(ctx, task, "/bigmessage");
     }
 
     private async Task HandleDownload(HttpContext ctx)
@@ -438,9 +471,34 @@ public sealed class TransferServer : IAsyncDisposable
         Log.Info($"HTTP GET /download taskId='{taskId}' fileId='{fileId}' nd_zip='{ndZip}' from {ctx.Connection.RemoteIpAddress}");
 
         var task = _activeTask;
-        if (task is null || task.IsUrl || string.IsNullOrEmpty(taskId) || task.TaskId != taskId)
+        if (task is null)
         {
-            Log.Warn("HTTP: unknown, stale, or non-file taskId");
+            Log.Warn("HTTP: no active task");
+            ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+            await ctx.Response.WriteAsync("unknown task");
+            return;
+        }
+
+        if (task.IsUrl)
+        {
+            // ColorOS 16 real-device behavior: message-send ACK is followed by
+            // GET /download?taskId= (empty). Accept an empty id only for the
+            // currently active URL task. A non-empty mismatched id remains 404.
+            if (!string.IsNullOrEmpty(taskId) && task.TaskId != taskId)
+            {
+                Log.Warn($"HTTP: URL /download taskId mismatch ('{taskId}')");
+                ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                await ctx.Response.WriteAsync("unknown task");
+                return;
+            }
+
+            await WriteUrlPayloadAsync(ctx, task, "/download compatibility path");
+            return;
+        }
+
+        if (string.IsNullOrEmpty(taskId) || task.TaskId != taskId)
+        {
+            Log.Warn("HTTP: unknown or stale file taskId");
             ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
             await ctx.Response.WriteAsync("unknown task");
             return;
