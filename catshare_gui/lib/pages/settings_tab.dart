@@ -105,6 +105,17 @@ class _SettingsTabState extends State<SettingsTab> {
     }
   }
 
+  Future<void> _openLogFolder() async {
+    final localAppData = Platform.environment['LOCALAPPDATA'];
+    if (localAppData == null || localAppData.isEmpty) return;
+
+    final dir = Directory('$localAppData\\CatShareSender');
+    if (!dir.existsSync()) {
+      dir.createSync(recursive: true);
+    }
+    await Process.start('explorer.exe', [dir.path]);
+  }
+
   @override
   void dispose() {
     super.dispose();
@@ -487,6 +498,64 @@ class _SettingsTabState extends State<SettingsTab> {
               appText(widget.currentLanguage, 'bridgeServer'),
               'http://127.0.0.1:8960',
               isDark,
+            ),
+            Divider(
+              height: 1,
+              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          appText(widget.currentLanguage, 'logFolder'),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '%LOCALAPPDATA%\\CatShareSender',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _openLogFolder,
+                    icon: const Icon(Icons.folder_open, size: 16),
+                    label: Text(
+                      appText(widget.currentLanguage, 'openLogFolder'),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: isDark
+                          ? AppColors.darkAccent
+                          : AppColors.lightAccent,
+                      side: BorderSide(
+                        color: isDark
+                            ? AppColors.darkBorder
+                            : AppColors.lightBorder,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
             Divider(
               height: 1,
