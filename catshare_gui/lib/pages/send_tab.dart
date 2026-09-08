@@ -44,6 +44,18 @@ class _SendTabState extends State<SendTab> {
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
+  bool _isValidUrlInput(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty || value.length > 8192) return false;
+    if (RegExp(r'\s').hasMatch(value) ||
+        RegExp(r'[\x00-\x1F\x7F]').hasMatch(value)) {
+      return false;
+    }
+    final uri = Uri.tryParse(value);
+    if (uri == null || !uri.isAbsolute || uri.host.isEmpty) return false;
+    return uri.scheme == 'http' || uri.scheme == 'https';
+  }
+
   Future<void> _handleDroppedPaths(List<String> paths) async {
     setState(() => _isDragging = false);
     await widget.stagingController.addPaths(paths, language: widget.language);
@@ -70,6 +82,106 @@ class _SendTabState extends State<SendTab> {
     }
   }
 
+  Future<void> _showUrlDialog() async {
+    if (_isTransferActive) return;
+    final controller = TextEditingController(
+      text: widget.stagingController.stagedUrl ?? '',
+    );
+    String? errorText;
+    bool submitting = false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            Future<void> submit() async {
+              final raw = controller.text.trim();
+              if (!_isValidUrlInput(raw)) {
+                setDialogState(() {
+                  errorText = appText(widget.language, 'invalidLink');
+                });
+                return;
+              }
+
+              setDialogState(() {
+                submitting = true;
+                errorText = null;
+              });
+              final ok = await widget.stagingController.stageUrl(
+                raw,
+                language: widget.language,
+              );
+              if (!dialogContext.mounted) return;
+              if (ok) {
+                Navigator.of(dialogContext).pop();
+                return;
+              }
+              setDialogState(() {
+                submitting = false;
+                errorText = widget.stagingController.stagingError ??
+                    appText(widget.language, 'urlStagingFailed');
+              });
+            }
+
+            return AlertDialog(
+              title: Row(
+                children: [
+                  const Icon(Icons.link_rounded),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(appText(widget.language, 'shareLink'))),
+                ],
+              ),
+              content: SizedBox(
+                width: 460,
+                child: TextField(
+                  controller: controller,
+                  autofocus: true,
+                  enabled: !submitting,
+                  keyboardType: TextInputType.url,
+                  textInputAction: TextInputAction.done,
+                  decoration: InputDecoration(
+                    hintText: appText(widget.language, 'pasteLink'),
+                    errorText: errorText,
+                    prefixIcon: const Icon(Icons.language_rounded),
+                  ),
+                  onChanged: (_) {
+                    if (errorText != null) {
+                      setDialogState(() => errorText = null);
+                    }
+                  },
+                  onSubmitted: (_) {
+                    if (!submitting) submit();
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: submitting
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(),
+                  child: Text(appText(widget.language, 'cancelTransfer')),
+                ),
+                FilledButton.icon(
+                  onPressed: submitting ? null : submit,
+                  icon: submitting
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.check_rounded, size: 18),
+                  label: Text(appText(widget.language, 'shareLink')),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    controller.dispose();
+  }
+
   void _checkStagingError() {
     final error = widget.stagingController.stagingError;
     if (error != null && mounted) {
@@ -83,31 +195,28 @@ class _SendTabState extends State<SendTab> {
   }
 
   void _sendTo(DeviceModel device) {
-    if (widget.stagingController.selectedFiles.isEmpty) {
+    final controller = widget.stagingController;
+    if (controller.selectedFiles.isEmpty && !controller.isUrlStaged) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(appText(widget.language, 'selectFiles')),
+          content: Text(appText(widget.language, 'selectFilesOrLink')),
           behavior: SnackBarBehavior.floating,
         ),
       );
       return;
     }
-    if (widget.stagingController.isStaging ||
-        !widget.stagingController.hasValidStagedSelection) {
+    if (controller.isStaging || !controller.hasValidStagedSelection) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            widget.stagingController.stagingError ??
-                appText(widget.language, 'stagingFailed'),
+            controller.stagingError ?? appText(widget.language, 'stagingFailed'),
           ),
           behavior: SnackBarBehavior.floating,
         ),
       );
       return;
     }
-    if (_isTransferActive) {
-      return;
-    }
+    if (_isTransferActive) return;
     widget.client.sendToDevice(device);
   }
 
@@ -122,6 +231,7 @@ class _SendTabState extends State<SendTab> {
       listenable: widget.stagingController,
       builder: (context, _) {
         final selectedFiles = widget.stagingController.selectedFiles;
+        final stagedUrl = widget.stagingController.stagedUrl;
         return NativeDropZone(
           enabled: widget.isCurrentTab && !_isTransferActive,
           onDragStateChanged: (isDragging) {
@@ -133,7 +243,6 @@ class _SendTabState extends State<SendTab> {
               ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
                 children: [
-                  // Section 1: Selection Header
                   Text(
                     appText(widget.language, 'selection'),
                     style: TextStyle(
@@ -143,15 +252,13 @@ class _SendTabState extends State<SendTab> {
                     ),
                   ),
                   const SizedBox(height: 14),
-
-                  if (selectedFiles.isEmpty)
+                  if (stagedUrl != null && stagedUrl.isNotEmpty)
+                    _buildStagedUrlCard(isDark, stagedUrl)
+                  else if (selectedFiles.isEmpty)
                     _buildEmptySelection(isDark)
                   else
                     _buildStagedFilesCard(isDark, selectedFiles),
-
                   const SizedBox(height: 32),
-
-                  // Section 2: Nearby Devices Header
                   Row(
                     children: [
                       Text(
@@ -203,20 +310,38 @@ class _SendTabState extends State<SendTab> {
                     ],
                   ),
                   const SizedBox(height: 16),
-
                   if (devices.isEmpty)
                     _buildNoDevicesCard(isDark)
                   else
                     _buildDeviceGrid(devices, isDark),
                 ],
               ),
-
-              // Section 3: Active Transfer Modal
               if (transfer.active) _buildTransferModal(context, transfer, isDark),
             ],
           ),
         );
       },
+    );
+  }
+
+  Widget _selectionButton({
+    required bool isDark,
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return OutlinedButton.icon(
+      onPressed: _isTransferActive ? null : onPressed,
+      icon: Icon(icon, size: 16),
+      label: Text(label),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+        side: BorderSide(
+          color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      ),
     );
   }
 
@@ -234,15 +359,12 @@ class _SendTabState extends State<SendTab> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         width: double.infinity,
-        height: 140,
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        constraints: const BoxConstraints(minHeight: 156),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: borderColor,
-            width: _isDragging ? 2 : 1,
-          ),
+          border: Border.all(color: borderColor, width: _isDragging ? 2 : 1),
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -267,58 +389,160 @@ class _SendTabState extends State<SendTab> {
               ),
             ),
             const SizedBox(height: 12),
-            Row(
-              mainAxisSize: MainAxisSize.min,
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
               children: [
-                OutlinedButton.icon(
-                  onPressed: _isTransferActive ? null : _pickFiles,
-                  icon: const Icon(Icons.description_rounded, size: 16),
-                  label: Text(appText(widget.language, 'file')),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: isDark
-                        ? AppColors.darkAccent
-                        : AppColors.lightAccent,
-                    side: BorderSide(
-                      color: isDark
-                          ? AppColors.darkBorder
-                          : AppColors.lightBorder,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                  ),
+                _selectionButton(
+                  isDark: isDark,
+                  icon: Icons.description_rounded,
+                  label: appText(widget.language, 'file'),
+                  onPressed: _pickFiles,
                 ),
-                const SizedBox(width: 12),
-                OutlinedButton.icon(
-                  onPressed: _isTransferActive ? null : _pickFolder,
-                  icon: const Icon(Icons.folder_rounded, size: 16),
-                  label: Text(appText(widget.language, 'folder')),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: isDark
-                        ? AppColors.darkAccent
-                        : AppColors.lightAccent,
-                    side: BorderSide(
-                      color: isDark
-                          ? AppColors.darkBorder
-                          : AppColors.lightBorder,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                  ),
+                _selectionButton(
+                  isDark: isDark,
+                  icon: Icons.folder_rounded,
+                  label: appText(widget.language, 'folder'),
+                  onPressed: _pickFolder,
+                ),
+                _selectionButton(
+                  isDark: isDark,
+                  icon: Icons.link_rounded,
+                  label: appText(widget.language, 'url'),
+                  onPressed: _showUrlDialog,
                 ),
               ],
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildStagedUrlCard(bool isDark, String url) {
+    final uri = Uri.tryParse(url);
+    final host = uri?.host.isNotEmpty == true ? uri!.host : url;
+    final borderColor = _isDragging
+        ? (isDark ? AppColors.darkAccent : AppColors.lightAccent)
+        : (isDark ? AppColors.darkBorder : AppColors.lightBorder);
+    final bgColor = _isDragging
+        ? (isDark ? const Color(0xFF1B382F) : const Color(0xFFE2F3EC))
+        : (isDark ? AppColors.darkCard : AppColors.lightCard);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: borderColor, width: _isDragging ? 2 : 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? const Color(0xFF1E3F35)
+                      : const Color(0xFFD4EDE5),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.link_rounded,
+                  color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      appText(widget.language, 'selectedLink'),
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: isDark
+                            ? AppColors.darkTextMuted
+                            : AppColors.lightTextMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      host,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: isDark ? AppColors.darkText : AppColors.lightText,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              TextButton.icon(
+                onPressed: _isTransferActive ? null : _showUrlDialog,
+                icon: const Icon(Icons.edit_rounded, size: 16),
+                label: Text(appText(widget.language, 'url')),
+              ),
+              IconButton(
+                onPressed: _isTransferActive
+                    ? null
+                    : () => widget.stagingController.clear(
+                          language: widget.language,
+                        ),
+                icon: const Icon(Icons.close_rounded, size: 18),
+                tooltip: appText(widget.language, 'clear'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: isDark
+                  ? const Color(0xFF162520)
+                  : const Color(0xFFEFF5F2),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: SelectableText(
+              url,
+              maxLines: 2,
+              style: TextStyle(
+                fontSize: 13,
+                color: isDark ? AppColors.darkText : AppColors.lightText,
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _formatSize(widget.stagingController.totalBytes),
+            style: TextStyle(
+              fontSize: 12,
+              color: isDark
+                  ? AppColors.darkTextMuted
+                  : AppColors.lightTextMuted,
+            ),
+          ),
+          if (_isDragging) ...[
+            const SizedBox(height: 10),
+            Text(
+              appText(widget.language, 'releaseToAdd'),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -337,10 +561,7 @@ class _SendTabState extends State<SendTab> {
       decoration: BoxDecoration(
         color: bgColor,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: borderColor,
-          width: _isDragging ? 2 : 1,
-        ),
+        border: Border.all(color: borderColor, width: _isDragging ? 2 : 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -373,6 +594,12 @@ class _SendTabState extends State<SendTab> {
                 ),
               ),
               const Spacer(),
+              IconButton(
+                onPressed: _isTransferActive ? null : _showUrlDialog,
+                icon: const Icon(Icons.link_rounded, size: 18),
+                tooltip: appText(widget.language, 'shareLink'),
+                color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+              ),
               TextButton.icon(
                 onPressed: _isTransferActive ? null : _pickFiles,
                 icon: const Icon(Icons.add, size: 16),
@@ -387,7 +614,9 @@ class _SendTabState extends State<SendTab> {
               IconButton(
                 onPressed: _isTransferActive
                     ? null
-                    : () => widget.stagingController.clear(),
+                    : () => widget.stagingController.clear(
+                          language: widget.language,
+                        ),
                 icon: const Icon(Icons.close, size: 18),
                 tooltip: appText(widget.language, 'clear'),
                 color: isDark
@@ -413,9 +642,7 @@ class _SendTabState extends State<SendTab> {
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: isDark
-                      ? AppColors.darkAccent
-                      : AppColors.lightAccent,
+                  color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
                 ),
               ),
             ),
@@ -431,10 +658,7 @@ class _SendTabState extends State<SendTab> {
                 final filePath = selectedFiles[index];
                 final fileName = filePath.split(Platform.pathSeparator).last;
                 return Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
                     color: isDark
                         ? const Color(0xFF162520)
@@ -662,6 +886,7 @@ class _SendTabState extends State<SendTab> {
       'failed',
       'cancelled',
     ].contains(transfer.phase);
+    final isUrl = widget.stagingController.isUrlStaged;
     return Container(
       color: Colors.black54,
       child: Center(
@@ -697,9 +922,11 @@ class _SendTabState extends State<SendTab> {
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
-                  transfer.isSending
-                      ? Icons.upload_rounded
-                      : Icons.download_rounded,
+                  isUrl
+                      ? Icons.link_rounded
+                      : (transfer.isSending
+                            ? Icons.upload_rounded
+                            : Icons.download_rounded),
                   size: 32,
                   color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
                 ),
@@ -707,7 +934,9 @@ class _SendTabState extends State<SendTab> {
               const SizedBox(height: 18),
               Text(
                 transfer.statusText.isEmpty
-                    ? appText(widget.language, 'transferring')
+                    ? (isUrl
+                          ? appText(widget.language, 'shareLink')
+                          : appText(widget.language, 'transferring'))
                     : transfer.statusText,
                 textAlign: TextAlign.center,
                 style: TextStyle(
@@ -729,38 +958,39 @@ class _SendTabState extends State<SendTab> {
                 ),
               ),
               const SizedBox(height: 14),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    '${(transfer.progress * 100).toStringAsFixed(0)}%',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: isDark ? AppColors.darkText : AppColors.lightText,
-                    ),
-                  ),
-                  if (transfer.speedBytesPerSec > 0)
+              if (!isUrl)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
                     Text(
-                      '${_formatSize(transfer.speedBytesPerSec.toInt())}/s',
+                      '${(transfer.progress * 100).toStringAsFixed(0)}%',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: isDark ? AppColors.darkText : AppColors.lightText,
+                      ),
+                    ),
+                    if (transfer.speedBytesPerSec > 0)
+                      Text(
+                        '${_formatSize(transfer.speedBytesPerSec.toInt())}/s',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: isDark
+                              ? AppColors.darkAccent
+                              : AppColors.lightAccent,
+                        ),
+                      ),
+                    Text(
+                      '${_formatSize(transfer.sentBytes)} / ${_formatSize(transfer.totalBytes)}',
                       style: TextStyle(
                         fontSize: 13,
                         color: isDark
-                            ? AppColors.darkAccent
-                            : AppColors.lightAccent,
+                            ? AppColors.darkTextMuted
+                            : AppColors.lightTextMuted,
                       ),
                     ),
-                  Text(
-                    '${_formatSize(transfer.sentBytes)} / ${_formatSize(transfer.totalBytes)}',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: isDark
-                          ? AppColors.darkTextMuted
-                          : AppColors.lightTextMuted,
-                    ),
-                  ),
-                ],
-              ),
+                  ],
+                ),
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
@@ -771,9 +1001,7 @@ class _SendTabState extends State<SendTab> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     side: BorderSide(
-                      color: isDark
-                          ? AppColors.darkBorder
-                          : AppColors.lightBorder,
+                      color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
                     ),
                   ),
                   onPressed: canCancel
