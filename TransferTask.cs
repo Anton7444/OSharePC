@@ -30,7 +30,14 @@ public sealed class TransferTask
         TotalSize = 0;
         foreach (var f in Files)
         {
-            try { TotalSize += new FileInfo(f).Length; } catch { }
+            try
+            {
+                TotalSize += new FileInfo(f).Length;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"staging: could not read size for '{f}': {ex.Message}");
+            }
         }
     }
 
