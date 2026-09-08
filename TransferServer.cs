@@ -257,7 +257,7 @@ public sealed class TransferServer : IAsyncDisposable
             }
             else if (task.IsUrl)
             {
-                Log.Info("WS: URL metadata sent inline; stock /download returns a ZIP entry and /bigmessage remains available");
+                Log.Info("WS: URL metadata sent inline; stock /download compatibility returns an empty message-only ZIP; /bigmessage remains available");
             }
             else
             {
@@ -432,22 +432,14 @@ public sealed class TransferServer : IAsyncDisposable
 
     private async Task WriteUrlDownloadZipAsync(HttpContext ctx, TransferTask task)
     {
-        var url = task.SharedUrl ?? throw new InvalidOperationException("URL task has no SharedUrl");
-        var urlBytes = Encoding.UTF8.GetBytes(url);
-
-        // The stock Android/iOS-emulation receiver always feeds /download through
-        // ZipInputStream, even for type=http/*. A JSON response made nextEntry null
-        // and ColorOS falsely displayed Transfer completed without saving/opening
-        // anything. Build a tiny complete ZIP in memory so Content-Length is exact.
+        // ColorOS' iOS-emulation transport still performs /download for a URL/message
+        // task and feeds the body to ZipInputStream. Do not put the URL in a fake
+        // *.url entry: doing that makes the OS save a real file and permanently
+        // downgrades the receive result to File Manager. The actual URL travels in
+        // the http/* TaskInfo/shareText metadata. This zero-entry ZIP only satisfies
+        // the transport reader while creating no filesystem object on the phone.
         using var ms = new MemoryStream();
-        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
-        {
-            var name = SanitizeEntryName(task.FirstFileName) + ".url";
-            var entry = zip.CreateEntry("0/" + name, CompressionLevel.Optimal);
-            entry.LastWriteTime = DateTimeOffset.Now;
-            await using var entryStream = entry.Open();
-            await entryStream.WriteAsync(urlBytes, ctx.RequestAborted);
-        }
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true)) { }
 
         var body = ms.ToArray();
         ctx.Response.StatusCode = (int)HttpStatusCode.OK;
@@ -455,11 +447,11 @@ public sealed class TransferServer : IAsyncDisposable
         ctx.Response.ContentLength = body.Length;
         ctx.Response.Headers["nd_zip"] = "true";
         ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
-        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(task.FirstFileName + ".zip")}\"";
+        ctx.Response.Headers["Content-Disposition"] = "attachment; filename=\"message.zip\"";
         ctx.Response.Headers["Cache-Control"] = "no-store";
         await ctx.Response.Body.WriteAsync(body, ctx.RequestAborted);
         await ctx.Response.CompleteAsync();
-        Log.Info($"HTTP: URL ZIP served for taskId={task.TaskId}, entry='{task.FirstFileName}.url', zip={body.Length} bytes, url={urlBytes.Length} bytes");
+        Log.Info($"HTTP: URL message-only empty ZIP served for taskId={task.TaskId}, entries=0, zip={body.Length} bytes");
     }
 
     private async Task HandleBigMessage(HttpContext ctx)
@@ -500,7 +492,7 @@ public sealed class TransferServer : IAsyncDisposable
         {
             // New builds should parse the duplicated "id" field and send the real
             // task id. Retain empty-id acceptance for the observed ColorOS parser so
-            // older test packages still reach a valid ZIP instead of a false success.
+            // older test packages still reach a valid message-only response.
             if (!string.IsNullOrEmpty(taskId) && task.TaskId != taskId)
             {
                 Log.Warn($"HTTP: URL /download taskId mismatch ('{taskId}')");
