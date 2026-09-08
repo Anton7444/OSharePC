@@ -122,7 +122,8 @@ public sealed class OShareCrypto : IDisposable
         using var aes = Aes.Create();
         aes.Key = key; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
         using var dec = aes.CreateDecryptor();
-        var plain = dec.TransformFinalBlock(Convert.FromBase64String(b64), 0, Convert.FromBase64String(b64).Length);
+        var cipherBytes = Convert.FromBase64String(b64);
+        var plain = dec.TransformFinalBlock(cipherBytes, 0, cipherBytes.Length);
         return System.Text.Encoding.UTF8.GetString(plain);
     }
 
