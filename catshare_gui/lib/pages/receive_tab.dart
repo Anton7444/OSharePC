@@ -1,4 +1,6 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../config/theme.dart';
 import '../config/language.dart';
 import '../models/models.dart';
@@ -47,6 +49,50 @@ class _ReceiveTabState extends State<ReceiveTab> {
     return ip.split('.').map((part) => '#$part').toList();
   }
 
+  bool _isSafeWebUrl(String raw) {
+    final uri = Uri.tryParse(raw.trim());
+    return uri != null &&
+        uri.isAbsolute &&
+        uri.host.isNotEmpty &&
+        (uri.scheme == 'http' || uri.scheme == 'https');
+  }
+
+  Future<void> _openReceivedUrl(String url) async {
+    if (!_isSafeWebUrl(url)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(appText(widget.language, 'invalidLink'))),
+        );
+      }
+      return;
+    }
+    try {
+      await Process.start(
+        'rundll32.exe',
+        ['url.dll,FileProtocolHandler', url],
+        mode: ProcessStartMode.detached,
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(appText(widget.language, 'invalidLink'))),
+        );
+      }
+    }
+  }
+
+  Future<void> _copyReceivedUrl(String url) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(appText(widget.language, 'linkCopied')),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   Future<void> _handleDroppedPaths(List<String> paths) async {
     setState(() => _isDragging = false);
     if (!_isDropAllowed) {
@@ -85,6 +131,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
     final isDark = theme.brightness == Brightness.dark;
     final isEnabled = status.receiveEnabled;
     final ipParts = _formatIpAsHashes(status.lanIp);
+    final receivedUrl = widget.client.lastReceivedUrl;
 
     return NativeDropZone(
       enabled: widget.isCurrentTab && _isDropAllowed,
@@ -105,11 +152,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    // 1. Center Radar Logo
                     RadarLogo(size: 160, active: isEnabled),
                     const SizedBox(height: 28),
-
-                    // 2. Receive Feature Toggle Switch Button
                     InkWell(
                       onTap: () => widget.client.setReceiveEnabled(!isEnabled),
                       borderRadius: BorderRadius.circular(20),
@@ -131,12 +175,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                           border: Border.all(
                             color: isEnabled
                                 ? (isDark
-                                      ? AppColors.darkAccent.withValues(
-                                          alpha: 0.5,
-                                        )
-                                      : AppColors.lightAccent.withValues(
-                                          alpha: 0.5,
-                                        ))
+                                      ? AppColors.darkAccent.withValues(alpha: 0.5)
+                                      : AppColors.lightAccent.withValues(alpha: 0.5))
                                 : (isDark
                                       ? AppColors.darkBorder
                                       : AppColors.lightBorder),
@@ -198,12 +238,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       ),
                     ),
                     const SizedBox(height: 24),
-
-                    // 3. Device Name (Big & friendly font)
                     Text(
-                      status.deviceName.isEmpty
-                          ? 'OsharePC'
-                          : status.deviceName,
+                      status.deviceName.isEmpty ? 'OsharePC' : status.deviceName,
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 34,
@@ -213,8 +249,6 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       ),
                     ),
                     const SizedBox(height: 10),
-
-                    // 4. IP / Hash segments
                     Wrap(
                       spacing: 8,
                       runSpacing: 4,
@@ -249,9 +283,16 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         );
                       }).toList(),
                     ),
-                    const SizedBox(height: 48),
-
-                    // 5. Quick Save Controls
+                    if (receivedUrl != null && receivedUrl.isNotEmpty) ...[
+                      const SizedBox(height: 28),
+                      _buildReceivedUrlCard(
+                        isDark,
+                        receivedUrl,
+                        widget.client.lastReceivedUrlSender ?? '',
+                      ),
+                      const SizedBox(height: 30),
+                    ] else
+                      const SizedBox(height: 48),
                     Text(
                       appText(widget.language, 'quickSave'),
                       style: TextStyle(
@@ -279,15 +320,12 @@ class _ReceiveTabState extends State<ReceiveTab> {
               ),
             ),
           ),
-
-          // 6. Incoming Transfer Dialog Modal Overlay
           if (widget.client.pendingIncomingOffer != null)
             _buildIncomingModal(context, widget.client.pendingIncomingOffer!),
           if (widget.client.transferState.active &&
-              !widget.client.transferState.isSending)
+              !widget.client.transferState.isSending &&
+              widget.client.lastReceivedUrl == null)
             _buildTransferModal(context, widget.client.transferState),
-
-          // 7. Drag and Drop Overlay
           if (_isDragging && _isDropAllowed)
             Positioned.fill(
               child: Container(
@@ -352,6 +390,122 @@ class _ReceiveTabState extends State<ReceiveTab> {
     );
   }
 
+  Widget _buildReceivedUrlCard(bool isDark, String url, String sender) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 620),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: isDark ? AppColors.darkCard : AppColors.lightCard,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black12,
+              blurRadius: 12,
+              offset: Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? const Color(0xFF1E3F35)
+                        : const Color(0xFFD4EDE5),
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  child: Icon(
+                    Icons.link_rounded,
+                    color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        appText(widget.language, 'linkReceived'),
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: isDark ? AppColors.darkText : AppColors.lightText,
+                        ),
+                      ),
+                      if (sender.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          '${appText(widget.language, 'receivedFrom')} $sender',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                IconButton(
+                  onPressed: widget.client.clearReceivedUrl,
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  tooltip: appText(widget.language, 'close'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? const Color(0xFF162520)
+                    : const Color(0xFFEFF5F2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: SelectableText(
+                url,
+                maxLines: 3,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _copyReceivedUrl(url),
+                  icon: const Icon(Icons.copy_rounded, size: 16),
+                  label: Text(appText(widget.language, 'copyLink')),
+                ),
+                const SizedBox(width: 10),
+                FilledButton.icon(
+                  onPressed: () => _openReceivedUrl(url),
+                  icon: const Icon(Icons.open_in_new_rounded, size: 16),
+                  label: Text(appText(widget.language, 'openLink')),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -371,8 +525,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
       'failed',
       'cancelled',
     ].contains(transfer.phase);
-    final determinate =
-        transfer.phase == 'receiving' && transfer.totalBytes > 0;
+    final determinate = transfer.phase == 'receiving' && transfer.totalBytes > 0;
+    final isLink = transfer.statusText.toLowerCase().contains('link');
     final title = transfer.statusText.isEmpty
         ? appText(widget.language, 'receiving')
         : transfer.statusText;
@@ -406,7 +560,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                   Icon(
                     transfer.phase == 'failed'
                         ? Icons.error_outline_rounded
-                        : Icons.download_rounded,
+                        : (isLink ? Icons.link_rounded : Icons.download_rounded),
                     color: transfer.phase == 'failed'
                         ? Colors.redAccent
                         : (isDark
@@ -442,13 +596,15 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 const SizedBox(height: 8),
                 Text(
                   transfer.fileName,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
                     color: isDark ? AppColors.darkText : AppColors.lightText,
                   ),
                 ),
               ],
-              if (transfer.fileCount > 1) ...[
+              if (!isLink && transfer.fileCount > 1) ...[
                 const SizedBox(height: 4),
                 Text(
                   '${transfer.fileCount} ${appText(widget.language, 'files')}',
@@ -475,37 +631,39 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       : (isDark ? AppColors.darkAccent : AppColors.lightAccent),
                 ),
               ),
-              const SizedBox(height: 12),
-              if (determinate || transfer.phase == 'completed')
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      '${(transfer.progress * 100).toStringAsFixed(0)}%',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    Text(
-                      '${_formatSize(transfer.sentBytes)} / ${_formatSize(transfer.totalBytes)}',
-                      style: TextStyle(
-                        color: isDark
-                            ? AppColors.darkTextMuted
-                            : AppColors.lightTextMuted,
+              if (!isLink) ...[
+                const SizedBox(height: 12),
+                if (determinate || transfer.phase == 'completed')
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        '${(transfer.progress * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
-                    ),
-                  ],
-                ),
-              if (transfer.speedBytesPerSec > 0 &&
-                  transfer.phase == 'receiving') ...[
-                const SizedBox(height: 8),
-                Text(
-                  '${_formatSize(transfer.speedBytesPerSec.toInt())}/s',
-                  style: TextStyle(
-                    color: isDark
-                        ? AppColors.darkAccent
-                        : AppColors.lightAccent,
-                    fontWeight: FontWeight.w600,
+                      Text(
+                        '${_formatSize(transfer.sentBytes)} / ${_formatSize(transfer.totalBytes)}',
+                        style: TextStyle(
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : AppColors.lightTextMuted,
+                        ),
+                      ),
+                    ],
                   ),
-                ),
+                if (transfer.speedBytesPerSec > 0 &&
+                    transfer.phase == 'receiving') ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '${_formatSize(transfer.speedBytesPerSec.toInt())}/s',
+                    style: TextStyle(
+                      color: isDark
+                          ? AppColors.darkAccent
+                          : AppColors.lightAccent,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ],
               if (transfer.errorText.isNotEmpty) ...[
                 const SizedBox(height: 12),
@@ -534,49 +692,13 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 children: [
                   if (canCancel)
                     OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: isDark
-                            ? AppColors.darkTextMuted
-                            : AppColors.lightTextMuted,
-                        side: BorderSide(
-                          color: isDark
-                              ? AppColors.darkBorder
-                              : AppColors.lightBorder,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 10,
-                        ),
-                      ),
                       onPressed: () => widget.client.cancelTransfer(),
                       child: Text(appText(widget.language, 'cancelTransfer')),
                     )
                   else
                     ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: isDark
-                            ? AppColors.darkAccent
-                            : AppColors.lightAccent,
-                        foregroundColor: isDark
-                            ? const Color(0xFF0F1E19)
-                            : Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 22,
-                          vertical: 10,
-                        ),
-                        elevation: 0,
-                      ),
                       onPressed: () => widget.client.dismissTransferModal(),
-                      child: Text(
-                        appText(widget.language, 'close'),
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
+                      child: Text(appText(widget.language, 'close')),
                     ),
                 ],
               ),
@@ -593,6 +715,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
   ) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fileCount = int.tryParse(offer.count) ?? 1;
+    final isLink = offer.mimeType == 'http/*';
 
     return Container(
       color: Colors.black54,
@@ -632,7 +755,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
-                      Icons.phone_android_rounded,
+                      isLink ? Icons.link_rounded : Icons.phone_android_rounded,
                       color: isDark
                           ? AppColors.darkAccent
                           : AppColors.lightAccent,
@@ -645,7 +768,10 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          appText(widget.language, 'incomingTransfer'),
+                          appText(
+                            widget.language,
+                            isLink ? 'incomingLink' : 'incomingTransfer',
+                          ),
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.w700,
@@ -656,7 +782,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${offer.name} ${appText(widget.language, 'wantsToSend')}',
+                          '${offer.name} ${appText(widget.language, isLink ? 'wantsToShareLink' : 'wantsToSend')}',
                           style: TextStyle(
                             fontSize: 13,
                             color: isDark
@@ -687,9 +813,11 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 child: Row(
                   children: [
                     Icon(
-                      fileCount > 1
-                          ? Icons.folder_copy_rounded
-                          : Icons.insert_drive_file_outlined,
+                      isLink
+                          ? Icons.language_rounded
+                          : (fileCount > 1
+                                ? Icons.folder_copy_rounded
+                                : Icons.insert_drive_file_outlined),
                       color: isDark
                           ? AppColors.darkAccent
                           : AppColors.lightAccent,
@@ -701,7 +829,9 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '$fileCount ${appText(widget.language, 'files')}',
+                            isLink
+                                ? appText(widget.language, 'shareLink')
+                                : '$fileCount ${appText(widget.language, 'files')}',
                             style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
@@ -710,7 +840,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                                   : AppColors.lightText,
                             ),
                           ),
-                          if (offer.totalBytes > 0) ...[
+                          if (!isLink && offer.totalBytes > 0) ...[
                             const SizedBox(height: 2),
                             Text(
                               _formatSize(offer.totalBytes),
@@ -733,50 +863,15 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        side: BorderSide(
-                          color: isDark
-                              ? AppColors.darkBorder
-                              : AppColors.lightBorder,
-                        ),
-                      ),
                       onPressed: () => widget.client.confirmReceive(offer.id, false),
-                      child: Text(
-                        appText(widget.language, 'decline'),
-                        style: TextStyle(
-                          color: isDark
-                              ? AppColors.darkTextMuted
-                              : AppColors.lightTextMuted,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                      child: Text(appText(widget.language, 'decline')),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: isDark
-                            ? AppColors.darkAccent
-                            : AppColors.lightAccent,
-                        foregroundColor: isDark
-                            ? const Color(0xFF0F1E19)
-                            : Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        elevation: 0,
-                      ),
                       onPressed: () => widget.client.confirmReceive(offer.id, true),
-                      child: Text(
-                        appText(widget.language, 'accept'),
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
+                      child: Text(appText(widget.language, 'accept')),
                     ),
                   ),
                 ],
