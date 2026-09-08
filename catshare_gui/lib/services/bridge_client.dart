@@ -13,6 +13,7 @@ class BridgeClient extends ChangeNotifier {
   EngineStatus _status = EngineStatus.initial();
   List<DeviceModel> _devices = [];
   QuickSaveMode _quickSaveMode = QuickSaveMode.favorites;
+  bool _receiveSuccessNotifications = true;
   TransferStateModel _transferState = TransferStateModel();
   IncomingTransferOffer? _pendingIncomingOffer;
   final Set<String> _dismissedTransferIds = {};
@@ -32,6 +33,7 @@ class BridgeClient extends ChangeNotifier {
   EngineStatus get status => _status;
   List<DeviceModel> get devices => _devices;
   QuickSaveMode get quickSaveMode => _quickSaveMode;
+  bool get receiveSuccessNotifications => _receiveSuccessNotifications;
   TransferStateModel get transferState => _transferState;
   IncomingTransferOffer? get pendingIncomingOffer => _pendingIncomingOffer;
   bool get isConnecting => _isConnecting;
@@ -46,6 +48,8 @@ class BridgeClient extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final modeIndex = prefs.getInt('quick_save_mode') ?? 1;
       _quickSaveMode = QuickSaveMode.values[modeIndex.clamp(0, 2)];
+      _receiveSuccessNotifications =
+          prefs.getBool('receive_success_notifications') ?? true;
       notifyListeners();
     } catch (e) {
       debugPrint('Error loading prefs: $e');
@@ -61,6 +65,17 @@ class BridgeClient extends ChangeNotifier {
       await updateSettings(quickSaveMode: mode.index);
     } catch (e) {
       debugPrint('Error saving quick_save_mode: $e');
+    }
+  }
+
+  Future<void> setReceiveSuccessNotifications(bool enabled) async {
+    _receiveSuccessNotifications = enabled;
+    notifyListeners();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('receive_success_notifications', enabled);
+    } catch (e) {
+      debugPrint('Error saving receive_success_notifications: $e');
     }
   }
 
@@ -303,10 +318,12 @@ class BridgeClient extends ChangeNotifier {
           statusText: 'Transfer complete',
         );
       } else if (type == 'receiveCompleted') {
-        onNotification?.call(
-          'OsharePC',
-          'File transfer finished successfully.',
-        );
+        if (_receiveSuccessNotifications) {
+          onNotification?.call(
+            'OsharePC',
+            'File receive finished successfully.',
+          );
+        }
         _transferState = TransferStateModel(
           active: true,
           isSending: false,
