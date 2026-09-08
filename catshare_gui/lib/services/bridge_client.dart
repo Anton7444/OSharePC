@@ -16,6 +16,8 @@ class BridgeClient extends ChangeNotifier {
   bool _receiveSuccessNotifications = true;
   TransferStateModel _transferState = TransferStateModel();
   IncomingTransferOffer? _pendingIncomingOffer;
+  String? _lastReceivedUrl;
+  String? _lastReceivedUrlSender;
   final Set<String> _dismissedTransferIds = {};
   int _lastEventSeq = 0;
   bool _isConnecting = true;
@@ -36,6 +38,8 @@ class BridgeClient extends ChangeNotifier {
   bool get receiveSuccessNotifications => _receiveSuccessNotifications;
   TransferStateModel get transferState => _transferState;
   IncomingTransferOffer? get pendingIncomingOffer => _pendingIncomingOffer;
+  String? get lastReceivedUrl => _lastReceivedUrl;
+  String? get lastReceivedUrlSender => _lastReceivedUrlSender;
   bool get isConnecting => _isConnecting;
 
   BridgeClient() {
@@ -79,6 +83,12 @@ class BridgeClient extends ChangeNotifier {
     }
   }
 
+  void clearReceivedUrl() {
+    _lastReceivedUrl = null;
+    _lastReceivedUrlSender = null;
+    notifyListeners();
+  }
+
   void _startSupervisor() {
     _pollTimer = Timer.periodic(
       const Duration(milliseconds: 1000),
@@ -98,12 +108,10 @@ class BridgeClient extends ChangeNotifier {
         final json = jsonDecode(statusResp.body);
         _status = EngineStatus.fromJson(json);
 
-        // Fast-forward cursor on initial connect to avoid replaying stale events
         if (_lastEventSeq == 0 && _status.seq > 0) {
           _lastEventSeq = _status.seq;
         }
 
-        // Sync pending transfer with server status
         if (_status.pendingTransfer != null) {
           final current = _status.pendingTransfer!;
           if (!_dismissedTransferIds.contains(current.id)) {
@@ -115,14 +123,10 @@ class BridgeClient extends ChangeNotifier {
           } else {
             _pendingIncomingOffer = null;
           }
-        } else {
-          // No active pending transfer on server
-          if (_pendingIncomingOffer != null) {
-            _pendingIncomingOffer = null;
-          }
+        } else if (_pendingIncomingOffer != null) {
+          _pendingIncomingOffer = null;
         }
 
-        // Fetch devices
         final devResp = await http
             .get(Uri.parse('$baseUrl/api/devices'))
             .timeout(const Duration(milliseconds: 1500));
@@ -131,7 +135,6 @@ class BridgeClient extends ChangeNotifier {
           _devices = devList.map((d) => DeviceModel.fromJson(d)).toList();
         }
 
-        // Fetch incremental events
         final evResp = await http
             .get(Uri.parse('$baseUrl/api/events?since=$_lastEventSeq'))
             .timeout(const Duration(milliseconds: 1500));
@@ -144,7 +147,6 @@ class BridgeClient extends ChangeNotifier {
         return;
       }
     } catch (_) {
-      // Server not reachable yet
       _isConnecting = true;
       notifyListeners();
       _ensureBackendRunning();
@@ -191,7 +193,6 @@ class BridgeClient extends ChangeNotifier {
       }
     }
 
-    // Development fallback only. Never silently launch an arbitrary old EXE.
     final projectFile = p.join(projectRoot, 'CatShareSender.csproj');
     if (File(projectFile).existsSync()) {
       debugPrint('Starting backend via dotnet run with parent PID $pid');
@@ -245,9 +246,7 @@ class BridgeClient extends ChangeNotifier {
   void _processEvents(List events) {
     for (final ev in events) {
       final seq = (ev['seq'] as num?)?.toInt() ?? 0;
-      if (seq > _lastEventSeq) {
-        _lastEventSeq = seq;
-      }
+      if (seq > _lastEventSeq) _lastEventSeq = seq;
 
       final type = ev['type']?.toString();
       final data = ev['data'];
@@ -256,7 +255,6 @@ class BridgeClient extends ChangeNotifier {
         final offer = IncomingTransferOffer.fromJson(
           Map<String, dynamic>.from(data),
         );
-        // Only accept if not dismissed and server currently reports this as active pending transfer
         if (!_dismissedTransferIds.contains(offer.id) &&
             _status.pendingTransfer?.id == offer.id) {
           if (_quickSaveMode == QuickSaveMode.on) {
@@ -267,14 +265,13 @@ class BridgeClient extends ChangeNotifier {
         }
       } else if (type == 'transferCancelled' || type == 'transferResolved') {
         final id = data is Map ? data['id']?.toString() : null;
-        if (id != null) {
-          _dismissedTransferIds.add(id);
-        }
+        if (id != null) _dismissedTransferIds.add(id);
         if (_pendingIncomingOffer != null &&
             (id == null || _pendingIncomingOffer!.id == id)) {
           _pendingIncomingOffer = null;
         }
       } else if (type == 'receiveMetadata' && data is Map) {
+        final mime = data['mimeType']?.toString() ?? 'file/*';
         _transferState = TransferStateModel(
           active: true,
           isSending: false,
@@ -284,15 +281,35 @@ class BridgeClient extends ChangeNotifier {
           totalBytes:
               (data['totalSize'] as num?)?.toInt() ?? _transferState.totalBytes,
           speedBytesPerSec: _transferState.speedBytesPerSec,
-          statusText: _transferState.statusText.isEmpty
-              ? 'Receiving files...'
-              : _transferState.statusText,
+          statusText: mime == 'http/*'
+              ? 'Receiving link...'
+              : (_transferState.statusText.isEmpty
+                    ? 'Receiving files...'
+                    : _transferState.statusText),
           phase: 'receiving',
           fileName: data['fileName']?.toString() ?? _transferState.fileName,
           fileCount:
               (data['fileCount'] as num?)?.toInt() ?? _transferState.fileCount,
           saveDirectory: _status.saveDirectory,
         );
+      } else if (type == 'urlReceived' && data is Map) {
+        final url = data['url']?.toString() ?? '';
+        if (url.isNotEmpty) {
+          _lastReceivedUrl = url;
+          _lastReceivedUrlSender = data['sender']?.toString() ?? '';
+          _transferState = TransferStateModel(
+            active: true,
+            isSending: false,
+            targetDevice: _lastReceivedUrlSender ?? '',
+            fileName: url,
+            fileCount: 1,
+            sentBytes: utf8.encode(url).length,
+            totalBytes: utf8.encode(url).length,
+            phase: 'completed',
+            statusText: 'Link received',
+          );
+          _pendingIncomingOffer = null;
+        }
       } else if (type == 'receiveProgress' && data is Map) {
         final done = (data['done'] as num?)?.toInt() ?? 0;
         final total = (data['total'] as num?)?.toInt() ?? 0;
@@ -302,9 +319,12 @@ class BridgeClient extends ChangeNotifier {
         final total = (data['total'] as num?)?.toInt() ?? 0;
         _updateProgress(sent, total, isSending: true);
       } else if (type == 'sendCompleted') {
+        final kind = data is Map ? data['kind']?.toString() : null;
         onNotification?.call(
           'OsharePC',
-          'File transfer finished successfully.',
+          kind == 'url'
+              ? 'Link shared successfully.'
+              : 'File transfer finished successfully.',
         );
         _transferState = TransferStateModel(
           active: true,
@@ -315,7 +335,7 @@ class BridgeClient extends ChangeNotifier {
           sentBytes: _transferState.totalBytes,
           totalBytes: _transferState.totalBytes,
           phase: 'completed',
-          statusText: 'Transfer complete',
+          statusText: kind == 'url' ? 'Link shared' : 'Transfer complete',
         );
       } else if (type == 'receiveCompleted') {
         if (_receiveSuccessNotifications) {
@@ -344,7 +364,7 @@ class BridgeClient extends ChangeNotifier {
         final error = data is Map ? data['error']?.toString() : null;
         _transferState = TransferStateModel(
           active: true,
-          isSending: type == 'sendFailed' ? true : false,
+          isSending: type == 'sendFailed',
           targetDevice: _transferState.targetDevice,
           fileName: _transferState.fileName,
           fileCount: _transferState.fileCount,
@@ -439,9 +459,7 @@ class BridgeClient extends ChangeNotifier {
           state: enabled ? 'Active' : 'Paused',
           pendingTransfer: enabled ? _status.pendingTransfer : null,
         );
-        if (!enabled) {
-          _pendingIncomingOffer = null;
-        }
+        if (!enabled) _pendingIncomingOffer = null;
         notifyListeners();
         return true;
       }
@@ -467,12 +485,32 @@ class BridgeClient extends ChangeNotifier {
     return null;
   }
 
+  Future<Map<String, dynamic>?> stageUrl(String url) async {
+    try {
+      final resp = await http.post(
+        Uri.parse('$baseUrl/api/stage-url'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'url': url}),
+      );
+      if (resp.statusCode == 200) {
+        return jsonDecode(resp.body) as Map<String, dynamic>;
+      }
+      debugPrint('URL staging rejected (${resp.statusCode}): ${resp.body}');
+    } catch (e) {
+      debugPrint('Error staging URL: $e');
+    }
+    return null;
+  }
+
   Future<bool> sendToDevice(DeviceModel device) async {
     try {
       _transferState = TransferStateModel(
         active: true,
         isSending: true,
         targetDevice: device.name,
+        fileName: _transferState.fileName,
+        fileCount: _transferState.fileCount,
+        totalBytes: _transferState.totalBytes,
         statusText: 'Connecting to ${device.name}...',
       );
       notifyListeners();
@@ -530,7 +568,9 @@ class BridgeClient extends ChangeNotifier {
         fileCount: int.tryParse(offer.count) ?? 1,
         totalBytes: offer.totalBytes,
         phase: 'accepted',
-        statusText: 'Preparing transfer…',
+        statusText: offer.mimeType == 'http/*'
+            ? 'Preparing link transfer…'
+            : 'Preparing transfer…',
         saveDirectory: _status.saveDirectory,
       );
     }
