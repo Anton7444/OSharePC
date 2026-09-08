@@ -72,12 +72,7 @@ public sealed class TransferServer : IAsyncDisposable
             builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(o =>
             {
                 o.AddServerHeader = false;
-                // ZipArchive writes the response body synchronously; async-only mode would
-                // abort mid-transfer, so allow sync IO (single transfer at a time anyway).
                 o.AllowSynchronousIO = true;
-                // explicit IPv4 + IPv6 bindings: ListenAnyIP ended up IPv6-only here.
-                // PLAINTEXT on purpose: the pad connects ws:// (no TLS) when the sender's
-                // state-1 version >= 10015 (d8/v n(): O=false -> b9.a ssl flag false).
                 o.Listen(System.Net.IPAddress.Any, port);
                 o.Listen(System.Net.IPAddress.IPv6Any, port);
             });
@@ -136,9 +131,6 @@ public sealed class TransferServer : IAsyncDisposable
 
     // ---------------------------------------------------------------- websocket
 
-    /// <summary>Best-effort inbound rule for the transfer port. Without it Windows
-    /// Firewall silently drops every inbound connection. Tries directly first and,
-    /// when necessary, lets the existing UAC path create the rule once.</summary>
     private static void TryAddFirewallRule(int port)
     {
         AddFirewallRule("CatShareSender",
@@ -241,11 +233,6 @@ public sealed class TransferServer : IAsyncDisposable
             object sendPayload;
             if (task.IsUrl)
             {
-                // Android/ColorOS 16 does not fetch the desktop-style /bigmessage
-                // endpoint after isMessageSend. Real-device traces show it can go
-                // straight to /download with an empty taskId. Include the complete
-                // URL TaskInfo inline so receivers that understand http/* need no
-                // second metadata request; keep messageId for desktop compatibility.
                 var urlPayload = task.BuildUrlBigMessage();
                 urlPayload["isMessageSend"] = "true";
                 urlPayload["messageId"] = task.MessageId;
@@ -270,7 +257,7 @@ public sealed class TransferServer : IAsyncDisposable
             }
             else if (task.IsUrl)
             {
-                Log.Info("WS: URL metadata sent inline; /bigmessage and Android /download compatibility endpoints remain available");
+                Log.Info("WS: URL metadata sent inline; stock /download returns a ZIP entry and /bigmessage remains available");
             }
             else
             {
@@ -343,7 +330,6 @@ public sealed class TransferServer : IAsyncDisposable
                     Log.Info($"WS: status type={type} reason='{reason}'");
                     _owner.OnStatus(taskId, type, reason);
                     await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
-                    // Stock OShare often omits reason on a successful type=1 status.
                     if (type == 1 && (string.IsNullOrEmpty(reason) || reason == "ok")) return "transfer completed";
                     if (type == 3) return $"refused: {reason}";
                 }
@@ -397,7 +383,6 @@ public sealed class TransferServer : IAsyncDisposable
         try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
     }
 
-    /// <summary>Routes ASP.NET/Kestrel internal logs (TLS failures etc.) into our log.</summary>
     private sealed class ForwardingLoggerProvider : ILoggerProvider
     {
         public ILogger CreateLogger(string category) => new ForwardingLogger(category);
@@ -432,7 +417,7 @@ public sealed class TransferServer : IAsyncDisposable
         return payload;
     }
 
-    private async Task WriteUrlPayloadAsync(HttpContext ctx, TransferTask task, string endpoint)
+    private async Task WriteUrlMetadataAsync(HttpContext ctx, TransferTask task)
     {
         var json = JsonSerializer.Serialize(BuildUrlHttpPayload(task));
         var bytes = Encoding.UTF8.GetBytes(json);
@@ -442,7 +427,39 @@ public sealed class TransferServer : IAsyncDisposable
         ctx.Response.Headers["Cache-Control"] = "no-store";
         await ctx.Response.Body.WriteAsync(bytes, ctx.RequestAborted);
         await ctx.Response.CompleteAsync();
-        Log.Info($"HTTP: URL payload served via {endpoint} for taskId={task.TaskId}, {bytes.Length} bytes");
+        Log.Info($"HTTP: URL big-message metadata served for taskId={task.TaskId}, {bytes.Length} bytes");
+    }
+
+    private async Task WriteUrlDownloadZipAsync(HttpContext ctx, TransferTask task)
+    {
+        var url = task.SharedUrl ?? throw new InvalidOperationException("URL task has no SharedUrl");
+        var urlBytes = Encoding.UTF8.GetBytes(url);
+
+        // The stock Android/iOS-emulation receiver always feeds /download through
+        // ZipInputStream, even for type=http/*. A JSON response made nextEntry null
+        // and ColorOS falsely displayed Transfer completed without saving/opening
+        // anything. Build a tiny complete ZIP in memory so Content-Length is exact.
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var name = SanitizeEntryName(task.FirstFileName) + ".url";
+            var entry = zip.CreateEntry("0/" + name, CompressionLevel.Optimal);
+            entry.LastWriteTime = DateTimeOffset.Now;
+            await using var entryStream = entry.Open();
+            await entryStream.WriteAsync(urlBytes, ctx.RequestAborted);
+        }
+
+        var body = ms.ToArray();
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/zip";
+        ctx.Response.ContentLength = body.Length;
+        ctx.Response.Headers["nd_zip"] = "true";
+        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(task.FirstFileName + ".zip")}\"";
+        ctx.Response.Headers["Cache-Control"] = "no-store";
+        await ctx.Response.Body.WriteAsync(body, ctx.RequestAborted);
+        await ctx.Response.CompleteAsync();
+        Log.Info($"HTTP: URL ZIP served for taskId={task.TaskId}, entry='{task.FirstFileName}.url', zip={body.Length} bytes, url={urlBytes.Length} bytes");
     }
 
     private async Task HandleBigMessage(HttpContext ctx)
@@ -460,7 +477,7 @@ public sealed class TransferServer : IAsyncDisposable
             return;
         }
 
-        await WriteUrlPayloadAsync(ctx, task, "/bigmessage");
+        await WriteUrlMetadataAsync(ctx, task);
     }
 
     private async Task HandleDownload(HttpContext ctx)
@@ -481,9 +498,9 @@ public sealed class TransferServer : IAsyncDisposable
 
         if (task.IsUrl)
         {
-            // ColorOS 16 real-device behavior: message-send ACK is followed by
-            // GET /download?taskId= (empty). Accept an empty id only for the
-            // currently active URL task. A non-empty mismatched id remains 404.
+            // New builds should parse the duplicated "id" field and send the real
+            // task id. Retain empty-id acceptance for the observed ColorOS parser so
+            // older test packages still reach a valid ZIP instead of a false success.
             if (!string.IsNullOrEmpty(taskId) && task.TaskId != taskId)
             {
                 Log.Warn($"HTTP: URL /download taskId mismatch ('{taskId}')");
@@ -492,7 +509,7 @@ public sealed class TransferServer : IAsyncDisposable
                 return;
             }
 
-            await WriteUrlPayloadAsync(ctx, task, "/download compatibility path");
+            await WriteUrlDownloadZipAsync(ctx, task);
             return;
         }
 
