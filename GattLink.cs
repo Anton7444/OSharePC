@@ -320,12 +320,15 @@ public sealed class GattLink : IDisposable
     /// </summary>
     public async Task OConnectLanSendAsync(
         LanInfo lan, int serverPort, OShareCrypto crypto, string senderName, int fileCount,
-        Action<string>? status = null, Func<bool>? phoneConnected = null, CancellationToken ct = default)
+        Action<string>? status = null, Func<bool>? phoneConnected = null,
+        string transferType = "file/*", CancellationToken ct = default)
     {
         if (OConnectReadChar is null || OConnectWriteChar is null || OConnectNotifyChar is null)
             throw new InvalidOperationException(
                 "BLE: phone does not expose the OPlus-Connect service 9999 (互传 receive screen must be open; " +
                 "after a failed attempt the phone tears the service down until the screen is reopened).");
+
+        transferType = transferType.Equals("http/*", StringComparison.OrdinalIgnoreCase) ? "http/*" : "file/*";
 
         // 0. Windows negotiates the ATT MTU automatically; read the effective PDU size
         int maxPdu = 247;
@@ -399,11 +402,14 @@ public sealed class GattLink : IDisposable
             var sessionKey = crypto.DeriveSharedSecret(phonePub);
             var (cbcKey, cbcIv) = OShareCrypto.CbcKeyFromSecret(sessionKey);
 
-            // 3. state-1 (within the 5s timer): pv=5 selects the OConnect account path
+            // 3. state-1 (within the 5s timer): classify URL/message transfers before
+            // the phone builds its receive task. This field is authoritative for the
+            // receiver UI; sending file/* here permanently downgrades a later http/*
+            // WebSocket TaskInfo into a normal file transfer.
             var name = senderName ?? "PC";
-            while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount)).Length > maxPdu - 3 && name.Length > 4)
+            while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, transferType)).Length > maxPdu - 3 && name.Length > 4)
                 name = name[..^2];
-            var state1 = JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount));
+            var state1 = JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, transferType));
             Log.Info($"BLE: 9896 state1 <- {state1} ({state1.Length}B, mtu {maxPdu})");
             await WriteOConnectSingle(state1);
 
@@ -501,13 +507,13 @@ public sealed class GattLink : IDisposable
     /// </summary>
     private static readonly int OConnectPv = 1;
 
-    private static Dictionary<string, object> BuildState1(string pubKey, string dname, int fileCount) => new()
+    private static Dictionary<string, object> BuildState1(string pubKey, string dname, int fileCount, string transferType) => new()
     {
         ["key"] = pubKey,
         ["isFast"] = 0,
         ["version"] = "10302",
         ["pv"] = OConnectPv,
-        ["type"] = "file/*",
+        ["type"] = transferType,
         ["number"] = Math.Max(1, fileCount).ToString(),
         ["dname"] = dname,
         ["rdcode"] = "",
