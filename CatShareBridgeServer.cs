@@ -53,13 +53,19 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
             ClearPendingTransfers();
             Push("receiveCompleted", new { sender, files, count = files.Count });
         };
+        _engine.ReceiveUrlReceived += (sender, url) =>
+        {
+            ClearPendingTransfers();
+            Push("urlReceived", new { sender, url });
+        };
         _engine.ReceiveFailed += (sender, error) =>
         {
             ClearPendingTransfers();
             Push("receiveFailed", new { sender, error });
         };
         _engine.Server.DownloadProgress += (sent, total) => Push("sendProgress", new { sent, total });
-        _engine.Server.DownloadFinished += taskId => Push("sendCompleted", new { taskId });
+        _engine.Server.DownloadFinished += taskId => Push("sendCompleted", new { taskId, kind = "files" });
+        _engine.Server.UrlFinished += taskId => Push("sendCompleted", new { taskId, kind = "url" });
 
         _engine.ConfirmIncomingTransfer = (name, mimeType, count) => ConfirmViaBridge(name, mimeType, count);
 
@@ -211,7 +217,24 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
                 return Results.BadRequest(new { error = "No existing files were supplied." });
             }
             var task = _engine.StageFiles(files)!;
-            return Results.Ok(new { taskId = task.TaskId, fileCount = task.FileCount, totalSize = task.TotalSize });
+            return Results.Ok(new { taskId = task.TaskId, fileCount = task.FileCount, totalSize = task.TotalSize, kind = "files" });
+        });
+
+        app.MapPost("/api/stage-url", (StageUrlRequest body) =>
+        {
+            if (!TransferTask.TryNormalizeUrl(body.Url, out var normalized, out var error))
+                return Results.BadRequest(new { error });
+            var task = _engine.StageUrl(normalized);
+            return Results.Ok(new
+            {
+                taskId = task.TaskId,
+                messageId = task.MessageId,
+                fileCount = 1,
+                totalSize = task.TotalSize,
+                mimeType = task.MimeType,
+                url = task.SharedUrl,
+                kind = "url",
+            });
         });
 
         app.MapPost("/api/send", (SendRequest body) =>
@@ -258,9 +281,6 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         return $"{name} [ID {suffix}]";
     }
 
-    /// <summary>Routes an incoming-transfer confirmation (stock or CatShare) through
-    /// the bridge's pending-transfer event flow; the Flutter UI resolves it via
-    /// POST /api/confirm-receive. Times out to 'reject' after 30 seconds.</summary>
     private Task<bool> ConfirmViaBridge(string name, string mimeType, string count, string? identity = null)
     {
         ClearPendingTransfers();
@@ -328,5 +348,6 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         bool? MinimizeToTray,
         bool? CloseToTray);
     private sealed record StageRequest(string[]? Files);
+    private sealed record StageUrlRequest(string? Url);
     private sealed record SendRequest(string? Address);
 }
