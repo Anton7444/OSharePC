@@ -71,4 +71,4 @@ OShare PC is an unofficial project and is not affiliated with or endorsed by OPP
 
 ## License
 
-This project currently has no published open-source license. Do not assume permission to redistribute or modify it until a license is chosen.
+This project is licensed under the **GNU General Public License v3.0 only (GPL-3.0-only)**. See [LICENSE](LICENSE) for the full license text.
