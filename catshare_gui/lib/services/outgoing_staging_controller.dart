@@ -8,6 +8,7 @@ class OutgoingStagingController extends ChangeNotifier {
   final BridgeClient bridgeClient;
 
   final List<String> _selectedFiles = [];
+  String? _stagedUrl;
   Map<String, dynamic>? _stagedResult;
   String? _stagingError;
   bool _isStaging = false;
@@ -16,12 +17,14 @@ class OutgoingStagingController extends ChangeNotifier {
   OutgoingStagingController({required this.bridgeClient});
 
   List<String> get selectedFiles => List.unmodifiable(_selectedFiles);
+  String? get stagedUrl => _stagedUrl;
+  bool get isUrlStaged => _stagedUrl != null && _stagedUrl!.isNotEmpty;
   Map<String, dynamic>? get stagedResult => _stagedResult;
   String? get stagingError => _stagingError;
   bool get isStaging => _isStaging;
 
   bool get hasValidStagedSelection =>
-      _selectedFiles.isNotEmpty &&
+      (_selectedFiles.isNotEmpty || isUrlStaged) &&
       !_isStaging &&
       _stagingError == null &&
       _stagedResult != null;
@@ -37,7 +40,7 @@ class OutgoingStagingController extends ChangeNotifier {
         return (_stagedResult!['count'] as num).toInt();
       }
     }
-    return _selectedFiles.length;
+    return isUrlStaged ? 1 : _selectedFiles.length;
   }
 
   int get totalBytes {
@@ -60,6 +63,45 @@ class OutgoingStagingController extends ChangeNotifier {
   static bool containsCanonical(Iterable<String> paths, String path) {
     final target = canonicalPath(path);
     return paths.any((item) => canonicalPath(item) == target);
+  }
+
+  Future<bool> stageUrl(
+    String url, {
+    AppLanguage language = AppLanguage.english,
+  }) async {
+    final transfer = bridgeClient.transferState;
+    final isTransferActive = transfer.active &&
+        !const ['completed', 'failed', 'cancelled'].contains(transfer.phase);
+    if (isTransferActive) {
+      _stagingError = appText(language, 'dragDropUnavailable');
+      notifyListeners();
+      return false;
+    }
+
+    final currentSeq = ++_requestSeq;
+    _isStaging = true;
+    _stagingError = null;
+    notifyListeners();
+    try {
+      final result = await bridgeClient.stageUrl(url);
+      if (currentSeq != _requestSeq) return false;
+      _isStaging = false;
+      if (result != null) {
+        _selectedFiles.clear();
+        _stagedUrl = result['url']?.toString() ?? url;
+        _stagedResult = result;
+        _stagingError = null;
+        notifyListeners();
+        return true;
+      }
+      _stagingError = appText(language, 'urlStagingFailed');
+    } catch (e) {
+      if (currentSeq != _requestSeq) return false;
+      _isStaging = false;
+      _stagingError = appText(language, 'urlStagingFailed');
+    }
+    notifyListeners();
+    return false;
   }
 
   Future<bool> addPaths(
@@ -101,10 +143,10 @@ class OutgoingStagingController extends ChangeNotifier {
       }
     }
 
-    if (proposed.length == _selectedFiles.length) {
-      // No new paths were added (either empty drop or all items were duplicates)
+    if (proposed.length == _selectedFiles.length && !isUrlStaged) {
       return _selectedFiles.isNotEmpty;
     }
+    if (proposed.isEmpty) return false;
 
     final currentSeq = ++_requestSeq;
     _isStaging = true;
@@ -113,14 +155,13 @@ class OutgoingStagingController extends ChangeNotifier {
 
     try {
       final result = await bridgeClient.stageFiles(proposed);
-      if (currentSeq != _requestSeq) {
-        return false;
-      }
+      if (currentSeq != _requestSeq) return false;
       _isStaging = false;
       if (result != null) {
         _selectedFiles
           ..clear()
           ..addAll(proposed);
+        _stagedUrl = null;
         _stagedResult = result;
         _stagingError = null;
         notifyListeners();
@@ -131,9 +172,7 @@ class OutgoingStagingController extends ChangeNotifier {
         return false;
       }
     } catch (e) {
-      if (currentSeq != _requestSeq) {
-        return false;
-      }
+      if (currentSeq != _requestSeq) return false;
       _isStaging = false;
       _stagingError = appText(language, 'stagingFailed');
       notifyListeners();
@@ -150,9 +189,7 @@ class OutgoingStagingController extends ChangeNotifier {
         .where((p) => canonicalPath(p) != targetCanonical)
         .toList();
 
-    if (proposed.length == _selectedFiles.length) {
-      return;
-    }
+    if (proposed.length == _selectedFiles.length) return;
 
     final currentSeq = ++_requestSeq;
     _isStaging = true;
@@ -166,6 +203,7 @@ class OutgoingStagingController extends ChangeNotifier {
         _isStaging = false;
         if (result != null) {
           _selectedFiles.clear();
+          _stagedUrl = null;
           _stagedResult = null;
           _stagingError = null;
         } else {
@@ -179,6 +217,7 @@ class OutgoingStagingController extends ChangeNotifier {
           _selectedFiles
             ..clear()
             ..addAll(proposed);
+          _stagedUrl = null;
           _stagedResult = result;
           _stagingError = null;
         } else {
@@ -196,9 +235,7 @@ class OutgoingStagingController extends ChangeNotifier {
   Future<void> clear({
     AppLanguage language = AppLanguage.english,
   }) async {
-    if (_selectedFiles.isEmpty && _stagedResult == null) {
-      return;
-    }
+    if (_selectedFiles.isEmpty && !isUrlStaged && _stagedResult == null) return;
 
     final currentSeq = ++_requestSeq;
     _isStaging = true;
@@ -211,6 +248,7 @@ class OutgoingStagingController extends ChangeNotifier {
       _isStaging = false;
       if (result != null) {
         _selectedFiles.clear();
+        _stagedUrl = null;
         _stagedResult = null;
         _stagingError = null;
       } else {
