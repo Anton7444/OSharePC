@@ -342,7 +342,7 @@ public sealed class SenderEngine : IDisposable
                 Advertiser.DeviceName,
                 _staged.FileCount,
                 s => TransferStateChanged?.Invoke(_staged.TaskId, s),
-                phoneConnected: () => Server.WsConnected,
+                phoneConnected: () => Server.WsConnected || _staged.Complete,
                 ct: ct);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
             return;
