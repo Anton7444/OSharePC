@@ -163,31 +163,23 @@ public sealed class ReceiveSession : IDisposable
                 throw new IOException($"Could not establish WebSocket connection to {phoneIp}:{port}");
         }
 
+        // OnePlus Share 16.10.61 is the initiator for this negotiation on the
+        // iOS-compatible receive path:
+        //   Phone -> PC: action:0:versionNegotiation?{"versions":[1]}
+        //   PC    -> Phone: ack:0:versionNegotiation?{"version":1}
+        // Do not send an unsolicited action from the PC. The previous fallback
+        // {"version":2,"protocolVersion":4} made ColorOS log "No value for versions"
+        // and could downgrade/misclassify the peer before sendRequest.
         var handshaken = false;
-        var fallbackSent = false;
         Envelope? sendRequest = null;
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        var negotiateBy = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow.AddSeconds(35);
 
         while (sendRequest is null && !ct.IsCancellationRequested)
         {
-            if (!handshaken && !fallbackSent && negotiateBy <= DateTime.UtcNow)
-            {
-                var versionMessage = Envelope.Build("action", 0, "versionNegotiation",
-                    new { version = 2, protocolVersion = 4 });
-                await SendAsync(versionMessage, ct);
-                _state("LAN protocol handshake sent (phone did not negotiate)");
-                fallbackSent = true;
-                deadline = DateTime.UtcNow.AddSeconds(30);
-            }
-
-            var limit = !handshaken && !fallbackSent ? negotiateBy : deadline;
-            var remaining = limit - DateTime.UtcNow;
+            var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero)
-            {
-                if (!handshaken && !fallbackSent) continue;
-                throw new TimeoutException("timed out waiting for sender's sendRequest");
-            }
+                throw new TimeoutException("timed out waiting for sender's version negotiation/sendRequest");
+
             Envelope? env;
             try
             {
@@ -195,8 +187,7 @@ public sealed class ReceiveSession : IDisposable
             }
             catch (TimeoutException)
             {
-                if (!handshaken && !fallbackSent && negotiateBy <= DateTime.UtcNow) continue;
-                throw new TimeoutException("timed out waiting for sender's sendRequest");
+                throw new TimeoutException("timed out waiting for sender's version negotiation/sendRequest");
             }
             if (env is null) throw new IOException("sender closed the websocket before sendRequest");
 
@@ -212,13 +203,20 @@ public sealed class ReceiveSession : IDisposable
                     handshaken = true;
                     _state($"← {env}");
                     if (env.IsAction)
+                    {
                         await SendAckAsync(env, "{\"version\":1}", ct);
+                        _state("LAN protocol handshake acknowledged using OnePlus iOS-compatible version 1");
+                    }
                     else if (env.IsAck)
+                    {
                         _state("LAN protocol handshake acknowledged");
+                    }
                     break;
 
                 case "sendRequest":
                     _state($"← {env}");
+                    if (!handshaken)
+                        Log.Warn("RX: sender issued sendRequest without versionNegotiation; accepting for compatibility");
                     TaskId = env.PayloadString("taskId", env.PayloadString("id"));
                     var messageId = env.PayloadString("messageId");
                     var isMessageSend = string.Equals(env.PayloadString("isMessageSend"), "true", StringComparison.OrdinalIgnoreCase);
