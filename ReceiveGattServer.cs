@@ -15,14 +15,12 @@ namespace CatShareSender;
 /// </summary>
 public sealed class ReceiveGattServer : IDisposable
 {
-    public const string Version = "161061";   // ≥ 10015 → tells phone to use LAN / WebSocket mode
+    public const string Version = "161061";
 
-    // Optional coordination hook for Bluetooth stacks that need the alliance
-    // advertisement restarted after the GATT beacon is initialized.
     public Action? RestartAdvertiser { get; set; }
 
-    private GattServiceProvider? _beacon;      // 8881 discovery beacon
-    private GattServiceProvider? _service;     // 9999 protocol service
+    private GattServiceProvider? _beacon;
+    private GattServiceProvider? _service;
     private GattLocalCharacteristic? _handshake;
     private GattLocalCharacteristic? _cmd;
     private GattLocalCharacteristic? _notify;
@@ -35,34 +33,20 @@ public sealed class ReceiveGattServer : IDisposable
     public bool IsRunning { get; private set; }
     public string DeviceName { get; set; } = Environment.MachineName;
 
-    /// <summary>Directory where incoming files will be saved.</summary>
     public string SaveDirectory { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "CatShare");
 
-    /// <summary>
-    /// Raised when a remote phone offers files. Return true to accept or false to reject.
-    /// Parameters: (senderName, mimeType, fileCount).
-    /// </summary>
     public Func<string, string, string, Task<bool>>? ConfirmIncoming { get; set; }
 
-    /// <summary>Human-readable state changes for UI and logs.</summary>
     public event Action<string>? StateChanged;
-
-    /// <summary>Raised during active file download: (bytesReceived, totalBytes).</summary>
     public event Action<long, long>? TransferProgress;
     public event Action<ReceiveMetadata>? TransferMetadata;
 
-    /// <summary>Raised when the 8881 discovery beacon actually starts/stops advertising —
-    /// Windows only allows ONE connectable advert, so consumers must yield their own.</summary>
     public event Action? BeaconStarted;
     public event Action? BeaconAborted;
-    /// <summary>Beacon gave up after repeated aborts — other advertisers may claim the slot.</summary>
     public event Action? BeaconGaveUp;
 
     private int _beaconRetrying;
-
-    /// <summary>Set by the engine: returns true when no other advert owns the slot,
-    /// so competing GATT adverts don't kick each other off in an endless loop.</summary>
     public Func<bool>? RetryGate { get; set; }
 
     private async void RetryBeaconAsync(GattServiceProvider beacon)
@@ -71,18 +55,13 @@ public sealed class ReceiveGattServer : IDisposable
         Log.Warn("RX: 8881 retry scheduled");
         try
         {
-            // retry indefinitely — the beacon is what makes the PC connectable for
-            // stock 互传, and the slot usually frees up within seconds
             while (IsRunning)
             {
                 await Task.Delay(TimeSpan.FromSeconds(5));
                 if (!IsRunning) return;
-                // The initial StartAdvertising may report Aborted first and
-                // then become Started. Do not restart a healthy advert while
-                // the phone is already negotiating over GATT.
                 if (beacon.AdvertisementStatus == GattServiceProviderAdvertisementStatus.Started)
                     return;
-                if (RetryGate?.Invoke() == false) continue;   // 9955 advert owns the slot
+                if (RetryGate?.Invoke() == false) continue;
                 Log.Warn("RX: 8881 retry attempt");
                 try { beacon.StopAdvertising(); } catch { }
                 try { beacon.StartAdvertising(new GattServiceProviderAdvertisingParameters
@@ -97,10 +76,8 @@ public sealed class ReceiveGattServer : IDisposable
         finally { Interlocked.Exchange(ref _beaconRetrying, 0); }
     }
 
-    /// <summary>Raised when a transfer completes: (senderName, savedFilePaths).</summary>
     public event Action<string, IReadOnlyList<string>>? TransferCompleted;
-
-    /// <summary>Raised when a transfer fails: (senderName, errorMessage).</summary>
+    public event Action<string, string>? UrlReceived; // senderName, URL
     public event Action<string, string>? TransferFailed;
 
     private void State(string msg)
@@ -109,10 +86,6 @@ public sealed class ReceiveGattServer : IDisposable
         try { StateChanged?.Invoke(msg); } catch { }
     }
 
-    /// <summary>
-    /// Checks the Windows Bluetooth local name.
-    /// Stock 互传 (d8/o.java) looks for 'dddddd + flag + display' (length ≥ 8).
-    /// </summary>
     public static string BluetoothName(string? customName = null)
     {
         var rawName = !string.IsNullOrWhiteSpace(customName) ? customName : Environment.MachineName;
@@ -127,7 +100,6 @@ public sealed class ReceiveGattServer : IDisposable
 
         Directory.CreateDirectory(SaveDirectory);
 
-        // 1. Discovery beacon: 00008881 (standard base)
         var beacon = await GattServiceProvider.CreateAsync(
             new Guid("00008881-0000-1000-8000-00805f9b34fb"));
         if (beacon.Error != BluetoothError.Success)
@@ -148,9 +120,6 @@ public sealed class ReceiveGattServer : IDisposable
                 }
                 else if (e.Status == GattServiceProviderAdvertisementStatus.Aborted)
                 {
-                    // GATT providers never retry on their own and the slot is often held
-                    // by our own fallback advert — the engine pauses that on Aborted, we
-                    // just need to keep trying until we win the slot back.
                     BeaconAborted?.Invoke();
                     RetryBeaconAsync(beacon.ServiceProvider);
                 }
@@ -158,8 +127,6 @@ public sealed class ReceiveGattServer : IDisposable
             catch { }
         };
 
-        // Mark running before StartAdvertising: Windows can raise Aborted
-        // synchronously, and the retry loop must be allowed to recover it.
         IsRunning = true;
         beacon.ServiceProvider.StartAdvertising(new GattServiceProviderAdvertisingParameters
         {
@@ -168,7 +135,6 @@ public sealed class ReceiveGattServer : IDisposable
         });
         _beacon = beacon.ServiceProvider;
 
-        // 2. Protocol service 9999 (0x9898 handshake read / 0x9896 command write / 0x9895 accept notify)
         var svc = await GattServiceProvider.CreateAsync(
             new Guid("00009999-0000-1000-8000-00805f9b34fb"));
         if (svc.Error != BluetoothError.Success)
@@ -227,18 +193,18 @@ public sealed class ReceiveGattServer : IDisposable
             var request = await args.GetRequestAsync();
             if (request is null) return;
 
-        var handshake = JsonSerializer.Serialize(new Dictionary<string, object>
-        {
-            ["state"] = 0,
-            ["key"] = _crypto.PublicKeyB64,
-            ["version"] = Version,
-            ["pv"] = 1,
-            ["isFast"] = 0,
-        });
-        State($"Handshake read served ({handshake.Length}B)");
-        var handshakeBytes = Encoding.UTF8.GetBytes(handshake);
-        var offset = (int)request.Offset;
-        var slice = offset >= handshakeBytes.Length ? Array.Empty<byte>() : handshakeBytes[offset..];
+            var handshake = JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["state"] = 0,
+                ["key"] = _crypto.PublicKeyB64,
+                ["version"] = Version,
+                ["pv"] = 1,
+                ["isFast"] = 0,
+            });
+            State($"Handshake read served ({handshake.Length}B)");
+            var handshakeBytes = Encoding.UTF8.GetBytes(handshake);
+            var offset = (int)request.Offset;
+            var slice = offset >= handshakeBytes.Length ? Array.Empty<byte>() : handshakeBytes[offset..];
             try
             {
                 request.RespondWithValue(ToBuffer(slice));
@@ -267,8 +233,6 @@ public sealed class ReceiveGattServer : IDisposable
             var json = Encoding.UTF8.GetString(bytes);
             State($"0x9896 write <- {json}");
             await HandleCommandAsync(json);
-            // Responding to a write-without-response request throws an empty
-            // WinRT error; only protocol-level (with-response) writes get one.
             if (request.Option == GattWriteOption.WriteWithResponse)
                 request.Respond();
         }
@@ -284,7 +248,6 @@ public sealed class ReceiveGattServer : IDisposable
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        // State 1 from the phone: file offer
         if (root.TryGetProperty("key", out var keyEl))
         {
             _padPubKey = keyEl.GetString();
@@ -311,29 +274,17 @@ public sealed class ReceiveGattServer : IDisposable
 
             var fileCount = root.TryGetProperty("number", out var numEl) ? numEl.GetString() : "?";
             var type = root.TryGetProperty("type", out var typeEl) ? typeEl.GetString() : "file/*";
-            State($"File offer from '{deviceName}': {fileCount} file(s), {type}");
+            State($"File offer from '{deviceName}': {fileCount} item(s), {type}");
 
-            var accept = false;
-            if (ConfirmIncoming != null)
-                accept = await ConfirmIncoming(deviceName, type ?? "file/*", fileCount ?? "?");
-            else
-                accept = true;
+            var accept = ConfirmIncoming != null
+                ? await ConfirmIncoming(deviceName, type ?? "file/*", fileCount ?? "?")
+                : true;
 
-            // The phone's iPad/PC BLE client (APK d8/j) treats "6" as
-            // USE_LAN_NEED_CHECK.  "1" means USE_DEFAULT_ACCESSORY and lets
-            // the phone fall back to creating a SoftAP, which is the path that
-            // kept failing here.  This receiver is the iPad role, so request
-            // LAN explicitly.  PC -> phone sending uses a different GATT
-            // client and is untouched.
             await NotifyAsync(accept ? "6" : "3");
             State(accept ? "Incoming transfer accepted — requesting iPad LAN mode" : "Incoming transfer rejected");
             return;
         }
 
-        // State 3: Phone's WLAN endpoint offer. Two wire formats arrive here:
-        //  1. ip/port only — LAN mode; our address is echoed back via wlan_accept.
-        //  2. ssid/psk/ip/port — the phone selected its own hotspot path, so
-        //     the PC joins that network and continues with the same receiver.
         if (root.TryGetProperty("wlan", out _) ||
             (root.TryGetProperty("ip", out _) && root.TryGetProperty("port", out _)))
         {
@@ -351,11 +302,6 @@ public sealed class ReceiveGattServer : IDisposable
                 return;
             }
 
-            // The phone's BLE client (APK d8/j, Z==3) blocks in LAN mode until it
-            // receives this notify: without "wlan_accept":true it never calls
-            // startFileTransfer, so the WebSocket connects but no frames ever flow.
-            // The ip must be our own LAN address, encrypted with the same session
-            // key/iv the phone used for its state-3 write (softap/a.g() wire format).
             var freq = root.TryGetProperty("freq", out var freqEl) && freqEl.ValueKind == JsonValueKind.String
                 ? freqEl.GetString() : null;
             var lan = LanInfo.Detect();
@@ -377,11 +323,6 @@ public sealed class ReceiveGattServer : IDisposable
                 Log.Error("RX: no LAN adapter for wlan_accept — phone will abort the transfer");
             }
 
-            // OnePlus Share 16.10.61 race (l9/n): the moment the phone receives
-            // wlan_accept it writes action:0:wlanBandwidth to the WebSocket and
-            // arms a 1 s timer. If the PC connects afterwards the control frame
-            // is lost and the phone aborts with check_wlan_band_failed. So:
-            // UDP listener first, WebSocket pre-connect second, wlan_accept last.
             StartBandwidthEcho(portNum);
 
             ClientWebSocket? preconnected = null;
@@ -406,14 +347,23 @@ public sealed class ReceiveGattServer : IDisposable
             {
                 try
                 {
+                    var urlReceived = false;
                     var files = await ReceiveSession.PullAsync(
                         ip, portNum, _padName, SaveDirectory,
                         State,
                         (done, total) => TransferProgress?.Invoke(done, total),
                         lanPullCt, preconnected,
-                        metadata => TransferMetadata?.Invoke(metadata));
+                        metadata => TransferMetadata?.Invoke(metadata),
+                        url =>
+                        {
+                            urlReceived = true;
+                            UrlReceived?.Invoke(_padName, url);
+                        });
 
-                    TransferCompleted?.Invoke(_padName, files);
+                    if (files.Count > 0)
+                        TransferCompleted?.Invoke(_padName, files);
+                    else if (!urlReceived)
+                        Log.Warn("RX: transfer completed without files or URL payload");
                 }
                 catch (OperationCanceledException)
                 {
@@ -440,10 +390,6 @@ public sealed class ReceiveGattServer : IDisposable
         Log.Info("RX: transfer cancellation requested");
     }
 
-    /// <summary>
-    /// The phone may provide a SoftAP hotspot. Join it on the PC's Wi-Fi
-    /// adapter, then run the same WebSocket pull against that endpoint.
-    /// </summary>
     private async Task HandleHotspotOfferAsync(string ssid, string psk, string ip, int port)
     {
         if (Interlocked.CompareExchange(ref _hotspotJoining, 1, 0) != 0)
@@ -460,12 +406,21 @@ public sealed class ReceiveGattServer : IDisposable
         try
         {
             await WifiJoiner.ConnectAsync(ssid, psk, ip, port, State, hotspotCt);
+            var urlReceived = false;
             var files = await ReceiveSession.PullAsync(
                 ip, port, _padName, SaveDirectory,
                 State,
                 (done, total) => TransferProgress?.Invoke(done, total), hotspotCt,
-                metadata => TransferMetadata?.Invoke(metadata));
-            TransferCompleted?.Invoke(_padName, files);
+                metadata => TransferMetadata?.Invoke(metadata),
+                url =>
+                {
+                    urlReceived = true;
+                    UrlReceived?.Invoke(_padName, url);
+                });
+            if (files.Count > 0)
+                TransferCompleted?.Invoke(_padName, files);
+            else if (!urlReceived)
+                Log.Warn("RX: hotspot transfer completed without files or URL payload");
         }
         catch (OperationCanceledException)
         {
@@ -486,13 +441,6 @@ public sealed class ReceiveGattServer : IDisposable
         }
     }
 
-    /// <summary>
-    /// Echoes the phone's UDP bandwidth-probe flood back to its source
-    /// (APK l9/u.g + l9/u.f: the phone sends 256 × 4096 B to our IP on the
-    /// port below and needs ≥ 256 KB echoed within its 1 s check window).
-    /// The flood targets the phone's own task port + 1 (the value it stores
-    /// per task); 8960 (8959 + 1) is the protocol default and bound as well.
-    /// </summary>
     private void StartBandwidthEcho(int phonePort)
     {
         _ = Task.Run(async () =>
@@ -518,8 +466,6 @@ public sealed class ReceiveGattServer : IDisposable
                 }
                 if (clients.Count == 0) return;
                 State($"Bandwidth probe echo listening on UDP {string.Join("/", clients.Select(c => ((System.Net.IPEndPoint)c.Client.LocalEndPoint!).Port))}");
-                // the phone's check window is ~1 s — if nothing arrives by 3 s the
-                // flood is not reaching us at all (wrong port / firewall / iface)
                 _ = Task.Delay(3000).ContinueWith(_ =>
                 {
                     if (Interlocked.Read(ref _bandPackets) == 0)
@@ -542,8 +488,6 @@ public sealed class ReceiveGattServer : IDisposable
     private static long _bandBytes;
     private static long _bandStartTicks;
 
-    /// <summary>Received-bandwidth estimate (MB/s) for the wlanBandwidth ack the
-    /// phone parses (APK l9/n.Q, field "speed" — tolerated even when 0.0).</summary>
     internal static double BandwidthSpeedMBps()
     {
         var bytes = Interlocked.Read(ref _bandBytes);
@@ -599,8 +543,6 @@ public sealed class ReceiveGattServer : IDisposable
     private async Task NotifyAsync(string text)
     {
         if (_notify is null) { Log.Warn("RX: 0x9895 notify skipped — characteristic missing"); return; }
-        // "log printed" ≠ "phone received": check the per-subscriber results,
-        // otherwise a dropped notification (no CCCD subscription, radio busy) looks like success
         var results = await _notify.NotifyValueAsync(ToBuffer(text));
         var failed = results.Where(r => r.Status != GattCommunicationStatus.Success).ToList();
         if (failed.Count == 0)
