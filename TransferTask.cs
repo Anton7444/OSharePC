@@ -111,15 +111,16 @@ public sealed class TransferTask
 
     /// <summary>
     /// OEM Mac/Windows peers use a compact sendRequest that points at /bigmessage.
-    /// The Android URL path identifies URL payloads as http/* and stores the text in
-    /// mShareText; keep shareText as the canonical field and include the standard
-    /// TaskInfo metadata around it for the OConnect receiver.
+    /// Android's stock parser still keys the transfer identity from "id", while our
+    /// CatShare receiver accepts "taskId". Emit both so the phone does not request
+    /// /download with an empty taskId.
     /// </summary>
     public Dictionary<string, object> BuildUrlBigMessage()
     {
         if (!IsUrl) throw new InvalidOperationException("Task is not a URL transfer.");
         return new Dictionary<string, object>
         {
+            ["id"] = TaskId,
             ["taskId"] = TaskId,
             ["senderId"] = SenderId,
             ["senderName"] = SenderName,
