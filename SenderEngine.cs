@@ -370,6 +370,7 @@ public sealed class SenderEngine : IDisposable
                 _staged.FileCount,
                 s => TransferStateChanged?.Invoke(_staged.TaskId, s),
                 phoneConnected: () => Server.WsConnected || _staged.Complete,
+                transferType: _staged.IsUrl ? "http/*" : "file/*",
                 ct: ct);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
             return;
