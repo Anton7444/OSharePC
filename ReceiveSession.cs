@@ -8,6 +8,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Diagnostics;
 
 namespace CatShareSender;
@@ -21,9 +22,9 @@ public sealed record ReceiveMetadata(
     string MimeType);
 
 /// <summary>
-/// Connects as a WebSocket + HTTP client to the sending phone/pad,
-/// performs version negotiation, accepts the sendRequest, and streams the ZIP download.
-/// Supports both plain 'ws://' (stock OPlus with version ≥ 10015) and 'wss://' (CatShare app).
+/// Connects as a WebSocket + HTTP client to the sending phone/pad, performs
+/// version negotiation, accepts sendRequest, and receives either files or the
+/// experimental OEM URL big-message form.
 /// </summary>
 public sealed class ReceiveSession : IDisposable
 {
@@ -33,6 +34,7 @@ public sealed class ReceiveSession : IDisposable
     private readonly Action<string> _state;
     private readonly Action<long, long>? _progress;
     private readonly Action<ReceiveMetadata>? _metadata;
+    private readonly Action<string>? _urlReceived;
     private readonly string _saveDir;
     private int _seq;
 
@@ -40,14 +42,18 @@ public sealed class ReceiveSession : IDisposable
     public string FileName { get; private set; } = "";
     public long TotalSize { get; private set; }
     public string TaskId { get; private set; } = "";
+    public string ReceivedUrl { get; private set; } = "";
     public List<string> SavedFiles { get; } = new();
 
-    private ReceiveSession(string saveDir, Action<string> state, Action<long, long>? progress, Action<ReceiveMetadata>? metadata)
+    private ReceiveSession(
+        string saveDir, Action<string> state, Action<long, long>? progress,
+        Action<ReceiveMetadata>? metadata, Action<string>? urlReceived)
     {
         _saveDir = saveDir;
         _state = state;
         _progress = progress;
         _metadata = metadata;
+        _urlReceived = urlReceived;
         Directory.CreateDirectory(saveDir);
 
         _http = new HttpClient(new HttpClientHandler
@@ -59,9 +65,10 @@ public sealed class ReceiveSession : IDisposable
     public static async Task<List<string>> PullAsync(
         string phoneIp, int port, string phoneName, string saveDir,
         Action<string> state, Action<long, long>? progress = null,
-        CancellationToken ct = default, Action<ReceiveMetadata>? metadata = null)
+        CancellationToken ct = default, Action<ReceiveMetadata>? metadata = null,
+        Action<string>? urlReceived = null)
     {
-        using var session = new ReceiveSession(saveDir, state, progress, metadata);
+        using var session = new ReceiveSession(saveDir, state, progress, metadata, urlReceived);
         session.SenderName = phoneName;
         await session.RunAsync(phoneIp, port, ct, preconnected: null);
         return session.SavedFiles;
@@ -70,22 +77,18 @@ public sealed class ReceiveSession : IDisposable
     public static async Task<List<string>> PullAsync(
         string phoneIp, int port, string phoneName, string saveDir,
         Action<string> state, Action<long, long>? progress,
-        CancellationToken ct, ClientWebSocket? preconnected, Action<ReceiveMetadata>? metadata = null)
+        CancellationToken ct, ClientWebSocket? preconnected,
+        Action<ReceiveMetadata>? metadata = null, Action<string>? urlReceived = null)
     {
-        using var session = new ReceiveSession(saveDir, state, progress, metadata);
+        using var session = new ReceiveSession(saveDir, state, progress, metadata, urlReceived);
         session.SenderName = phoneName;
         await session.RunAsync(phoneIp, port, ct, preconnected);
         return session.SavedFiles;
     }
 
     /// <summary>
-    /// OnePlus Share 16.10.61 race fix: the phone sends its UDP band-check
-    /// control message (action:0:wlanBandwidth) over the WebSocket the moment
-    /// it receives wlan_accept — before the PC's WebSocket handshake used to
-    /// finish, so the message was lost and the phone hit its 1 s timeout
-    /// (check_wlan_band_failed). The receiver therefore PRE-CONNECTS to the
-    /// phone's WebSocket before wlan_accept is sent over GATT. Bounded timeout:
-    /// on failure the caller falls back to connect-after-accept.
+    /// OnePlus Share 16.10.61 race fix: pre-connect before wlan_accept so the
+    /// phone's first wlanBandwidth frame cannot be lost.
     /// </summary>
     internal static async Task<ClientWebSocket?> PreConnectAsync(
         string host, int port, TimeSpan timeout, Action<string>? state)
@@ -122,8 +125,6 @@ public sealed class ReceiveSession : IDisposable
         }
         else
         {
-            // APK b9.c disables TLS for peer protocol versions >= 10015. The
-            // observed phone peer is 161061, so plain ws is the primary path.
             var schemes = new[] { "ws", "wss" };
             var connected = false;
             activeScheme = "wss";
@@ -162,12 +163,6 @@ public sealed class ReceiveSession : IDisposable
                 throw new IOException($"Could not establish WebSocket connection to {phoneIp}:{port}");
         }
 
-        // OnePlus Share 16.10.61 (d8/j): the PHONE is the WebSocket server and
-        // initiates versionNegotiation itself (action:0:versionNegotiation?{"versions":[1]}),
-        // the PC only ACKs {"version":1}. Sending our own first can derail the
-        // phone's handshake state machine. But some iPad/LAN clients never send
-        // it — so wait ~5 s for the phone's negotiation and only then send ours
-        // as a fallback (once).
         var handshaken = false;
         var fallbackSent = false;
         Envelope? sendRequest = null;
@@ -176,8 +171,6 @@ public sealed class ReceiveSession : IDisposable
 
         while (sendRequest is null && !ct.IsCancellationRequested)
         {
-            // fallback: the phone never negotiated — send our own handshake
-            // (the old iPad/LAN client flow) and extend the overall deadline
             if (!handshaken && !fallbackSent && negotiateBy <= DateTime.UtcNow)
             {
                 var versionMessage = Envelope.Build("action", 0, "versionNegotiation",
@@ -188,14 +181,11 @@ public sealed class ReceiveSession : IDisposable
                 deadline = DateTime.UtcNow.AddSeconds(30);
             }
 
-            // ReceiveAsync blocks until a frame arrives, so the deadline must be
-            // enforced on the receive itself — checking it after a frame would
-            // leave the session hanging forever on a silent sender.
             var limit = !handshaken && !fallbackSent ? negotiateBy : deadline;
             var remaining = limit - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero)
             {
-                if (!handshaken && !fallbackSent) continue;   // loop top sends the fallback
+                if (!handshaken && !fallbackSent) continue;
                 throw new TimeoutException("timed out waiting for sender's sendRequest");
             }
             Envelope? env;
@@ -229,18 +219,30 @@ public sealed class ReceiveSession : IDisposable
 
                 case "sendRequest":
                     _state($"← {env}");
-                    FileName = env.PayloadString("fileName");
-                    TotalSize = env.PayloadLong("totalSize");
                     TaskId = env.PayloadString("taskId", env.PayloadString("id"));
-                    SenderName = env.PayloadString("senderName", SenderName);
-                    var fileCount = env.PayloadInt("fileCount");
-                    var mimeType = env.PayloadString("mimeType", "file/*");
-                    _metadata?.Invoke(new ReceiveMetadata(
-                        TaskId, SenderName, FileName, fileCount, TotalSize, mimeType));
-                    Log.Info($"RX: receive metadata updated taskId={TaskId} sender='{SenderName}' file='{FileName}' count={fileCount} total={TotalSize} mime='{mimeType}'");
+                    var messageId = env.PayloadString("messageId");
+                    var isMessageSend = string.Equals(env.PayloadString("isMessageSend"), "true", StringComparison.OrdinalIgnoreCase);
+
+                    if (isMessageSend && !string.IsNullOrWhiteSpace(messageId))
+                    {
+                        var bigMessage = await GetBigMessageAsync(phoneIp, port, TaskId, messageId, activeScheme, ct);
+                        ApplyTaskInfo(bigMessage);
+                    }
+                    else
+                    {
+                        ApplyInlineTaskInfo(env);
+                    }
+
                     await SendAckAsync(env, "{}", ct);
                     sendRequest = env;
-                    _state($"receiving {fileCount} file(s) from {SenderName} ({FormatSize(TotalSize)})");
+                    if (!string.IsNullOrEmpty(ReceivedUrl))
+                    {
+                        _state($"received URL from {SenderName}: {ReceivedUrl}");
+                    }
+                    else
+                    {
+                        _state($"receiving files from {SenderName} ({FormatSize(TotalSize)})");
+                    }
                     break;
 
                 case "status":
@@ -248,10 +250,6 @@ public sealed class ReceiveSession : IDisposable
                     break;
 
                 case "wlanBandwidth":
-                    // APK l9/n: the phone sends action:0:wlanBandwidth?{"wlan":"start"},
-                    // floods ~1 MB of UDP, and waits ≤1 s for ack:0:wlanBandwidth.
-                    // Q() parses payload "speed" as float — unparsable/missing is
-                    // tolerated (0.0) but the ACK ITSELF must arrive within the window.
                     _state("received WLAN bandwidth command");
                     var speed = ReceiveGattServer.BandwidthSpeedMBps();
                     await SendAckAsync(env, $"{{\"speed\":\"{speed:F2}\"}}", ct);
@@ -264,7 +262,13 @@ public sealed class ReceiveSession : IDisposable
             }
         }
 
-        // Download the files
+        if (!string.IsNullOrEmpty(ReceivedUrl))
+        {
+            await SendCompletionStatusAsync(ct);
+            _state($"URL received successfully from {SenderName}");
+            return;
+        }
+
         var httpScheme = activeScheme == "wss" ? "https" : "http";
         var downloadUri = new Uri($"{httpScheme}://{phoneIp}:{port}/download?taskId={Uri.EscapeDataString(TaskId)}");
         _state($"downloading from {downloadUri}…");
@@ -273,9 +277,6 @@ public sealed class ReceiveSession : IDisposable
         response.EnsureSuccessStatusCode();
 
         await using var networkStream = await response.Content.ReadAsStreamAsync(ct);
-        // ZipArchive in Read mode needs a seekable stream (it reads the central
-        // directory from the end), and the HTTP response stream is not seekable —
-        // spool the download to a temp file first.
         var tempZip = Path.Combine(Path.GetTempPath(), $"catshare-rx-{Guid.NewGuid():N}.zip");
         try
         {
@@ -311,16 +312,112 @@ public sealed class ReceiveSession : IDisposable
             try { File.Delete(tempZip); } catch { }
         }
 
-        // Send completion status
+        await SendCompletionStatusAsync(ct);
+        _state($"successfully received {SavedFiles.Count} file(s) to {_saveDir}");
+    }
+
+    private async Task<JsonElement> GetBigMessageAsync(
+        string host, int port, string taskId, string messageId, string activeWsScheme, CancellationToken ct)
+    {
+        var preferred = activeWsScheme == "wss" ? new[] { "https", "http" } : new[] { "http", "https" };
+        Exception? last = null;
+        foreach (var scheme in preferred)
+        {
+            var uri = new Uri($"{scheme}://{host}:{port}/bigmessage?taskId={Uri.EscapeDataString(taskId)}&messageId={Uri.EscapeDataString(messageId)}");
+            try
+            {
+                _state($"fetching OShare message metadata from {scheme}://{host}:{port}/bigmessage…");
+                using var response = await _http.GetAsync(uri, ct);
+                response.EnsureSuccessStatusCode();
+                var json = await response.Content.ReadAsStringAsync(ct);
+                using var doc = JsonDocument.Parse(json);
+                Log.Info($"RX: /bigmessage <- {json}");
+                return doc.RootElement.Clone();
+            }
+            catch (Exception ex)
+            {
+                last = ex;
+                Log.Warn($"RX: /bigmessage via {scheme} failed: {ex.Message}");
+            }
+        }
+        throw new IOException($"Could not fetch OShare big-message metadata: {last?.Message}");
+    }
+
+    private void ApplyInlineTaskInfo(Envelope env)
+    {
+        FileName = env.PayloadString("fileName");
+        TotalSize = env.PayloadLong("totalSize");
+        TaskId = env.PayloadString("taskId", env.PayloadString("id"));
+        SenderName = env.PayloadString("senderName", SenderName);
+        var fileCount = Math.Max(1, env.PayloadInt("fileCount"));
+        var mimeType = env.PayloadString("mimeType", "file/*");
+        if (mimeType.Equals("http/*", StringComparison.OrdinalIgnoreCase))
+        {
+            var candidate = FirstNonEmpty(
+                env.PayloadString("shareText"), env.PayloadString("url"),
+                env.PayloadString("text"), env.PayloadString("content"));
+            AcceptUrl(candidate);
+        }
+        PublishMetadata(fileCount, mimeType);
+    }
+
+    private void ApplyTaskInfo(JsonElement root)
+    {
+        string GetString(string name, string fallback = "") =>
+            root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString() ?? fallback
+                : fallback;
+        long GetLong(string name) => root.TryGetProperty(name, out var value) && value.TryGetInt64(out var n) ? n : 0;
+        int GetInt(string name, int fallback = 0) => root.TryGetProperty(name, out var value) && value.TryGetInt32(out var n) ? n : fallback;
+
+        TaskId = GetString("taskId", TaskId);
+        SenderName = GetString("senderName", SenderName);
+        FileName = GetString("fileName", FileName);
+        TotalSize = GetLong("totalSize");
+        var fileCount = Math.Max(1, GetInt("fileCount", 1));
+        var mimeType = GetString("mimeType", "file/*");
+
+        if (mimeType.Equals("http/*", StringComparison.OrdinalIgnoreCase))
+        {
+            var candidate = FirstNonEmpty(
+                GetString("shareText"), GetString("url"), GetString("text"),
+                GetString("content"), GetString("message"));
+            AcceptUrl(candidate);
+            if (TotalSize <= 0) TotalSize = Encoding.UTF8.GetByteCount(ReceivedUrl);
+            if (string.IsNullOrEmpty(FileName) && Uri.TryCreate(ReceivedUrl, UriKind.Absolute, out var uri))
+                FileName = uri.Host;
+        }
+
+        PublishMetadata(fileCount, mimeType);
+    }
+
+    private void AcceptUrl(string candidate)
+    {
+        if (!TransferTask.TryNormalizeUrl(candidate, out var normalized, out var error))
+            throw new InvalidDataException($"OShare URL payload is invalid: {error}");
+        ReceivedUrl = normalized;
+        _urlReceived?.Invoke(normalized);
+        Log.Info($"RX: URL payload accepted: {normalized}");
+    }
+
+    private void PublishMetadata(int fileCount, string mimeType)
+    {
+        _metadata?.Invoke(new ReceiveMetadata(TaskId, SenderName, FileName, fileCount, TotalSize, mimeType));
+        Log.Info($"RX: receive metadata updated taskId={TaskId} sender='{SenderName}' file='{FileName}' count={fileCount} total={TotalSize} mime='{mimeType}'");
+    }
+
+    private static string FirstNonEmpty(params string[] values) =>
+        values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v)) ?? "";
+
+    private async Task SendCompletionStatusAsync(CancellationToken ct)
+    {
         await SendAsync(Envelope.Build("action", ++_seq, "status", new
         {
             taskId = TaskId,
             type = 1,
             reason = "ok",
         }), ct);
-
         try { await ReceiveAsync(ct).WaitAsync(TimeSpan.FromSeconds(3), ct); } catch { }
-        _state($"successfully received {SavedFiles.Count} file(s) to {_saveDir}");
     }
 
     private static async Task<WebSocket> ConnectApkWebSocketAsync(Uri uri, bool useTls, CancellationToken ct)
@@ -421,11 +518,6 @@ public sealed class ReceiveSession : IDisposable
 
             try
             {
-                // The streams MUST be disposed before File.Move: the writer holds
-                // an exclusive (FileShare.None) lock on temp, and `await using var`
-                // only releases it at the END OF THE SCOPE — the Move used to run
-                // while our own process still held the lock ("being used by another
-                // process"). The nested block closes both streams deterministically.
                 await using (var input = entry.Open())
                 await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write,
                     FileShare.None, 128 * 1024, FileOptions.SequentialScan | FileOptions.Asynchronous))
@@ -448,7 +540,6 @@ public sealed class ReceiveSession : IDisposable
 
     private async Task HandleStatusAsync(Envelope env, CancellationToken ct)
     {
-        // Heartbeat handling: type 6 -> answer type 7
         if (env.PayloadInt("type") == 6)
         {
             await SendAsync(Envelope.Build("action", ++_seq, "status", new
@@ -501,7 +592,6 @@ public sealed class ReceiveSession : IDisposable
     {
         var normalized = entryName.Replace('\\', '/');
         var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-        // Remove batch prefix like "0/" if present
         if (parts.Count > 1 && int.TryParse(parts[0], out _)) parts.RemoveAt(0);
         if (parts.Count == 0) parts.Add("received-file");
 
