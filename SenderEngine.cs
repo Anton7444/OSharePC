@@ -36,6 +36,7 @@ public sealed class SenderEngine : IDisposable
     public event Action<long, long>? ReceiveProgress;
     public event Action<ReceiveMetadata>? ReceiveMetadataUpdated;
     public event Action<string, IReadOnlyList<string>>? ReceiveCompleted;
+    public event Action<string, string>? ReceiveUrlReceived;     // (sender, url)
     public event Action<string, string>? ReceiveFailed;
 
     /// <summary>UI hook for incoming transfers: (senderName, mimeType, fileCount) -> accept/reject.</summary>
@@ -65,6 +66,11 @@ public sealed class SenderEngine : IDisposable
             TransferStateChanged?.Invoke(taskId, "download complete");
             if (_staged?.TaskId == taskId) _staged.Complete = true;
         };
+        Server.UrlFinished += taskId =>
+        {
+            TransferStateChanged?.Invoke(taskId, "URL transfer complete");
+            if (_staged?.TaskId == taskId) _staged.Complete = true;
+        };
         Server.StatusReceived += (taskId, type, reason) =>
             TransferStateChanged?.Invoke(taskId, $"status {type}: {reason}");
 
@@ -73,6 +79,7 @@ public sealed class SenderEngine : IDisposable
         Receiver.TransferProgress += (done, total) => ReceiveProgress?.Invoke(done, total);
         Receiver.TransferMetadata += metadata => ReceiveMetadataUpdated?.Invoke(metadata);
         Receiver.TransferCompleted += (pad, files) => ReceiveCompleted?.Invoke(pad, files);
+        Receiver.UrlReceived += (pad, url) => ReceiveUrlReceived?.Invoke(pad, url);
         Receiver.TransferFailed += (pad, err) => ReceiveFailed?.Invoke(pad, err);
         Receiver.ConfirmIncoming = (name, type, count) => ConfirmIncomingTransfer is null
             ? Task.FromResult(true)
@@ -292,6 +299,23 @@ public sealed class SenderEngine : IDisposable
         return task;
     }
 
+    public TransferTask StageUrl(string url)
+    {
+        if (!TransferTask.TryNormalizeUrl(url, out var normalized, out var error))
+            throw new ArgumentException(error, nameof(url));
+        var task = new TransferTask
+        {
+            SharedUrl = normalized,
+            SenderName = Advertiser.DeviceName,
+            SenderId = SenderId,
+        };
+        task.ComputeSize();
+        _staged = task;
+        Server.SetTask(task);
+        Log.Info($"staged URL ({task.TotalSize} bytes), taskId={task.TaskId}, host={task.FirstFileName}");
+        return task;
+    }
+
     public void ClearStaged()
     {
         _staged = null;
@@ -302,7 +326,7 @@ public sealed class SenderEngine : IDisposable
     public async Task SendToAsync(PhoneDevice device, SendFlow flow = SendFlow.Auto)
     {
         if (_staged is null)
-            throw new InvalidOperationException("No files staged to send.");
+            throw new InvalidOperationException("Nothing is staged to send.");
 
         if (Lan is null)
             throw new InvalidOperationException("LAN adapter is not ready.");
@@ -328,12 +352,15 @@ public sealed class SenderEngine : IDisposable
                 : SendFlow.CatShareHotspot,
         };
 
+        if (_staged.IsUrl && resolvedFlow != SendFlow.OConnectLan)
+            throw new InvalidOperationException("URL sharing test currently requires the stock OConnect/互传 receiver path.");
+
         if (resolvedFlow == SendFlow.OConnectLan)
         {
             if (link.OConnectReadChar == null || link.OConnectWriteChar == null)
                 throw new InvalidOperationException("Phone does not expose the OConnect (0x9999) service.");
 
-            TransferStateChanged?.Invoke(_staged.TaskId, "OConnect transfer starting…");
+            TransferStateChanged?.Invoke(_staged.TaskId, _staged.IsUrl ? "OConnect URL share starting…" : "OConnect transfer starting…");
             Server.PeerLooksStock = true;   // OConnect peers are stock 互传 receivers
             await link.OConnectLanSendAsync(
                 Lan,
@@ -408,9 +435,11 @@ public sealed class SenderEngine : IDisposable
                 state => TransferStateChanged?.Invoke("", $"receive: {state}"),
                 (done, total) => ReceiveProgress?.Invoke(done, total),
                 receiveCts.Token,
-                metadata => ReceiveMetadataUpdated?.Invoke(metadata));
-            ReceiveCompleted?.Invoke(offer.SenderId, files);
-            TransferStateChanged?.Invoke("", $"received {files.Count} file(s)");
+                metadata => ReceiveMetadataUpdated?.Invoke(metadata),
+                url => ReceiveUrlReceived?.Invoke(offer.SenderId, url));
+            if (files.Count > 0)
+                ReceiveCompleted?.Invoke(offer.SenderId, files);
+            TransferStateChanged?.Invoke("", files.Count > 0 ? $"received {files.Count} file(s)" : "received URL");
         }
         catch (OperationCanceledException)
         {
