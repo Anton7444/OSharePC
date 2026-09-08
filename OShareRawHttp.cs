@@ -16,6 +16,9 @@ namespace CatShareSender;
 /// </summary>
 internal static class OShareRawHttp
 {
+    private const string LegacyPcUserAgent =
+        "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.2; SV1; .NET CLR 1.1.4322; .NET CLR 2.0.50727)";
+
     public static async Task DownloadZipAsync(
         Uri uri,
         string outputPath,
@@ -24,7 +27,48 @@ internal static class OShareRawHttp
         Action<string>? state,
         CancellationToken ct)
     {
-        var wirePath = outputPath + ".wire";
+        Exception? last = null;
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                if (attempt > 1)
+                {
+                    Log.Warn("RX: retrying stock OShare HTTP body on a fresh keep-alive connection");
+                    state?.Invoke("phone returned an empty HTTP body; retrying once…");
+                    await Task.Delay(180, ct);
+                }
+
+                await DownloadZipAttemptAsync(uri, outputPath, expectedPayloadBytes, progress, state, ct, attempt);
+                return;
+            }
+            catch (TimeoutException ex) when (!ct.IsCancellationRequested && attempt < 2)
+            {
+                last = ex;
+                try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+            }
+            catch (IOException ex) when (!ct.IsCancellationRequested && attempt < 2 &&
+                                          ex.Message.Contains("zero body", StringComparison.OrdinalIgnoreCase))
+            {
+                last = ex;
+                try { if (File.Exists(outputPath)) File.Delete(outputPath); } catch { }
+            }
+        }
+
+        throw last ?? new IOException("stock OShare HTTP download failed");
+    }
+
+    private static async Task DownloadZipAttemptAsync(
+        Uri uri,
+        string outputPath,
+        long expectedPayloadBytes,
+        Action<long, long>? progress,
+        Action<string>? state,
+        CancellationToken ct,
+        int attempt)
+    {
+        var wirePath = outputPath + $".wire.{attempt}";
         try
         {
             using var tcp = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
@@ -33,7 +77,7 @@ internal static class OShareRawHttp
             if (local is not null)
             {
                 tcp.Client.Bind(new IPEndPoint(local, 0));
-                Log.Info($"RX: raw HTTP bound to LAN address {local}");
+                Log.Info($"RX: raw HTTP bound to LAN address {local} (attempt {attempt}/2)");
             }
 
             await tcp.ConnectAsync(uri.Host, uri.Port, ct);
@@ -50,10 +94,15 @@ internal static class OShareRawHttp
                 stream = ssl;
             }
 
+            // Match the request shape emitted by the stock OPlus PC/Mac client seen in
+            // ColorOS traces. In particular do NOT ask the phone to close the socket:
+            // VS-HTTP/iOSFileResponse can interpret Connection: close as an early
+            // response cancellation and close FileChunkedInput before writing data.
             var request = $"GET {uri.PathAndQuery} HTTP/1.1\r\n" +
                           $"Host: {uri.Host}:{uri.Port}\r\n" +
-                          "Accept: application/zip\r\n" +
-                          "Connection: close\r\n" +
+                          $"User-Agent: {LegacyPcUserAgent}\r\n" +
+                          "Accept: */*\r\n" +
+                          "Connection: Keep-Alive\r\n" +
                           "\r\n";
             await stream.WriteAsync(Encoding.ASCII.GetBytes(request), ct);
             await stream.FlushAsync(ct);
@@ -64,12 +113,12 @@ internal static class OShareRawHttp
             if (statusCode < 200 || statusCode >= 300)
                 throw new IOException($"phone raw HTTP download returned {statusLine}");
 
-            var receivedWire = await ReadWireBodyAsync(stream, wirePath, expectedPayloadBytes, progress, ct);
-            if (receivedWire == 0)
-                throw new TimeoutException("phone raw HTTP socket produced no body bytes");
-
             var advertisedChunked = headers.TryGetValue("Transfer-Encoding", out var transferEncoding) &&
                                     transferEncoding.Contains("chunked", StringComparison.OrdinalIgnoreCase);
+            var receivedWire = await ReadWireBodyAsync(
+                stream, wirePath, expectedPayloadBytes, progress, advertisedChunked, ct);
+            if (receivedWire == 0)
+                throw new IOException("phone raw HTTP response had a zero body");
 
             if (StartsWithZip(wirePath))
             {
@@ -143,17 +192,20 @@ internal static class OShareRawHttp
 
     private static async Task<long> ReadWireBodyAsync(
         Stream stream, string wirePath, long expectedPayloadBytes,
-        Action<long, long>? progress, CancellationToken ct)
+        Action<long, long>? progress, bool advertisedChunked, CancellationToken ct)
     {
         await using var output = new FileStream(wirePath, FileMode.Create, FileAccess.Write, FileShare.None,
             256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var buffer = new byte[256 * 1024];
+        var tail = new Queue<byte>(8);
         long received = 0;
         while (true)
         {
             int read;
             using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            readCts.CancelAfter(received == 0 ? TimeSpan.FromSeconds(8) : TimeSpan.FromSeconds(5));
+            // A stock LAN transfer begins producing data almost immediately. Waiting
+            // eight seconds per broken attempt made every failure look like a hang.
+            readCts.CancelAfter(received == 0 ? TimeSpan.FromSeconds(3) : TimeSpan.FromSeconds(2));
             try
             {
                 read = await stream.ReadAsync(buffer.AsMemory(), readCts.Token);
@@ -161,8 +213,8 @@ internal static class OShareRawHttp
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 if (received == 0)
-                    throw new TimeoutException("phone raw HTTP socket produced no body bytes within 8 seconds");
-                Log.Warn($"RX: raw HTTP wire body idle for 5 s after {received} bytes; validating what was received");
+                    throw new TimeoutException("phone raw HTTP socket produced no body bytes within 3 seconds");
+                Log.Warn($"RX: raw HTTP wire body idle for 2 s after {received} bytes; validating what was received");
                 break;
             }
 
@@ -175,9 +227,34 @@ internal static class OShareRawHttp
             await output.WriteAsync(buffer.AsMemory(0, read), ct);
             received += read;
             progress?.Invoke(received, expectedPayloadBytes > 0 ? expectedPayloadBytes : received);
+
+            if (advertisedChunked)
+            {
+                for (var i = 0; i < read; i++)
+                {
+                    if (tail.Count == 8) tail.Dequeue();
+                    tail.Enqueue(buffer[i]);
+                }
+                var t = tail.ToArray();
+                if (EndsWithChunkTerminator(t))
+                {
+                    Log.Info($"RX: raw HTTP saw terminating chunk after {received} wire bytes");
+                    break;
+                }
+            }
         }
         await output.FlushAsync(ct);
         return received;
+    }
+
+    private static bool EndsWithChunkTerminator(byte[] tail)
+    {
+        // Standard final chunk is "0\r\n\r\n". Accept an optional leading CRLF
+        // left by the previous data chunk while looking only at the rolling tail.
+        if (tail.Length < 5) return false;
+        var n = tail.Length;
+        return tail[n - 5] == (byte)'0' && tail[n - 4] == '\r' && tail[n - 3] == '\n' &&
+               tail[n - 2] == '\r' && tail[n - 1] == '\n';
     }
 
     private static bool StartsWithZip(string path)
