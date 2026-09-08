@@ -447,7 +447,11 @@ public sealed class ReceiveGattServer : IDisposable
         {
             Interlocked.Exchange(ref _bandPackets, 0);
             Interlocked.Exchange(ref _bandBytes, 0);
-            Interlocked.Exchange(ref _bandStartTicks, DateTime.UtcNow.Ticks);
+            // Do not start timing here. There can be seconds between opening the
+            // UDP listeners and the phone beginning its one-second probe flood;
+            // including that idle time was the reason healthy LAN links reported
+            // values such as 0.04 MB/s.
+            Interlocked.Exchange(ref _bandStartTicks, 0);
             var ports = new[] { phonePort + 1, 8960 };
             var clients = new List<UdpClient>();
             using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -491,7 +495,9 @@ public sealed class ReceiveGattServer : IDisposable
     internal static double BandwidthSpeedMBps()
     {
         var bytes = Interlocked.Read(ref _bandBytes);
-        var seconds = (DateTime.UtcNow.Ticks - _bandStartTicks) / (double)TimeSpan.TicksPerSecond;
+        var start = Interlocked.Read(ref _bandStartTicks);
+        if (bytes <= 0 || start <= 0) return 0;
+        var seconds = (DateTime.UtcNow.Ticks - start) / (double)TimeSpan.TicksPerSecond;
         if (seconds <= 0) seconds = 0.001;
         return bytes / (1024.0 * 1024.0) / seconds;
     }
@@ -505,7 +511,10 @@ public sealed class ReceiveGattServer : IDisposable
                 var received = await udp.ReceiveAsync(ct);
                 var n = Interlocked.Increment(ref _bandPackets);
                 if (n == 1)
+                {
+                    Interlocked.Exchange(ref _bandStartTicks, DateTime.UtcNow.Ticks);
                     Log.Info($"RX: FIRST band probe packet from {received.RemoteEndPoint} ({received.Buffer.Length}B) — flood is arriving");
+                }
                 else if (n <= 5 || n % 64 == 0)
                     Log.Info($"RX: band probe #{n} ({received.Buffer.Length}B) from {received.RemoteEndPoint}");
                 Interlocked.Add(ref _bandBytes, received.Buffer.Length);
