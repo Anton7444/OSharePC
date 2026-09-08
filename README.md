@@ -1,5 +1,7 @@
 # OShare PC
 
+**English** | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md)
+
 An unofficial Windows client compatible with OPPO/OnePlus OShare.
 
 OShare PC is not affiliated with or endorsed by OPPO or OnePlus.
