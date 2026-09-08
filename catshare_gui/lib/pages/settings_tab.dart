@@ -403,6 +403,37 @@ class _SettingsTabState extends State<SettingsTab> {
                   : AppColors.lightAccent,
               onChanged: _saveMinimizeToTray,
             ),
+            Divider(
+              height: 1,
+              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+            ),
+            SwitchListTile(
+              title: Text(
+                appText(widget.currentLanguage, 'receiveSuccessNotification'),
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+              subtitle: Text(
+                appText(
+                  widget.currentLanguage,
+                  'receiveSuccessNotificationHint',
+                ),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isDark
+                      ? AppColors.darkTextMuted
+                      : AppColors.lightTextMuted,
+                ),
+              ),
+              value: widget.client.receiveSuccessNotifications,
+              activeThumbColor: isDark
+                  ? AppColors.darkAccent
+                  : AppColors.lightAccent,
+              onChanged: widget.client.setReceiveSuccessNotifications,
+            ),
           ],
         ),
 
