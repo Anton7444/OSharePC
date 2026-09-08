@@ -71,4 +71,4 @@ OShare PC 是非官方项目，与 OPPO 或 OnePlus 没有关联，也未获得�
 
 ## 许可证
 
-此项目目前尚未发布开源许可证。在选定许可证之前，请勿假定你拥有重新分发或修改此项目的权限。
+本项目采用 **GNU General Public License v3.0 only（GPL-3.0-only）** 许可。完整许可证文本请参阅 [LICENSE](LICENSE)。
