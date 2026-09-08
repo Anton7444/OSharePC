@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -18,6 +19,10 @@ internal static class OShareRawHttp
 {
     private const string LegacyPcUserAgent =
         "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.2; SV1; .NET CLR 1.1.4322; .NET CLR 2.0.50727)";
+
+    private const int SocketReceiveBufferSize = 1024 * 1024;
+    private const int AppReadBufferSize = 256 * 1024;
+    private static readonly TimeSpan ProgressInterval = TimeSpan.FromMilliseconds(100);
 
     public static async Task DownloadZipAsync(
         Uri uri,
@@ -71,7 +76,12 @@ internal static class OShareRawHttp
         var wirePath = outputPath + $".wire.{attempt}";
         try
         {
-            using var tcp = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
+            using var tcp = new TcpClient(AddressFamily.InterNetwork)
+            {
+                NoDelay = true,
+                ReceiveBufferSize = SocketReceiveBufferSize,
+            };
+
             var peer = IPAddress.Parse(uri.Host);
             var local = GetSameSubnetAddress(peer);
             if (local is not null)
@@ -81,6 +91,8 @@ internal static class OShareRawHttp
             }
 
             await tcp.ConnectAsync(uri.Host, uri.Port, ct);
+            Log.Info($"RX: raw HTTP socket receive buffer={tcp.ReceiveBufferSize} bytes, app read buffer={AppReadBufferSize} bytes");
+
             Stream stream = tcp.GetStream();
             if (uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
             {
@@ -195,10 +207,14 @@ internal static class OShareRawHttp
         Action<long, long>? progress, bool advertisedChunked, CancellationToken ct)
     {
         await using var output = new FileStream(wirePath, FileMode.Create, FileAccess.Write, FileShare.None,
-            256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var buffer = new byte[256 * 1024];
-        var tail = new Queue<byte>(8);
+            AppReadBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var buffer = new byte[AppReadBufferSize];
+        var tail = new byte[8];
+        var tailLength = 0;
         long received = 0;
+        var stopwatch = Stopwatch.StartNew();
+        var lastProgressAt = TimeSpan.Zero;
+
         while (true)
         {
             int read;
@@ -226,28 +242,63 @@ internal static class OShareRawHttp
 
             await output.WriteAsync(buffer.AsMemory(0, read), ct);
             received += read;
-            progress?.Invoke(received, expectedPayloadBytes > 0 ? expectedPayloadBytes : received);
+
+            var elapsed = stopwatch.Elapsed;
+            if (elapsed - lastProgressAt >= ProgressInterval)
+            {
+                progress?.Invoke(received, expectedPayloadBytes > 0 ? expectedPayloadBytes : received);
+                lastProgressAt = elapsed;
+            }
 
             if (advertisedChunked)
             {
-                for (var i = 0; i < read; i++)
-                {
-                    if (tail.Count == 8) tail.Dequeue();
-                    tail.Enqueue(buffer[i]);
-                }
-                var t = tail.ToArray();
-                if (EndsWithChunkTerminator(t))
+                UpdateTail(tail, ref tailLength, buffer.AsSpan(0, read));
+                if (EndsWithChunkTerminator(tail.AsSpan(0, tailLength)))
                 {
                     Log.Info($"RX: raw HTTP saw terminating chunk after {received} wire bytes");
                     break;
                 }
             }
         }
+
         await output.FlushAsync(ct);
+        stopwatch.Stop();
+        progress?.Invoke(received, expectedPayloadBytes > 0 ? expectedPayloadBytes : received);
+
+        if (received > 0 && stopwatch.Elapsed.TotalSeconds > 0)
+        {
+            var mibPerSecond = received / (1024d * 1024d) / stopwatch.Elapsed.TotalSeconds;
+            Log.Info($"RX: raw HTTP socket throughput {mibPerSecond:F2} MiB/s ({received} bytes in {stopwatch.Elapsed.TotalSeconds:F3}s)");
+            stateThroughputLog(mibPerSecond);
+        }
+
         return received;
+
+        void stateThroughputLog(double mibPerSecond)
+        {
+            // Keep this in the engine log rather than the user-facing transfer state.
+            // Flutter's displayed speed is sampled through the bridge and can differ.
+            Log.Info($"RX: network-only throughput sample={mibPerSecond:F2} MiB/s");
+        }
     }
 
-    private static bool EndsWithChunkTerminator(byte[] tail)
+    private static void UpdateTail(byte[] tail, ref int tailLength, ReadOnlySpan<byte> data)
+    {
+        if (data.Length >= tail.Length)
+        {
+            data[^tail.Length..].CopyTo(tail);
+            tailLength = tail.Length;
+            return;
+        }
+
+        var keep = Math.Min(tailLength, tail.Length - data.Length);
+        if (keep > 0)
+            Buffer.BlockCopy(tail, tailLength - keep, tail, 0, keep);
+        data.CopyTo(tail.AsSpan(keep));
+        tailLength = keep + data.Length;
+    }
+
+    private static bool EndsWithChunkTerminator(ReadOnlySpan<byte> tail)
     {
         // Standard final chunk is "0\r\n\r\n". Accept an optional leading CRLF
         // left by the previous data chunk while looking only at the rolling tail.
