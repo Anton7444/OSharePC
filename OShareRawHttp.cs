@@ -191,26 +191,27 @@ internal static class OShareRawHttp
 
     private static long DecodeChunkedBody(string wirePath, string outputPath)
     {
-        using var input = File.OpenRead(wirePath);
-        using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
         long decoded = 0;
-
-        while (input.Position < input.Length)
+        using (var input = File.OpenRead(wirePath))
+        using (var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {
-            var line = ReadAsciiLine(input);
-            if (line is null) break;
-            if (line.Length == 0) continue;
-            var sizeText = line.Split(';', 2)[0].Trim();
-            if (!long.TryParse(sizeText, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var size) || size < 0)
-                throw new InvalidDataException($"invalid OShare HTTP chunk size '{line}'");
-            if (size == 0) break;
+            while (input.Position < input.Length)
+            {
+                var line = ReadAsciiLine(input);
+                if (line is null) break;
+                if (line.Length == 0) continue;
+                var sizeText = line.Split(';', 2)[0].Trim();
+                if (!long.TryParse(sizeText, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var size) || size < 0)
+                    throw new InvalidDataException($"invalid OShare HTTP chunk size '{line}'");
+                if (size == 0) break;
 
-            CopyExact(input, output, size);
-            decoded += size;
-            ConsumeChunkTerminator(input);
+                CopyExact(input, output, size);
+                decoded += size;
+                ConsumeChunkTerminator(input);
+            }
+            output.Flush();
         }
 
-        output.Flush();
         if (decoded == 0)
             throw new InvalidDataException("OShare chunked response decoded to an empty body");
         if (!StartsWithZip(outputPath))
