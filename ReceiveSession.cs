@@ -273,106 +273,29 @@ public sealed class ReceiveSession : IDisposable
         var downloadUri = new Uri($"{httpScheme}://{phoneIp}:{port}/download?taskId={Uri.EscapeDataString(TaskId)}");
         _state($"downloading from {downloadUri}…");
 
-        // Stock ColorOS can write a complete ZIP but keep the HTTP connection alive
-        // without giving .NET a clean EOF. Ask for close explicitly, honor a declared
-        // Content-Length when present, and use a bounded no-data timeout as a final
-        // compatibility escape hatch. The ZIP central directory is still validated
-        // before any extraction, so a genuinely truncated response is rejected.
-        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUri)
-        {
-            Version = HttpVersion.Version11,
-            VersionPolicy = HttpVersionPolicy.RequestVersionExact,
-        };
-        request.Headers.ConnectionClose = true;
-
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
-
-        var contentLength = response.Content.Headers.ContentLength;
-        var headerSummary = string.Join("; ", response.Headers.Concat(response.Content.Headers)
-            .Select(h => $"{h.Key}={string.Join(",", h.Value)}"));
-        Log.Info($"RX: HTTP download response {(int)response.StatusCode} {response.ReasonPhrase}; contentLength={(contentLength?.ToString() ?? "unknown")}; {headerSummary}");
-
-        await using var networkStream = await response.Content.ReadAsStreamAsync(ct);
+        // Do not use HttpClient for the stock file body. Real ColorOS 16 traces show
+        // Server: VS-HTTP + Transfer-Encoding: chunked, while HttpClient receives the
+        // headers but never exposes even one decoded body byte. Read the TCP wire
+        // directly and accept both standard chunk framing and the observed raw-ZIP
+        // body behind a misleading chunked header.
         var tempZip = Path.Combine(Path.GetTempPath(), $"catshare-rx-{Guid.NewGuid():N}.zip");
-        var bodyEndedByIdleTimeout = false;
         try
         {
-            await using (var spool = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None,
-                256 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
-            {
-                var buffer = new byte[256 * 1024];
-                long received = 0;
-                var lastReport = Stopwatch.GetTimestamp();
-                var reportInterval = Stopwatch.Frequency / 5;
-
-                while (true)
-                {
-                    int read;
-                    using (var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-                    {
-                        // First byte can legitimately take longer while the phone opens
-                        // its file. Once data is flowing, five seconds with no next byte
-                        // is a protocol/framing stall on a local OShare link.
-                        readCts.CancelAfter(received == 0 ? TimeSpan.FromSeconds(12) : TimeSpan.FromSeconds(5));
-                        try
-                        {
-                            read = await networkStream.ReadAsync(buffer.AsMemory(), readCts.Token);
-                        }
-                        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-                        {
-                            if (received == 0)
-                                throw new TimeoutException("phone HTTP download produced no body data within 12 seconds");
-
-                            bodyEndedByIdleTimeout = true;
-                            Log.Warn($"RX: HTTP body produced no more bytes for 5 s after {received} bytes; treating this as a possible stock-OShare missing EOF and validating the ZIP");
-                            break;
-                        }
-                    }
-
-                    if (read == 0)
-                    {
-                        Log.Info($"RX: HTTP body reached EOF after {received} bytes");
-                        break;
-                    }
-
-                    await spool.WriteAsync(buffer.AsMemory(0, read), ct);
-                    received += read;
-
-                    if (contentLength is long declared)
-                    {
-                        if (received > declared)
-                            throw new InvalidDataException($"phone sent more HTTP body data than Content-Length ({received}>{declared})");
-                        if (received == declared)
-                        {
-                            Log.Info($"RX: HTTP body complete by Content-Length ({received} bytes); no EOF wait needed");
-                            break;
-                        }
-                    }
-
-                    var now = Stopwatch.GetTimestamp();
-                    if (now - lastReport >= reportInterval)
-                    {
-                        _progress?.Invoke(received, contentLength ?? TotalSize);
-                        lastReport = now;
-                    }
-                }
-
-                _progress?.Invoke(received, contentLength ?? TotalSize);
-                await spool.FlushAsync(ct);
-                Log.Info($"RX: HTTP body spooled {received} bytes (idle-timeout-termination={bodyEndedByIdleTimeout})");
-            }
+            await OShareRawHttp.DownloadZipAsync(
+                downloadUri, tempZip, TotalSize, _progress, _state, ct);
 
             try
             {
                 using var zipFile = File.OpenRead(tempZip);
                 using var zip = new ZipArchive(zipFile, ZipArchiveMode.Read);
                 Log.Info($"RX: ZIP central directory valid, entries={zip.Entries.Count}");
+                if (zip.Entries.Count == 0)
+                    throw new InvalidDataException("phone returned an empty ZIP");
                 await ExtractZipAsync(zip, ct);
             }
-            catch (InvalidDataException ex) when (bodyEndedByIdleTimeout)
+            catch (InvalidDataException ex)
             {
-                throw new IOException("phone stopped the HTTP body without EOF before a complete ZIP was received", ex);
+                throw new IOException("phone HTTP body was not a complete OShare ZIP", ex);
             }
         }
         finally
@@ -438,7 +361,7 @@ public sealed class ReceiveSession : IDisposable
         long GetLong(string name) => root.TryGetProperty(name, out var value) && value.TryGetInt64(out var n) ? n : 0;
         int GetInt(string name, int fallback = 0) => root.TryGetProperty(name, out var value) && value.TryGetInt32(out var n) ? n : fallback;
 
-        TaskId = GetString("taskId", TaskId);
+        TaskId = GetString("taskId", GetString("id", TaskId));
         SenderName = GetString("senderName", SenderName);
         FileName = GetString("fileName", FileName);
         TotalSize = GetLong("totalSize");
