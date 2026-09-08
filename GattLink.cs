@@ -484,7 +484,10 @@ public sealed class GattLink : IDisposable
                 if (cccdOff is not null)
                     await cccdOff.WriteValueAsync(ToBuffer(BitConverter.GetBytes((ushort)0)));
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Log.Warn($"BLE: CCCD(9898) unsubscribe failed: {ex.Message}");
+            }
         }
     }
 
