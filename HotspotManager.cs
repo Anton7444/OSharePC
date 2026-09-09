@@ -23,10 +23,9 @@ public sealed class HotspotManager
     // happens. A normal ssid takes the branch that saves our real BSSID as the
     // external peer address, which is what makes the legacy-AP join work.
     public const string DefaultSsid = "DIRECT-PC-AP";
-    public const string DefaultPsk = "cs12345678";
 
     public string Ssid { get; private set; } = DefaultSsid;
-    public string Psk { get; private set; } = DefaultPsk;
+    public string Psk { get; private set; } = "";
     public string GatewayIp { get; private set; } = "";
     public bool IsRunning { get; private set; }
 
@@ -48,11 +47,14 @@ public sealed class HotspotManager
         var currentSsid = config.Ssid;
         var currentPsk = config.Passphrase;
 
-        // deterministic ssid/psk: they must match the credential JSON exactly, and the
-        // ssid must NOT end with "fastCon" (that suffix sends the phone into its
-        // persistent-group-reinvoke branch with a zero peer address — no association)
+        // The SSID is stable for compatibility, but the passphrase is intentionally
+        // fresh for every transfer start. A public source tree must not expose a
+        // reusable hotspot credential. The exact generated PSK is sent to the selected
+        // phone over the existing BLE credential channel.
+        var desiredPsk = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))
+            .ToLowerInvariant();
         config.Ssid = DefaultSsid;
-        config.Passphrase = DefaultPsk;
+        config.Passphrase = desiredPsk;
 
         Ssid = config.Ssid;
         Psk = config.Passphrase;
@@ -70,7 +72,7 @@ public sealed class HotspotManager
         else
         {
             // make sure the running hotspot actually uses our ssid/psk
-            if (currentSsid != DefaultSsid || currentPsk != DefaultPsk)
+            if (currentSsid != DefaultSsid || currentPsk != desiredPsk)
             {
                 await tethering.ConfigureAccessPointAsync(config);
                 await tethering.StopTetheringAsync();
