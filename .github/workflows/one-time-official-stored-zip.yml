@@ -31,7 +31,7 @@ jobs:
         run: |
           $log = Join-Path $env:LOCALAPPDATA 'CatShareSender\sender.log'
           Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
-          $exe = Resolve-Path 'bin/Release/net10.0-windows10.0.19041.0/CatShareSender.exe'
+          $exe = Resolve-Path 'bin/Release/net10.0-windows10.0.19041.0/win-x64/CatShareSender.exe'
           $process = Start-Process -FilePath $exe -ArgumentList '--mockphone' -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
