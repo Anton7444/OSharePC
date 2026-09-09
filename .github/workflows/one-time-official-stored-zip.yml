@@ -1,0 +1,196 @@
+name: Align sender ZIP with OnePlus Share
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Patch stock sender to official STORED ZIP path
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          p = Path('TransferServer.cs')
+          s = p.read_text(encoding='utf-8')
+
+          old_single = '''            ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+            ctx.Response.ContentType = "application/zip";
+            ctx.Response.Headers["nd_zip"] = "true";
+            ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+            ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\\\"{Uri.EscapeDataString(Path.GetFileName(single[0]))}\\\"";
+            await WriteFolderStreamZip(ctx, single, new FileInfo(single[0]).Length, _cancelCts.Token);'''
+          new_single = '''            await WriteDownloadZip(
+                ctx,
+                single,
+                new FileInfo(single[0]).Length,
+                Path.GetFileName(single[0]),
+                _cancelCts.Token);'''
+          if old_single not in s:
+              raise SystemExit('per-file ZIP response block not found')
+          s = s.replace(old_single, new_single, 1)
+
+          old_batch = '''        // whole-batch mode — same zip layout
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/zip";
+        ctx.Response.Headers["nd_zip"] = "true";
+        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\\\"{Uri.EscapeDataString(task.FirstFileName)}\\\"";
+        await WriteFolderStreamZip(ctx, task.Files, task.TotalSize, _cancelCts.Token);'''
+          new_batch = '''        // whole-batch mode — stock OnePlus peers use the official STORED ZIP path;
+        // custom/CatShare peers retain the legacy folder-stream compatibility path.
+        await WriteDownloadZip(ctx, task.Files, task.TotalSize, task.FirstFileName, _cancelCts.Token);'''
+          if old_batch not in s:
+              raise SystemExit('whole-batch ZIP response block not found')
+          s = s.replace(old_batch, new_batch, 1)
+
+          marker = '''    /// <summary>Streams the given files as a zip (entries under 0/) — the ONLY body
+    /// shape the pad's receiver parses correctly.</summary>'''
+          helper = '''    /// <summary>
+    /// Stock OnePlus/OShare peers use the APK's iOSFileResponse/FileChunkedInput
+    /// format: application/zip, chunked HTTP, direct filenames, STORED entries with
+    /// CRC/size known before the local header, and 1 MiB data chunks. The legacy
+    /// folder-stream path remains only for the custom CatShare-compatible peer.
+    /// </summary>
+    private async Task WriteDownloadZip(
+        HttpContext ctx,
+        IReadOnlyList<string> files,
+        long total,
+        string legacyDispositionName,
+        CancellationToken cancelToken)
+    {
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/zip";
+
+        if (PeerLooksStock)
+        {
+            ctx.Response.Headers.Remove("nd_zip");
+            ctx.Response.Headers.Remove("Oshare-Transfer-Type");
+            ctx.Response.Headers["Content-Disposition"] = "attachment; filename=\\\"files.zip\\\"";
+            Log.Info($"HTTP: OnePlus-compatible STORED ZIP response, files={files.Count}, payload={total}");
+
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+            await OfficialStoredZipWriter.WriteAsync(
+                ctx.Response.Body,
+                files,
+                total,
+                (sent, expected) =>
+                {
+                    try { DownloadProgress?.Invoke(sent, expected); } catch { }
+                },
+                linked.Token);
+            return;
+        }
+
+        ctx.Response.Headers["nd_zip"] = "true";
+        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\\\"{Uri.EscapeDataString(legacyDispositionName)}\\\"";
+        await WriteFolderStreamZip(ctx, files, total, cancelToken);
+    }
+
+    /// <summary>Legacy CatShare compatibility ZIP (entries under 0/). Stock OnePlus
+    /// peers do not use this path.</summary>'''
+          if marker not in s:
+              raise SystemExit('legacy ZIP method marker not found')
+          s = s.replace(marker, helper, 1)
+          p.write_text(s, encoding='utf-8')
+
+          p = Path('Program.cs')
+          s = p.read_text(encoding='utf-8')
+          start_marker = '''        // 3. download the ZIP like the receiver does (folder-stream) — plaintext, the'''
+          end_marker = '''        // 4. phone sends final status'''
+          start = s.find(start_marker)
+          end = s.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('mockphone download verification region not found')
+
+          new_test = '''        // 3. Download exactly like a stock OnePlus receiver. The official iOS sender
+        //    uses a chunked application/zip response named files.zip with direct
+        //    filenames and ZIP method STORED (0), not our legacy 0/ folder-stream.
+        using var http = new System.Net.Http.HttpClient();
+        var url = $"http://127.0.0.1:{SenderEngine.DefaultPort}/download?taskId={task.TaskId}";
+        Log.Info($"MOCKPHONE: GET {url}");
+        var resp = await http.GetAsync(url, cts.Token);
+        if (!resp.IsSuccessStatusCode) { Log.Error($"MOCKPHONE FAIL: HTTP {(int)resp.StatusCode}"); failures++; return failures == 0 ? 0 : 1; }
+        Log.Info($"MOCKPHONE: HTTP {(int)resp.StatusCode}, transfer-type={(resp.Headers.TryGetValues("Oshare-Transfer-Type", out var tt) ? string.Join(",", tt!) : "none")}, len={resp.Content.Headers.ContentLength?.ToString() ?? "chunked"}");
+
+        if (resp.Headers.TryGetValues("Oshare-Transfer-Type", out _))
+        { Log.Error("MOCKPHONE FAIL: stock path must not advertise legacy Oshare-Transfer-Type"); failures++; }
+        var disposition = resp.Content.Headers.ContentDisposition?.FileName?.Trim('"');
+        if (!string.Equals(disposition, "files.zip", StringComparison.OrdinalIgnoreCase))
+        { Log.Error($"MOCKPHONE FAIL: Content-Disposition filename was '{disposition}', expected files.zip"); failures++; }
+
+        var zipBytes = await resp.Content.ReadAsByteArrayAsync(cts.Token);
+        if (zipBytes.Length < 30 || BitConverter.ToUInt32(zipBytes, 0) != 0x04034B50u)
+        { Log.Error("MOCKPHONE FAIL: invalid ZIP local header"); failures++; }
+        else if (BitConverter.ToUInt16(zipBytes, 8) != 0)
+        { Log.Error($"MOCKPHONE FAIL: ZIP compression method={BitConverter.ToUInt16(zipBytes, 8)}, expected STORED(0)"); failures++; }
+        else Log.Info("MOCKPHONE: local ZIP header confirms STORED method 0");
+
+        using var zipMemory = new MemoryStream(zipBytes, writable: false);
+        using var zip = new System.IO.Compression.ZipArchive(zipMemory, System.IO.Compression.ZipArchiveMode.Read);
+        var entryNames = zip.Entries.Select(e => e.FullName).ToArray();
+        Log.Info($"MOCKPHONE: zip entries: [{string.Join(", ", entryNames)}]");
+        if (entryNames.Length != 2 || entryNames.Any(n => n.Contains('/')))
+        { Log.Error("MOCKPHONE FAIL: stock ZIP entries must be direct filenames"); failures++; }
+        else
+        {
+            var ok = true;
+            foreach (var entry in zip.Entries)
+            {
+                if (entry.CompressedLength != entry.Length)
+                { Log.Error($"MOCKPHONE FAIL: {entry.FullName} is compressed ({entry.CompressedLength}/{entry.Length})"); ok = false; }
+                var src = entry.FullName.EndsWith(".txt") ? tmp1 : tmp2;
+                var downloaded = await File.ReadAllBytesAsync(src, cts.Token);
+                await using var es = entry.Open();
+                using var ms = new MemoryStream();
+                await es.CopyToAsync(ms, cts.Token);
+                if (!ms.ToArray().SequenceEqual(downloaded)) { Log.Error($"MOCKPHONE FAIL: content mismatch for {entry.FullName}"); ok = false; }
+            }
+            if (ok) Log.Info($"MOCKPHONE: official STORED content verified for {entryNames.Length} entries");
+            else failures++;
+        }
+
+'''
+          s = s[:start] + new_test + s[end:]
+          p.write_text(s, encoding='utf-8')
+          '@ | python -
+
+      - name: Verify compile and protocol test
+        shell: pwsh
+        run: |
+          dotnet build CatShareSender.csproj -c Release
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender\sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $exe = Resolve-Path 'bin/Release/net10.0-windows10.0.19041.0/CatShareSender.exe'
+          $process = Start-Process -FilePath $exe -ArgumentList '--mockphone' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw "MOCKPHONE failed with exit code $($process.ExitCode)"
+          }
+          if (-not (Select-String -LiteralPath $log -Pattern 'MOCKPHONE PASSED' -Quiet)) {
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw 'MOCKPHONE PASSED not found'
+          }
+          Get-Content -LiteralPath $log | Select-String 'STORED|MOCKPHONE'
+
+      - name: Commit source changes
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add TransferServer.cs Program.cs OfficialStoredZipWriter.cs
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m "Match OnePlus stored ZIP transfer path"
+          git push origin HEAD:main
