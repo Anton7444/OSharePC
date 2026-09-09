@@ -5,6 +5,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without leading v
+        required: true
+        type: string
+      target_sha:
+        description: Commit SHA the release tag should target
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +23,20 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+      - name: Determine release version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $version = '${{ inputs.version }}'.Trim()
+            $target = '${{ inputs.target_sha }}'.Trim()
+            if ([string]::IsNullOrWhiteSpace($target)) { $target = $env:GITHUB_SHA }
+          } else {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+            $target = $env:GITHUB_SHA
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'Release version is empty' }
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_TARGET=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -24,11 +47,6 @@ jobs:
           channel: stable
           flutter-version: '3.44.3'
           cache: true
-      - name: Determine release version
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME -replace '^v', ''
-          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Restore Flutter dependencies
         working-directory: catshare_gui
         run: flutter pub get
@@ -71,6 +89,8 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.RELEASE_VERSION }}
+          target_commitish: ${{ env.RELEASE_TARGET }}
           name: ${{ env.RELEASE_VERSION }}
           files: |
             OSharePC-Portable-${{ env.RELEASE_VERSION }}-win-x64.zip
