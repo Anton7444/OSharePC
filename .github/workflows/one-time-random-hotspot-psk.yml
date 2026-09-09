@@ -1,4 +1,4 @@
-name: Randomize transfer hotspot credentials
+name: Fix mock-phone CI isolation
 
 on:
   push:
@@ -14,47 +14,92 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Randomize hotspot PSK and fix loopback test namespace
+      - name: Isolate offline protocol tests from LAN and firewall dependencies
         shell: python
         run: |
           from pathlib import Path
 
-          p = Path('HotspotManager.cs')
+          changed = False
+
+          p = Path('TransferServer.cs')
           text = p.read_text(encoding='utf-8')
-          old = '''    public const string DefaultSsid = "DIRECT-PC-AP";\n    public const string DefaultPsk = "cs12345678";\n\n    public string Ssid { get; private set; } = DefaultSsid;\n    public string Psk { get; private set; } = DefaultPsk;\n'''
-          new = '''    public const string DefaultSsid = "DIRECT-PC-AP";\n\n    public string Ssid { get; private set; } = DefaultSsid;\n    public string Psk { get; private set; } = "";\n'''
-          if old not in text: raise SystemExit('hotspot constants block not found')
-          text = text.replace(old, new, 1)
+          old = '''    public async Task StartAsync(int port)\n    {\n'''
+          new = '''    public async Task StartAsync(int port, bool configureFirewall = true)\n    {\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('TransferServer StartAsync signature not found')
 
-          old = '''        // deterministic ssid/psk: they must match the credential JSON exactly, and the\n        // ssid must NOT end with "fastCon" (that suffix sends the phone into its\n        // persistent-group-reinvoke branch with a zero peer address — no association)\n        config.Ssid = DefaultSsid;\n        config.Passphrase = DefaultPsk;\n\n        Ssid = config.Ssid;\n        Psk = config.Passphrase;\n'''
-          new = '''        // The SSID is stable for compatibility, but the passphrase is intentionally\n        // fresh for every transfer start. A public source tree must not expose a\n        // reusable hotspot credential. The exact generated PSK is sent to the selected\n        // phone over the existing BLE credential channel.\n        var desiredPsk = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))\n            .ToLowerInvariant();\n        config.Ssid = DefaultSsid;\n        config.Passphrase = desiredPsk;\n\n        Ssid = config.Ssid;\n        Psk = config.Passphrase;\n'''
-          if old not in text: raise SystemExit('hotspot config block not found')
-          text = text.replace(old, new, 1)
-
-          old = '''            if (currentSsid != DefaultSsid || currentPsk != DefaultPsk)\n'''
-          new = '''            if (currentSsid != DefaultSsid || currentPsk != desiredPsk)\n'''
-          if old not in text: raise SystemExit('hotspot comparison block not found')
-          text = text.replace(old, new, 1)
+          old = '''            IsRunning = true;\n            TryAddFirewallRule(port);\n            Log.Info($"TransferServer listening on http://0.0.0.0:{port} (ws /websocket, /download)");\n'''
+          new = '''            IsRunning = true;\n            if (configureFirewall)\n                TryAddFirewallRule(port);\n            else\n                Log.Info("TransferServer: firewall setup skipped for isolated test server");\n            Log.Info($"TransferServer listening on http://0.0.0.0:{port} (ws /websocket, /download)");\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('TransferServer firewall block not found')
           p.write_text(text, encoding='utf-8', newline='\n')
 
           p = Path('Program.cs')
           text = p.read_text(encoding='utf-8')
-          if 'using System.Net;\n' not in text:
-              anchor = 'using System.Security.Cryptography;\n'
-              if anchor not in text: raise SystemExit('Program.cs using anchor not found')
-              text = text.replace(anchor, 'using System.Net;\n' + anchor, 1)
+
+          old = '''    private static async Task<int> ZipProbe()\n    {\n        using var engine = new SenderEngine();\n        await engine.StartAsync(SenderEngine.DefaultPort);\n\n        var tmp = Path.Combine(Path.GetTempPath(), "probe.pptx");\n'''
+          new = '''    private static async Task<int> ZipProbe()\n    {\n        await using var server = new TransferServer();\n        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);\n\n        var tmp = Path.Combine(Path.GetTempPath(), "probe.pptx");\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('ZipProbe start block not found')
+
+          old = '''        var task = engine.StageFiles(new[] { tmp })!;\n        engine.Server.AuthorizeLoopbackTest(task);\n'''
+          new = '''        var task = new TransferTask\n        {\n            Files = new List<string> { tmp },\n            SenderName = "OSharePC-ZipProbe",\n            SenderId = "0000",\n        };\n        task.ComputeSize();\n        server.SetTask(task);\n        server.AuthorizeLoopbackTest(task);\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('ZipProbe task block not found')
+
+          old = '''    private static async Task<int> RunMockPhone()\n    {\n        int failures = 0;\n        using var engine = new SenderEngine();\n        await engine.StartAsync(SenderEngine.DefaultPort);\n\n        // stage temp files (one small, one larger) to exercise the multi-file zip\n'''
+          new = '''    private static async Task<int> RunMockPhone()\n    {\n        int failures = 0;\n        await using var server = new TransferServer();\n        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);\n\n        // stage temp files (one small, one larger) to exercise the multi-file zip\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('RunMockPhone start block not found')
+
+          old = '''        var task = engine.StageFiles(new[] { tmp1, tmp2 })!;\n        engine.Server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());\n'''
+          new = '''        var task = new TransferTask\n        {\n            Files = new List<string> { tmp1, tmp2 },\n            SenderName = "OSharePC-MockPhone",\n            SenderId = "0000",\n        };\n        task.ComputeSize();\n        server.SetTask(task);\n        server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('RunMockPhone task block not found')
+
+          old = '''        await engine.StopAsync();\n        Log.Info(failures == 0 ? "MOCKPHONE PASSED" : $"MOCKPHONE FAILED ({failures})");\n'''
+          new = '''        await server.StopAsync();\n        Log.Info(failures == 0 ? "MOCKPHONE PASSED" : $"MOCKPHONE FAILED ({failures})");\n'''
+          if old in text:
+              text = text.replace(old, new, 1)
+              changed = True
+          elif new not in text:
+              raise SystemExit('RunMockPhone stop block not found')
+
           p.write_text(text, encoding='utf-8', newline='\n')
+          print('changed=' + str(changed).lower())
       - name: Verify patch
         run: |
           git diff --check
-          ! grep -R 'cs12345678' HotspotManager.cs
-          grep -q 'RandomNumberGenerator.GetBytes(16)' HotspotManager.cs
-          grep -q '^using System.Net;$' Program.cs
-      - name: Commit
+          grep -q 'StartAsync(int port, bool configureFirewall = true)' TransferServer.cs
+          grep -q 'await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false)' Program.cs
+          ! grep -A8 'RunMockPhone()' Program.cs | grep -q 'using var engine = new SenderEngine'
+      - name: Commit if needed
         shell: bash
         run: |
+          if git diff --quiet; then
+            echo 'Patch already applied.'
+            exit 0
+          fi
           git config user.name 'Anton7444'
           git config user.email '84059108+Anton7444@users.noreply.github.com'
-          git add HotspotManager.cs Program.cs
-          git commit -m 'Secure hotspot credentials and fix loopback test build'
+          git add TransferServer.cs Program.cs
+          git commit -m 'Make mock-phone CI independent of physical LAN'
           git push origin HEAD:main
