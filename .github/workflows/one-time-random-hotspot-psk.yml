@@ -14,13 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Randomize hotspot PSK per transfer start
+      - name: Randomize hotspot PSK and fix loopback test namespace
         shell: python
         run: |
           from pathlib import Path
+
           p = Path('HotspotManager.cs')
           text = p.read_text(encoding='utf-8')
-
           old = '''    public const string DefaultSsid = "DIRECT-PC-AP";\n    public const string DefaultPsk = "cs12345678";\n\n    public string Ssid { get; private set; } = DefaultSsid;\n    public string Psk { get; private set; } = DefaultPsk;\n'''
           new = '''    public const string DefaultSsid = "DIRECT-PC-AP";\n\n    public string Ssid { get; private set; } = DefaultSsid;\n    public string Psk { get; private set; } = "";\n'''
           if old not in text: raise SystemExit('hotspot constants block not found')
@@ -35,18 +35,26 @@ jobs:
           new = '''            if (currentSsid != DefaultSsid || currentPsk != desiredPsk)\n'''
           if old not in text: raise SystemExit('hotspot comparison block not found')
           text = text.replace(old, new, 1)
-
           p.write_text(text, encoding='utf-8', newline='\n')
-      - name: Verify no reusable PSK remains
+
+          p = Path('Program.cs')
+          text = p.read_text(encoding='utf-8')
+          if 'using System.Net;\n' not in text:
+              anchor = 'using System.Security.Cryptography;\n'
+              if anchor not in text: raise SystemExit('Program.cs using anchor not found')
+              text = text.replace(anchor, 'using System.Net;\n' + anchor, 1)
+          p.write_text(text, encoding='utf-8', newline='\n')
+      - name: Verify patch
         run: |
           git diff --check
           ! grep -R 'cs12345678' HotspotManager.cs
           grep -q 'RandomNumberGenerator.GetBytes(16)' HotspotManager.cs
+          grep -q '^using System.Net;$' Program.cs
       - name: Commit
         shell: bash
         run: |
           git config user.name 'Anton7444'
           git config user.email '84059108+Anton7444@users.noreply.github.com'
-          git add HotspotManager.cs
-          git commit -m 'Generate a fresh transfer hotspot password'
+          git add HotspotManager.cs Program.cs
+          git commit -m 'Secure hotspot credentials and fix loopback test build'
           git push origin HEAD:main
