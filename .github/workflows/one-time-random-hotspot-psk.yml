@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/one-time-random-hotspot-psk.yml'
+      - '.github/public-fix-trigger'
 
 permissions:
   contents: write
