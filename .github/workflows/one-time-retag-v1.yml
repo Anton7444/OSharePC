@@ -1,0 +1,54 @@
+name: Replace v1.0.0 release with v1.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-retag-v1.yml'
+
+permissions:
+  contents: write
+
+env:
+  TARGET_SHA: 3458a7531e58a239eeb09ac81581db2dcdd03acd
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete v1.0.0 and create v1.0 tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v1.0.0 --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete v1.0.0 --yes
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete v1.0.0 release' }
+          }
+
+          git ls-remote --exit-code --tags origin refs/tags/v1.0.0 *> $null
+          if ($LASTEXITCODE -eq 0) {
+            git push origin :refs/tags/v1.0.0
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete v1.0.0 tag' }
+          }
+
+          gh release view v1.0 --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete v1.0 --yes
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete existing v1.0 release' }
+          }
+
+          git ls-remote --exit-code --tags origin refs/tags/v1.0 *> $null
+          if ($LASTEXITCODE -eq 0) {
+            git push origin :refs/tags/v1.0
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete existing v1.0 tag' }
+          }
+
+          git tag v1.0 $env:TARGET_SHA
+          git push origin refs/tags/v1.0
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to push v1.0 tag' }
