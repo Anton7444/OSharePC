@@ -30,7 +30,7 @@ class SettingsTab extends StatefulWidget {
 }
 
 class _SettingsTabState extends State<SettingsTab> {
-  static const _guiVersion = '2026.09.06-2300';
+  static const _guiVersion = '1.0';
   bool _minimizeToTray = true;
   bool _closeToTray = true;
   bool _launchAtStartup = false;
