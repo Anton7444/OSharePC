@@ -4,46 +4,38 @@
 
 An unofficial Windows client compatible with OPPO/OnePlus OShare.
 
-OShare PC is not affiliated with or endorsed by OPPO or OnePlus.
+OShare PC is not affiliated with OPPO or OnePlus.
 
 ## Features
 
-- Windows ↔ supported OShare devices
 - Send files from PC to phone
 - Receive files from phone to PC
-- Nearby device discovery
-- Native Flutter/Windows interface
-- System-tray operation, optional startup, and minimized startup in the installed version
-
-Compatibility depends on the phone model and the OShare-compatible app version.
 
 ## Installation
 
 ### Installer
 
-Download `OSharePC-Setup-<version>.exe`, run it, and choose the optional desktop-shortcut or Windows-startup tasks if needed. The installer places OShare PC under the per-user Programs directory.
+Download `OSharePC-Setup-<version>.exe`, run it, and optionally choose to create a desktop shortcut or start OShare PC with Windows.
 
 ### Portable
 
-Download `OSharePC-Portable-<version>-win-x64.zip`, extract it anywhere, and run `catshare_gui.exe`. The portable package has no installer and does not register Start Menu, desktop, or Windows-startup entries.
+Download `OSharePC-Portable-<version>-win-x64.zip`, extract it anywhere, and run `catshare_gui.exe`.
 
-## Requirements
+## System Requirements
 
-- Windows 10 version 19041 or later
-- 64-bit x64 Windows
-- A phone and PC that can use a compatible OShare transfer path
+- Windows 10 19041 or later
+- 64-bit x64 Windows; ARM can only send files
+- A phone that supports mutual transfer
 
 ## Usage
 
-Open OShare PC and leave receiving enabled when you want the PC to be discoverable. To send, choose a nearby phone, select files, and start the transfer. To receive, accept the incoming request when the confirmation dialog appears. Received files are saved to the configured destination folder.
-
-The Settings page contains the destination folder, receive/tray behavior, language, appearance, and startup options.
+Turn on sharing, then send files.
 
 ## Building from Source
 
-The backend targets `.NET 10` and the Flutter project currently uses the stable Flutter `3.44.3` toolchain with Dart `3.12.2`.
+The backend targets `.NET 10`, and the Flutter project currently uses the stable Flutter `3.44.3` toolchain with Dart `3.12.2`.
 
-Install the .NET SDK and Flutter independently; do not use the ignored local `flutter_sdk` directory.
+Install the .NET SDK and Flutter separately; do not use the ignored local `flutter_sdk` directory.
 
 ```powershell
 dotnet build CatShareSender.csproj -c Release -r win-x64
@@ -56,18 +48,13 @@ flutter build windows --release
 cd ..
 ```
 
-To assemble the production runtime, copy the Flutter release output to `deploy-gui`, create `deploy-gui\engine`, and place the published `artifacts\backend\CatShareSender.exe` in that engine directory. The GUI starts that backend beside itself in bridge mode.
+To assemble the production runtime, copy the Flutter release output to `deploy-gui`, create `deploy-gui\engine`, and place the published `artifacts\backend\CatShareSender.exe` in that engine directory. The GUI starts the backend beside it in bridge mode.
 
-For offline backend checks, run `CatShareSender.exe --selftest` and `CatShareSender.exe --mockphone`. Because the backend is a Windows GUI executable, inspect `%LOCALAPPDATA%\CatShareSender\sender.log` for `SELFTEST PASSED` and `MOCKPHONE PASSED`.
-
-## Known Limitations
-
-- Device discovery and transfer compatibility depends on the phone's OShare implementation and Windows Bluetooth/Wi-Fi environment.
-- Physical phone testing is required to validate a particular phone model and transfer direction.
+For offline backend checks, run `CatShareSender.exe --selftest` and `CatShareSender.exe --mockphone`. Because the backend is a Windows GUI executable, check `%LOCALAPPDATA%\CatShareSender\sender.log` and confirm that `SELFTEST PASSED` and `MOCKPHONE PASSED` appear.
 
 ## Disclaimer
 
-OShare PC is an unofficial project and is not affiliated with or endorsed by OPPO or OnePlus.
+OShare PC is an unofficial project and is not affiliated with OPPO or OnePlus.
 
 ## License
 
