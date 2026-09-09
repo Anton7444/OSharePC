@@ -1,0 +1,22 @@
+name: Dispatch v1.0 release build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-dispatch-v1.yml'
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch Release workflow
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release.yml --repo Anton7444/OSharePC --ref main -f version=1.0 -f target_sha=14c9836112eca51963887b04b479fef06cf5637d
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to dispatch Release workflow' }
