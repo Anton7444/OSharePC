@@ -1,0 +1,65 @@
+name: Clear Actions history
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/clear-actions-history.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete all workflow run history
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          repo="$GITHUB_REPOSITORY"
+          current="$GITHUB_RUN_ID"
+
+          echo "Current cleanup run: $current"
+
+          # Cancel every other run that is still active so it can be deleted.
+          gh api --paginate "repos/$repo/actions/runs?per_page=100" \
+            --jq '.workflow_runs[] | [.id,.status] | @tsv' > /tmp/runs.tsv
+
+          while IFS=$'\t' read -r id status; do
+            [ -z "${id:-}" ] && continue
+            [ "$id" = "$current" ] && continue
+            case "$status" in
+              queued|in_progress|waiting|requested|pending)
+                gh api --method POST "repos/$repo/actions/runs/$id/cancel" >/dev/null 2>&1 || true
+                ;;
+            esac
+          done < /tmp/runs.tsv
+
+          sleep 8
+
+          # Delete every run except this cleanup run. Retry because cancellation is asynchronous.
+          for attempt in 1 2 3 4 5 6; do
+            gh api --paginate "repos/$repo/actions/runs?per_page=100" \
+              --jq '.workflow_runs[].id' > /tmp/run_ids.txt
+
+            remaining=0
+            while read -r id; do
+              [ -z "${id:-}" ] && continue
+              [ "$id" = "$current" ] && continue
+              if ! gh api --method DELETE "repos/$repo/actions/runs/$id" >/dev/null 2>&1; then
+                remaining=$((remaining + 1))
+                gh api --method POST "repos/$repo/actions/runs/$id/cancel" >/dev/null 2>&1 || true
+              fi
+            done < /tmp/run_ids.txt
+
+            [ "$remaining" -eq 0 ] && break
+            sleep 6
+          done
+
+          # Try to remove this cleanup run itself as the final operation.
+          # GitHub may terminate the runner immediately if it accepts the deletion.
+          gh api --method DELETE "repos/$repo/actions/runs/$current" >/dev/null 2>&1 || true
