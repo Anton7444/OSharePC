@@ -22,8 +22,8 @@ jobs:
   release:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
-      - name: Determine release version
+      - name: Determine release version and target
+        id: release
         shell: pwsh
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
@@ -35,8 +35,21 @@ jobs:
             $target = $env:GITHUB_SHA
           }
           if ([string]::IsNullOrWhiteSpace($version)) { throw 'Release version is empty' }
+          if ([string]::IsNullOrWhiteSpace($target)) { throw 'Release target is empty' }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "target=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TARGET=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Checkout exact release target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.target }}
+      - name: Verify checked-out target
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          $expected = '${{ steps.release.outputs.target }}'.Trim()
+          if ($actual -ne $expected) { throw "Checked out $actual but release target is $expected" }
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -90,7 +103,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.RELEASE_VERSION }}
-          target_commitish: ${{ env.RELEASE_TARGET }}
+          target_commitish: ${{ steps.release.outputs.target }}
           name: ${{ env.RELEASE_VERSION }}
           files: |
             OSharePC-Portable-${{ env.RELEASE_VERSION }}-win-x64.zip
