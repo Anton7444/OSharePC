@@ -42,20 +42,116 @@ public sealed class TransferServer : IAsyncDisposable
     private volatile TransferTask? _activeTask;
     private CancellationTokenSource _cancelCts = new();
 
+    // A staged task is NOT remotely readable until the BLE credential flow arms it.
+    // Once a WebSocket peer claims the armed task, every /download request must come
+    // from the same IP. OConnect can additionally pin the expected LAN peer IP.
+    private readonly object _peerGate = new();
+    private string? _armedTaskId;
+    private IPAddress? _allowedLocalIp;
+    private IPAddress? _expectedPeerIp;
+    private IPAddress? _authorizedPeerIp;
+
     /// <summary>Raised when the phone accepts and the ZIP download begins.</summary>
     public event Action<string>? DownloadStarted;
     public event Action<long, long>? DownloadProgress;      // (sent, total)
     public event Action<string>? DownloadFinished;          // taskId
     public event Action<string, int, string>? StatusReceived; // (taskId, type, reason)
 
-    public void SetTask(TransferTask? task) => _activeTask = task;
+    public void SetTask(TransferTask? task)
+    {
+        _activeTask = task;
+        DisarmTransfer(task is null ? "task cleared" : "new task staged");
+    }
+
+    public void ArmTransfer(TransferTask task, string? allowedLocalIp = null, string? expectedPeerIp = null)
+    {
+        if (_activeTask?.TaskId != task.TaskId)
+            throw new InvalidOperationException("Cannot arm a transfer that is not the currently staged task.");
+
+        static IPAddress? Parse(string? value) =>
+            IPAddress.TryParse(value, out var ip) ? NormalizeIp(ip) : null;
+
+        lock (_peerGate)
+        {
+            _armedTaskId = task.TaskId;
+            _allowedLocalIp = Parse(allowedLocalIp);
+            _expectedPeerIp = Parse(expectedPeerIp);
+            _authorizedPeerIp = null;
+        }
+        Log.Info($"TransferServer: armed task {task.TaskId}; local={_allowedLocalIp?.ToString() ?? "any"}; expectedPeer={_expectedPeerIp?.ToString() ?? "first-valid-peer"}");
+    }
+
+    public void DisarmTransfer(string reason = "disarmed")
+    {
+        lock (_peerGate)
+        {
+            _armedTaskId = null;
+            _allowedLocalIp = null;
+            _expectedPeerIp = null;
+            _authorizedPeerIp = null;
+        }
+        WsConnected = false;
+        Log.Info($"TransferServer: {reason}");
+    }
 
     public void CancelActiveTransfer()
     {
         _cancelCts.Cancel();
         _cancelCts.Dispose();
         _cancelCts = new CancellationTokenSource();
+        DisarmTransfer("active transfer cancelled");
         Log.Info("TransferServer: active transfer cancellation requested");
+    }
+
+    private static IPAddress? NormalizeIp(IPAddress? ip) =>
+        ip?.IsIPv4MappedToIPv6 == true ? ip.MapToIPv4() : ip;
+
+    private bool TryClaimWebSocketPeer(HttpContext ctx, TransferTask task)
+    {
+        var remote = NormalizeIp(ctx.Connection.RemoteIpAddress);
+        var local = NormalizeIp(ctx.Connection.LocalIpAddress);
+        if (remote is null || local is null) return false;
+
+        lock (_peerGate)
+        {
+            if (_armedTaskId != task.TaskId) return false;
+            if (_allowedLocalIp is not null && !_allowedLocalIp.Equals(local)) return false;
+            if (_expectedPeerIp is not null && !_expectedPeerIp.Equals(remote)) return false;
+
+            if (_authorizedPeerIp is null)
+            {
+                _authorizedPeerIp = remote;
+                Log.Info($"TransferServer: task {task.TaskId} claimed by peer {remote} via local {local}");
+                return true;
+            }
+            return _authorizedPeerIp.Equals(remote);
+        }
+    }
+
+    private bool IsAuthorizedDownloadPeer(HttpContext ctx, TransferTask task)
+    {
+        var remote = NormalizeIp(ctx.Connection.RemoteIpAddress);
+        var local = NormalizeIp(ctx.Connection.LocalIpAddress);
+        if (remote is null || local is null) return false;
+
+        lock (_peerGate)
+        {
+            return _armedTaskId == task.TaskId &&
+                   _authorizedPeerIp is not null && _authorizedPeerIp.Equals(remote) &&
+                   (_allowedLocalIp is null || _allowedLocalIp.Equals(local)) &&
+                   (_expectedPeerIp is null || _expectedPeerIp.Equals(remote));
+        }
+    }
+
+    private void ReleaseUncommittedPeer(IPAddress? peer)
+    {
+        peer = NormalizeIp(peer);
+        if (peer is null) return;
+        lock (_peerGate)
+        {
+            if (_authorizedPeerIp is not null && _authorizedPeerIp.Equals(peer))
+                _authorizedPeerIp = null;
+        }
     }
 
     public async Task StartAsync(int port)
@@ -137,43 +233,38 @@ public sealed class TransferServer : IAsyncDisposable
 
     // ---------------------------------------------------------------- websocket
 
-    /// <summary>Best-effort inbound rule for the transfer port. Without it Windows
-    /// Firewall silently drops every inbound connection (the phone can never reach the
-    /// WSS server). Tries directly first (works when elevated); on failure relaunches
-    /// netsh via UAC so a normal user session still gets the rule with one prompt.</summary>
+    /// <summary>Keep transfer traffic on the local subnet only. Existing broad rules
+    /// from older builds are tightened in-place instead of silently re-used.</summary>
     private static void TryAddFirewallRule(int port)
     {
-        AddFirewallRule("CatShareSender",
-            $"advfirewall firewall add rule name=\"CatShareSender\" dir=in action=allow protocol=TCP localport={port}",
-            $"the phone will NOT be able to connect — allow TCP {port} in Windows Firewall (run once as administrator)");
+        EnsureFirewallRule(
+            "CatShareSender",
+            $"advfirewall firewall add rule name=\"CatShareSender\" dir=in action=allow protocol=TCP localport={port} remoteip=localsubnet",
+            $"advfirewall firewall set rule name=\"CatShareSender\" new protocol=TCP localport={port} remoteip=localsubnet",
+            $"the phone will NOT be able to connect — allow TCP {port} from LocalSubnet in Windows Firewall");
 
-        // The phone's LAN band check floods UDP at a per-task port it picks
-        // at random (its own task port + 1), so the allow rule must be
-        // program-scoped instead of port-scoped. If the probe is dropped the
-        // phone times out and falls back to its own hotspot.
         var exe = Environment.ProcessPath;
         if (!string.IsNullOrEmpty(exe))
-            AddFirewallRule("CatShareSenderBandEcho",
+            EnsureFirewallRule(
+                "CatShareSenderBandEcho",
                 $"advfirewall firewall add rule name=\"CatShareSenderBandEcho\" dir=in action=allow program=\"{exe}\" protocol=UDP remoteip=localsubnet",
+                $"advfirewall firewall set rule name=\"CatShareSenderBandEcho\" new program=\"{exe}\" protocol=UDP remoteip=localsubnet",
                 "the phone's LAN check times out and it falls back to hotspot mode");
     }
 
-    private static void AddFirewallRule(string ruleName, string args, string failureHint)
+    private static void EnsureFirewallRule(string ruleName, string addArgs, string updateArgs, string failureHint)
     {
         var (_, existing) = RunNetsh($"advfirewall firewall show rule name=\"{ruleName}\"", elevate: false);
-        if (existing.Contains(ruleName, StringComparison.OrdinalIgnoreCase))
-        {
-            Log.Info($"firewall rule '{ruleName}': reused existing rule");
-            return;
-        }
+        var exists = existing.Contains(ruleName, StringComparison.OrdinalIgnoreCase);
+        var args = exists ? updateArgs : addArgs;
 
         var (ok, output) = RunNetsh(args, elevate: false, ruleName);
         if (!ok)
             (ok, output) = RunNetsh(args, elevate: true, ruleName);
         if (ok)
-            Log.Info($"firewall rule '{ruleName}': created");
+            Log.Info($"firewall rule '{ruleName}': {(exists ? "tightened" : "created")} (LocalSubnet only)");
         else
-            Log.Warn($"firewall rule '{ruleName}' missing — {failureHint} ({output.Trim()})");
+            Log.Warn($"firewall rule '{ruleName}' could not be secured — {failureHint} ({output.Trim()})");
     }
 
     private static (bool ok, string output) RunNetsh(string args, bool elevate, string? verifyRuleName = null)
@@ -187,24 +278,28 @@ public sealed class TransferServer : IAsyncDisposable
                 UseShellExecute = elevate,
                 CreateNoWindow = true,
             };
-            if (!elevate)
+            if (elevate)
+                psi.Verb = "runas";
+            else
             {
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
             }
+
             using var p = System.Diagnostics.Process.Start(psi)!;
             string output = "";
             if (!elevate)
             {
                 output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                p.WaitForExit(5000);
-                return (output.Contains("Ok") || output.Contains("确定") || output.Contains("OK"), output);
+                if (!p.WaitForExit(5000)) return (false, "netsh timed out");
+                return (p.ExitCode == 0, output);
             }
-            // UAC path: no stdout capture; verify by querying the rule afterwards.
-            p.WaitForExit(30000);
+
+            if (!p.WaitForExit(30000)) return (false, "elevated netsh timed out");
+            if (p.ExitCode != 0) return (false, $"elevated netsh exited {p.ExitCode}");
             var name = verifyRuleName ?? "CatShareSender";
-            var (chk, chkOut) = RunNetsh($"advfirewall firewall show rule name=\"{name}\"", elevate: false);
-            return (chk && chkOut.Contains(name), "added via UAC prompt");
+            var (_, chkOut) = RunNetsh($"advfirewall firewall show rule name=\"{name}\"", elevate: false);
+            return (chkOut.Contains(name, StringComparison.OrdinalIgnoreCase), "updated via UAC prompt");
         }
         catch (Exception ex)
         {
@@ -214,8 +309,9 @@ public sealed class TransferServer : IAsyncDisposable
 
     private async Task HandleWebSocket(HttpContext ctx)
     {
-        var peer = ctx.Connection.RemoteIpAddress?.ToString() ?? "?";
-        Log.Info($"WS: phone connected from {peer}");
+        var peerIp = NormalizeIp(ctx.Connection.RemoteIpAddress);
+        var peer = peerIp?.ToString() ?? "?";
+        Log.Info($"WS: connection attempt from {peer} via local {ctx.Connection.LocalIpAddress}");
 
         if (!ctx.WebSockets.IsWebSocketRequest)
         {
@@ -223,13 +319,22 @@ public sealed class TransferServer : IAsyncDisposable
             return;
         }
 
+        var task = _activeTask;
+        if (task is null || !TryClaimWebSocketPeer(ctx, task))
+        {
+            Log.Warn($"WS: rejected unauthorized/unarmed peer {peer}");
+            ctx.Response.StatusCode = (int)HttpStatusCode.Forbidden;
+            await ctx.Response.WriteAsync("transfer is not armed for this peer");
+            return;
+        }
+
         using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-        WsConnected = true;
         var session = new WsSession(this, ws)
         {
             PeerLooksStock = PeerLooksStock
         };
         int seq = 1;
+        var committed = false;
 
         try
         {
@@ -240,10 +345,10 @@ public sealed class TransferServer : IAsyncDisposable
             if (vnAck is null) { Log.Warn("WS: no versionNegotiation ack within 10s"); return; }
             Log.Info($"WS: version ack: {vnAck}");
 
-            var task = _activeTask;
-            if (task is null)
+            // Use the exact task that was armed when this peer claimed the session.
+            if (_activeTask?.TaskId != task.TaskId)
             {
-                Log.Warn("WS: connected but no task staged; closing");
+                Log.Warn("WS: staged task changed during handshake; closing");
                 return;
             }
 
@@ -253,6 +358,8 @@ public sealed class TransferServer : IAsyncDisposable
             var srAck = await session.ReceiveUntilAsync(e => e.IsAck && e.Method == "sendRequest", TimeSpan.FromSeconds(60));
             if (srAck is null) { Log.Warn("WS: no sendRequest ack within 60s (phone user may not have accepted)"); return; }
             Log.Info($"WS: sendRequest ack: {srAck}");
+            committed = true;
+            WsConnected = true;
 
             // The stock receiver starts downloading when it receives the bare
             // string "files" (j9/g.java:898). The CatShare receiver parses every
@@ -278,6 +385,7 @@ public sealed class TransferServer : IAsyncDisposable
         finally
         {
             WsConnected = false;
+            if (!committed) ReleaseUncommittedPeer(peerIp);
         }
     }
 
@@ -383,6 +491,8 @@ public sealed class TransferServer : IAsyncDisposable
     private void OnStatus(string taskId, int type, string reason)
     {
         try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+        if (type is 1 or 3)
+            DisarmTransfer($"terminal status {type}: {reason}");
     }
 
     /// <summary>Routes ASP.NET/Kestrel internal logs (TLS failures etc.) into our log.</summary>
@@ -425,6 +535,13 @@ public sealed class TransferServer : IAsyncDisposable
             Log.Warn("HTTP: unknown or stale taskId");
             ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
             await ctx.Response.WriteAsync("unknown task");
+            return;
+        }
+        if (!IsAuthorizedDownloadPeer(ctx, task))
+        {
+            Log.Warn($"HTTP: rejected /download for task {task.TaskId} from unauthorized peer {ctx.Connection.RemoteIpAddress}");
+            ctx.Response.StatusCode = (int)HttpStatusCode.Forbidden;
+            await ctx.Response.WriteAsync("peer not authorized for this transfer");
             return;
         }
 

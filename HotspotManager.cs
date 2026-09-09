@@ -27,6 +27,7 @@ public sealed class HotspotManager
 
     public string Ssid { get; private set; } = DefaultSsid;
     public string Psk { get; private set; } = DefaultPsk;
+    public string GatewayIp { get; private set; } = "";
     public bool IsRunning { get; private set; }
 
     /// <summary>The SoftAP BSSID (MAC the phone will see). Falls back to the STA MAC.</summary>
@@ -83,7 +84,8 @@ public sealed class HotspotManager
 
         IsRunning = true;
         Bssid = await FindHotspotBssidAsync();
-        Log.Info($"Hotspot: BSSID={Bssid}");
+        GatewayIp = FindHotspotGatewayIp();
+        Log.Info($"Hotspot: BSSID={Bssid}, gateway={GatewayIp}");
     }
 
     public async Task StopAsync()
@@ -101,6 +103,34 @@ public sealed class HotspotManager
         }
         catch (Exception ex) { Log.Warn($"Hotspot stop failed: {ex.Message}"); }
         IsRunning = false;
+        GatewayIp = "";
+    }
+
+    /// <summary>The IPv4 address Windows assigns to the Mobile Hotspot virtual adapter.
+    /// This is the address the phone uses as the transfer-server gateway.</summary>
+    private static string FindHotspotGatewayIp()
+    {
+        try
+        {
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                var isApAdapter =
+                    nic.Name.StartsWith("本地连接*") || nic.Name.StartsWith("Local Area Connection*");
+                if (!isApAdapter) continue;
+
+                foreach (var ua in nic.GetIPProperties().UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                    if (System.Net.IPAddress.IsLoopback(ua.Address)) continue;
+                    var text = ua.Address.ToString();
+                    if (!text.StartsWith("169.254.", StringComparison.Ordinal)) return text;
+                }
+            }
+        }
+        catch (Exception ex) { Log.Warn($"Hotspot gateway lookup failed: {ex.Message}"); }
+        Log.Warn("Hotspot: could not determine gateway IP; peer lock will still protect the transfer");
+        return "";
     }
 
     /// <summary>The hotspot AP is hosted by a "Local Area Connection*" style adapter

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using CatShareSender.Ui;
 
 namespace CatShareSender;
@@ -29,6 +30,7 @@ public sealed class SenderEngine : IDisposable
     private CancellationTokenSource? _sendCts;
     private CancellationTokenSource? _catShareReceiveCts;
     private CancellationTokenSource? _devicePruneCts;
+    private readonly ConcurrentDictionary<string, string> _lanPeerIps = new(StringComparer.OrdinalIgnoreCase);
     public bool ReceiveEnabled { get; private set; } = true;
 
     public event Action<string, string>? TransferStateChanged;   // (taskId, state)
@@ -164,6 +166,11 @@ public sealed class SenderEngine : IDisposable
         try
         {
             LanDisc = new LanDiscovery(Lan.MacHex12) { LanIp = Lan.IpString, DeviceName = Advertiser.DeviceName };
+            LanDisc.DeviceAnnounced += (ip, _, pdid, _, _) =>
+            {
+                if (!string.IsNullOrWhiteSpace(pdid))
+                    _lanPeerIps[pdid.Replace(":", "").ToUpperInvariant()] = ip;
+            };
             LanDisc.Start();
         }
         catch (Exception ex)
@@ -335,6 +342,11 @@ public sealed class SenderEngine : IDisposable
 
             TransferStateChanged?.Invoke(_staged.TaskId, "OConnect transfer starting…");
             Server.PeerLooksStock = true;   // OConnect peers are stock 互传 receivers
+            var armed = false;
+            string? expectedPeerIp = null;
+            if (device.DeviceId.Length >= 12)
+                _lanPeerIps.TryGetValue(device.DeviceId[..12].ToUpperInvariant(), out expectedPeerIp);
+
             await link.OConnectLanSendAsync(
                 Lan,
                 Port,
@@ -342,7 +354,15 @@ public sealed class SenderEngine : IDisposable
                 Advertiser.DeviceName,
                 _staged.FileCount,
                 s => TransferStateChanged?.Invoke(_staged.TaskId, s),
-                phoneConnected: () => Server.WsConnected || _staged.Complete,
+                phoneConnected: () =>
+                {
+                    if (!armed)
+                    {
+                        Server.ArmTransfer(_staged, Lan.IpString, expectedPeerIp);
+                        armed = true;
+                    }
+                    return Server.WsConnected || _staged.Complete;
+                },
                 ct: ct);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
             return;
@@ -360,6 +380,7 @@ public sealed class SenderEngine : IDisposable
         TransferStateChanged?.Invoke(_staged.TaskId,
             $"hotspot '{Hotspot.Ssid}' up — the phone will switch Wi-Fi to it");
 
+        Server.ArmTransfer(_staged, string.IsNullOrWhiteSpace(Hotspot.GatewayIp) ? null : Hotspot.GatewayIp);
         await link.SendCredentialsAsync(
             endpoint, CredentialMode.CatShareLan, endpoint.Status, Lan, Port, _crypto, SenderId,
             freq: 0,
