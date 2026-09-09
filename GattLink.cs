@@ -311,10 +311,10 @@ public sealed class GattLink : IDisposable
 
     /// <summary>
     /// OPlus-Connect (iOS-style) LAN flow, mirroring d8/v.java's 0x9896 state machine:
-    ///  1. read 0x9998 → {"state","key","version"} — phone marks us as the peer (N=1)
+    ///  1. read 0x9897 → {"state","key","version"} — phone marks us as the peer (N=1)
     ///  2. write 0x9896 state-1 (plain JSON, version ≥ 10302 keeps fields plaintext,
     ///     pv &lt; 5 skips account validation) → phone shows the receive card (N=2)
-    ///  3. write 0x9896 state-4 {"ip","port"} (each value AES-CBC encrypted with the
+    ///  3. write 0x9896 state-3 WLAN offer {"ip","port"} (each value AES-CBC encrypted with the
     ///     ECDH session key, iOS variant) → phone connects wss://ip:port directly.
     /// The 5s timer after step 1 means state-1 must be written immediately.
     /// </summary>
@@ -472,47 +472,55 @@ public sealed class GattLink : IDisposable
                 ["port"] = encPort,
             });
 
-            if (notificationsSubscribed)
-            {
-                status?.Invoke("waiting for phone acceptance/WLAN readiness...");
-                var wlanNotify = await wlanNotifyTcs.Task.WaitAsync(TimeSpan.FromMinutes(3), ct);
-                Log.Info($"BLE: official WLAN transition observed: {wlanNotify}");
-                Log.Info($"BLE: 9896 state3 <- {state3}");
-                await WriteOConnectSingle(state3);
-            }
-            else
-            {
-                // Compatibility only: Windows stacks that truly cannot subscribe to
-                // 9898 still need a guarded probe, but it is no longer the main path.
-                Log.Warn("BLE: using compatibility state3 probing because 9898 notifications are unavailable");
-                status?.Invoke("waiting for phone acceptance (compatibility mode)...");
-                await Task.Delay(2500, ct);
-                var delivered = false;
-                for (var attempt = 1; attempt <= 36; attempt++)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    if (phoneConnected?.Invoke() == true) { delivered = true; break; }
-                    Log.Info($"BLE: 9896 state3 compatibility probe {attempt}/36 <- {state3}");
-                    await WriteOConnectSingle(state3);
-                    await Task.Delay(5000, ct);
-                }
-                if (!delivered && phoneConnected?.Invoke() != true)
-                    throw new InvalidOperationException("BLE: phone never entered the WLAN phase within 3 minutes; reopen 互传 and retry.");
-            }
+            // OnePlus Share's real iOS peer writes the WLAN offer immediately after
+  // state1, before the user presses Accept. The phone stores this state3 data
+  // while the confirmation card is visible and consumes it after acceptance.
+  // Waiting for a 9898 notification before the first state3 write creates a
+  // Windows-only race because some stacks cannot expose/subscribe the CCCD.
+  Log.Info($"BLE: 9896 state3 initial <- {state3}");
+  await WriteOConnectSingle(state3);
+  status?.Invoke("请在手机上点『接受』以确认接收…");
 
-            status?.Invoke("waiting for phone LAN/WebSocket connection...");
-            var connectionDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(20);
-            while (DateTimeOffset.UtcNow < connectionDeadline)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (phoneConnected?.Invoke() == true)
-                {
-                    Log.Info("BLE: phone connected to our server - handshake complete");
-                    return;
-                }
-                await Task.Delay(200, ct);
-            }
-            throw new InvalidOperationException("BLE: phone accepted WLAN but did not connect to the transfer server within 20 seconds.");
+  // 9898 is diagnostic/observational for pv=1, not a prerequisite.
+  if (notificationsSubscribed)
+  {
+      _ = wlanNotifyTcs.Task.ContinueWith(t =>
+      {
+          if (t.Status == TaskStatus.RanToCompletion)
+              Log.Info($"BLE: official WLAN transition observed: {t.Result}");
+      }, TaskScheduler.Default);
+  }
+  else
+  {
+      Log.Warn("BLE: 9898 notifications unavailable; continuing with official write-driven pv=1 flow");
+  }
+
+  // The real trace shows state3 being written again if the receiver has not
+  // opened the WebSocket yet. Keep retries bounded and tied to this session.
+  status?.Invoke("waiting for phone LAN/WebSocket connection...");
+  var connectionDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(24);
+  var nextState3Retry = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(3);
+  var state3RetryCount = 0;
+  while (DateTimeOffset.UtcNow < connectionDeadline)
+  {
+      ct.ThrowIfCancellationRequested();
+      if (phoneConnected?.Invoke() == true)
+      {
+          Log.Info("BLE: phone connected to our server - transfer session ready");
+          return;
+      }
+
+      if (DateTimeOffset.UtcNow >= nextState3Retry && state3RetryCount < 4)
+      {
+          state3RetryCount++;
+          Log.Info($"BLE: 9896 state3 retry {state3RetryCount}/4 <- {state3}");
+          await WriteOConnectSingle(state3);
+          nextState3Retry = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(4);
+      }
+
+      await Task.Delay(200, ct);
+  }
+  throw new InvalidOperationException("BLE: phone did not establish the LAN/WebSocket transfer session after acceptance.");
         }
         finally
         {
