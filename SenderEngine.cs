@@ -319,11 +319,64 @@ public sealed class SenderEngine : IDisposable
         var ct = transferCts.Token;
         try
         {
-        TransferStateChanged?.Invoke(_staged.TaskId, $"connecting to {device.Name} ({device.AddressStr})…");
+        // OnePlus Share only promotes a peer after its common BLE parser has a
+        // complete ScanRecord. Windows splits ADV + SCAN_RSP, so wait for our
+        // reconstructed complete record and never retry a stale BLE address blindly.
+        GattLink? connectedLink = null;
+        Exception? lastConnectError = null;
+        DateTimeOffset? requireAdvertisementNewerThan = null;
 
-        // GattLink treats Auto as "enumerate BOTH services (9999 + 9955)"; the
-        // capability-based resolution below then picks the flow.
-        using var link = await GattLink.ConnectAsync(device.Address, flow, 3, s => TransferStateChanged?.Invoke(_staged.TaskId, s), ct);
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            var wait = attempt == 1 ? TimeSpan.FromSeconds(6) : TimeSpan.FromSeconds(8);
+            TransferStateChanged?.Invoke(
+                _staged.TaskId,
+                attempt == 1
+                    ? $"waiting for {device.Name} complete BLE advertisement…"
+                    : $"waiting for {device.Name} to advertise a fresh ready session…");
+
+            var candidate = await Scanner.WaitForConnectableAsync(
+                device,
+                wait,
+                requireAdvertisementNewerThan,
+                ct);
+            device = candidate;
+
+            TransferStateChanged?.Invoke(
+                _staged.TaskId,
+                $"connecting to {candidate.Name} ({candidate.AddressStr}), advertisement generation {attempt}/3…");
+
+            try
+            {
+                // One GATT attempt per advertisement generation. An Unreachable
+                // service discovery means this radio instance was not ready; wait
+                // for the next complete advertisement instead of hitting it twice more.
+                connectedLink = await GattLink.ConnectAsync(
+                    candidate.Address,
+                    flow,
+                    1,
+                    s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                    ct);
+                break;
+            }
+            catch (Exception ex) when (attempt < 3)
+            {
+                lastConnectError = ex;
+                requireAdvertisementNewerThan = candidate.LastCompleteAdvertisement;
+                Log.Warn($"BLE: GATT for {candidate.AddressStr} was not ready ({ex.Message}); " +
+                         "waiting for a fresh complete OnePlus advertisement before retrying");
+            }
+            catch (Exception ex)
+            {
+                lastConnectError = ex;
+            }
+        }
+
+        if (connectedLink is null)
+            throw new InvalidOperationException(
+                $"BLE: phone never exposed a connectable GATT session after fresh advertisements — {lastConnectError?.Message}");
+
+        using var link = connectedLink;
         _crypto ??= new OShareCrypto();
 
         var resolvedFlow = flow switch
