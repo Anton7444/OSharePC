@@ -70,6 +70,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ env.RELEASE_VERSION }}
           files: |
             OSharePC-Portable-${{ env.RELEASE_VERSION }}-win-x64.zip
             installer-output/OSharePC-Setup-${{ env.RELEASE_VERSION }}.exe
