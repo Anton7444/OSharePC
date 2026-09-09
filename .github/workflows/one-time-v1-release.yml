@@ -1,4 +1,4 @@
-name: One-time v1.0 release normalization
+name: Apply remaining 1.0 version labels
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Normalize visible version
+      - name: Update installer and Settings versions
         shell: pwsh
         run: |
           function Replace-Exact([string]$Path, [string]$Old, [string]$New) {
@@ -32,52 +32,14 @@ jobs:
             )
           }
 
-          Replace-Exact '.github/workflows/build.yml' '1.0.0-dev' '1.0'
           Replace-Exact 'installer/OSharePC.iss' '#define MyAppVersion "1.0.0"' '#define MyAppVersion "1.0"'
           Replace-Exact 'catshare_gui/lib/pages/settings_tab.dart' "static const _guiVersion = '2026.09.06-2300';" "static const _guiVersion = '1.0';"
 
-          Remove-Item '.github/workflows/one-time-v1-release.yml' -Force
-
-      - name: Commit normalized version to main
+      - name: Commit version labels to main
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Normalize visible version to 1.0"
+          git add installer/OSharePC.iss catshare_gui/lib/pages/settings_tab.dart
+          git commit -m "Set installer and Settings version to 1.0"
           git push origin HEAD:main
-
-      - name: Replace v1.0.0 with v1.0
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $target = (git rev-parse HEAD).Trim()
-
-          gh release view v1.0.0 --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete v1.0.0 --yes
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete v1.0.0 release' }
-          }
-
-          git ls-remote --exit-code --tags origin refs/tags/v1.0.0 *> $null
-          if ($LASTEXITCODE -eq 0) {
-            git push origin :refs/tags/v1.0.0
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete v1.0.0 tag' }
-          }
-
-          gh release view v1.0 --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release delete v1.0 --yes
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete existing v1.0 release' }
-          }
-
-          git ls-remote --exit-code --tags origin refs/tags/v1.0 *> $null
-          if ($LASTEXITCODE -eq 0) {
-            git push origin :refs/tags/v1.0
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to delete existing v1.0 tag' }
-          }
-
-          git tag v1.0 $target
-          git push origin refs/tags/v1.0
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to push v1.0 tag' }
