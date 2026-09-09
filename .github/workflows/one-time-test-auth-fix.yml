@@ -1,0 +1,55 @@
+name: Align offline tests with transfer authorization
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-test-auth-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Patch loopback-only test authorization
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'Expected block not found in {path}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+
+          replace_once('TransferServer.cs',
+          '''    public void DisarmTransfer(string reason = "disarmed")\n    {\n''',
+          '''    internal void AuthorizeLoopbackTest(TransferTask task)\n    {\n        ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());\n        lock (_peerGate)\n            _authorizedPeerIp = IPAddress.Loopback;\n        Log.Info($"TransferServer: loopback test authorization enabled for task {task.TaskId}");\n    }\n\n    public void DisarmTransfer(string reason = "disarmed")\n    {\n''')
+
+          # Direct ZIP probe intentionally bypasses BLE/WebSocket, so give only localhost
+          # an explicit in-process test authorization.
+          replace_once('Program.cs',
+          '''        var task = engine.StageFiles(new[] { tmp })!;\n\n        var http = new HttpClient();\n''',
+          '''        var task = engine.StageFiles(new[] { tmp })!;\n        engine.Server.AuthorizeLoopbackTest(task);\n\n        var http = new HttpClient();\n''')
+
+          # Mock phone still performs the real WebSocket claim; arm localhost before connect.
+          replace_once('Program.cs',
+          '''        var task = engine.StageFiles(new[] { tmp1, tmp2 })!;\n\n        // --- play the phone ---\n''',
+          '''        var task = engine.StageFiles(new[] { tmp1, tmp2 })!;\n        engine.Server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());\n\n        // --- play the phone ---\n''')
+      - name: Verify patch
+        run: |
+          git diff --check
+          grep -q 'AuthorizeLoopbackTest' TransferServer.cs
+          grep -q 'ArmTransfer(task, IPAddress.Loopback' Program.cs
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name 'Anton7444'
+          git config user.email '84059108+Anton7444@users.noreply.github.com'
+          git add TransferServer.cs Program.cs
+          git commit -m 'Keep offline transfer tests behind loopback authorization'
+          git push origin HEAD:main
