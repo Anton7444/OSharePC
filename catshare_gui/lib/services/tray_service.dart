@@ -15,10 +15,28 @@ class TrayService with TrayListener, WindowListener {
     if (hidden) await windowManager.hide();
   }
 
+  Future<void> _showMainWindow() async {
+    try {
+      if (await windowManager.isMinimized()) {
+        await windowManager.restore();
+      }
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (e) {
+      debugPrint('Failed to show main window: $e');
+    }
+  }
+
   Future<void> showNotification(String title, String message) async {
     final minimized =
         !(await windowManager.isVisible()) || await windowManager.isMinimized();
-    if (minimized) await NotificationService.show(title, message);
+    if (minimized) {
+      await NotificationService.show(
+        title,
+        message,
+        onClick: _showMainWindow,
+      );
+    }
   }
 
   Future<void> init() async {
@@ -31,6 +49,12 @@ class TrayService with TrayListener, WindowListener {
     await windowManager.center();
     await windowManager.setTitle('OsharePC');
     await windowManager.setPreventClose(true);
+
+    try {
+      await NotificationService.init();
+    } catch (e) {
+      debugPrint('Error initializing notifications: $e');
+    }
 
     try {
       await trayManager.setIcon(
@@ -61,8 +85,7 @@ class TrayService with TrayListener, WindowListener {
 
   @override
   void onTrayIconMouseDown() {
-    windowManager.show();
-    windowManager.focus();
+    _showMainWindow();
   }
 
   @override
@@ -74,8 +97,7 @@ class TrayService with TrayListener, WindowListener {
   @override
   void onTrayMenuItemClick(MenuItem menuItem) {
     if (menuItem.key == 'show') {
-      windowManager.show();
-      windowManager.focus();
+      _showMainWindow();
     } else if (menuItem.key == 'toggle_receive') {
       final current = bridgeClient.status.receiveEnabled;
       bridgeClient.setReceiveEnabled(!current);
