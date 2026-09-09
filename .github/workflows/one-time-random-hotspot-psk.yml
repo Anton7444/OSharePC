@@ -1,0 +1,52 @@
+name: Randomize transfer hotspot credentials
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-random-hotspot-psk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Randomize hotspot PSK per transfer start
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('HotspotManager.cs')
+          text = p.read_text(encoding='utf-8')
+
+          old = '''    public const string DefaultSsid = "DIRECT-PC-AP";\n    public const string DefaultPsk = "cs12345678";\n\n    public string Ssid { get; private set; } = DefaultSsid;\n    public string Psk { get; private set; } = DefaultPsk;\n'''
+          new = '''    public const string DefaultSsid = "DIRECT-PC-AP";\n\n    public string Ssid { get; private set; } = DefaultSsid;\n    public string Psk { get; private set; } = "";\n'''
+          if old not in text: raise SystemExit('hotspot constants block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''        // deterministic ssid/psk: they must match the credential JSON exactly, and the\n        // ssid must NOT end with "fastCon" (that suffix sends the phone into its\n        // persistent-group-reinvoke branch with a zero peer address — no association)\n        config.Ssid = DefaultSsid;\n        config.Passphrase = DefaultPsk;\n\n        Ssid = config.Ssid;\n        Psk = config.Passphrase;\n'''
+          new = '''        // The SSID is stable for compatibility, but the passphrase is intentionally\n        // fresh for every transfer start. A public source tree must not expose a\n        // reusable hotspot credential. The exact generated PSK is sent to the selected\n        // phone over the existing BLE credential channel.\n        var desiredPsk = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))\n            .ToLowerInvariant();\n        config.Ssid = DefaultSsid;\n        config.Passphrase = desiredPsk;\n\n        Ssid = config.Ssid;\n        Psk = config.Passphrase;\n'''
+          if old not in text: raise SystemExit('hotspot config block not found')
+          text = text.replace(old, new, 1)
+
+          old = '''            if (currentSsid != DefaultSsid || currentPsk != DefaultPsk)\n'''
+          new = '''            if (currentSsid != DefaultSsid || currentPsk != desiredPsk)\n'''
+          if old not in text: raise SystemExit('hotspot comparison block not found')
+          text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8', newline='\n')
+      - name: Verify no reusable PSK remains
+        run: |
+          git diff --check
+          ! grep -R 'cs12345678' HotspotManager.cs
+          grep -q 'RandomNumberGenerator.GetBytes(16)' HotspotManager.cs
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name 'Anton7444'
+          git config user.email '84059108+Anton7444@users.noreply.github.com'
+          git add HotspotManager.cs
+          git commit -m 'Generate a fresh transfer hotspot password'
+          git push origin HEAD:main
