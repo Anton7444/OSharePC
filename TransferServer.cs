@@ -81,6 +81,14 @@ public sealed class TransferServer : IAsyncDisposable
         Log.Info($"TransferServer: armed task {task.TaskId}; local={_allowedLocalIp?.ToString() ?? "any"}; expectedPeer={_expectedPeerIp?.ToString() ?? "first-valid-peer"}");
     }
 
+    internal void AuthorizeLoopbackTest(TransferTask task)
+    {
+        ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
+        lock (_peerGate)
+            _authorizedPeerIp = IPAddress.Loopback;
+        Log.Info($"TransferServer: loopback test authorization enabled for task {task.TaskId}");
+    }
+
     public void DisarmTransfer(string reason = "disarmed")
     {
         lock (_peerGate)

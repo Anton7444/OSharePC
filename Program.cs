@@ -346,6 +346,7 @@ internal static class Program
             w.Write("<probe/>");
         }
         var task = engine.StageFiles(new[] { tmp })!;
+        engine.Server.AuthorizeLoopbackTest(task);
 
         var http = new HttpClient();
         foreach (var url in new[]
@@ -391,6 +392,7 @@ internal static class Program
         await File.WriteAllTextAsync(tmp1, "hello from catshare sender selftest");
         await File.WriteAllBytesAsync(tmp2, RandomNumberGenerator.GetBytes(128 * 1024));
         var task = engine.StageFiles(new[] { tmp1, tmp2 })!;
+        engine.Server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
 
         // --- play the phone ---
         var ws = new System.Net.WebSockets.ClientWebSocket();
