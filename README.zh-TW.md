@@ -4,40 +4,32 @@
 
 一個與 OPPO/OnePlus OShare 相容的非官方 Windows 用戶端。
 
-OShare PC 與 OPPO 或 OnePlus 並無關聯，亦未獲其認可或背書。
+OShare PC 與 OPPO 或 OnePlus 並無關聯
 
 ## 功能
 
-- Windows ↔ 支援 OShare 的裝置
 - 從 PC 傳送檔案到手機
 - 從手機接收檔案到 PC
-- 附近裝置探索
-- 原生 Flutter/Windows 介面
-- 系統匣運作、可選的開機啟動，以及安裝版中的最小化啟動
-
-相容性取決於手機型號以及 OShare 相容應用程式的版本。
 
 ## 安裝
 
 ### 安裝程式
 
-下載 `OSharePC-Setup-<version>.exe`，執行後可依需要選擇建立桌面捷徑或 Windows 開機啟動。安裝程式會將 OShare PC 安裝到目前使用者的 Programs 目錄下。
+下載 `OSharePC-Setup-<version>.exe`，執行後可依需要選擇建立桌面捷徑或 Windows 開機啟動。
 
 ### 可攜版
 
-下載 `OSharePC-Portable-<version>-win-x64.zip`，解壓縮到任意位置後執行 `catshare_gui.exe`。可攜版不需要安裝，也不會註冊開始功能表、桌面捷徑或 Windows 開機啟動項目。
+下載 `OSharePC-Portable-<version>-win-x64.zip`，解壓縮到任意位置後執行 `catshare_gui.exe`。
 
 ## 系統需求
 
 - Windows 10 19041 或更新版本
-- 64 位元 x64 Windows
-- 手機與 PC 必須能使用相容的 OShare 傳輸路徑
+- 64 位元 x64 Windows，ARM只能發檔案
+- 手機支持互傳
 
 ## 使用方式
 
-開啟 OShare PC；當你希望 PC 可被其他裝置探索時，請保持接收功能啟用。若要傳送檔案，選擇附近的手機、選取檔案，然後開始傳輸。若要接收檔案，請在出現確認對話框時接受傳入要求。接收到的檔案會儲存到已設定的目的地資料夾。
-
-設定頁面包含目的地資料夾、接收／系統匣行為、語言、外觀與開機啟動選項。
+把分享打開，然後發檔案
 
 ## 從原始碼建置
 
@@ -60,14 +52,10 @@ cd ..
 
 若要進行離線後端檢查，請執行 `CatShareSender.exe --selftest` 與 `CatShareSender.exe --mockphone`。由於後端是 Windows GUI 執行檔，請查看 `%LOCALAPPDATA%\CatShareSender\sender.log`，確認其中出現 `SELFTEST PASSED` 與 `MOCKPHONE PASSED`。
 
-## 已知限制
-
-- 裝置探索與傳輸相容性取決於手機的 OShare 實作以及 Windows 的藍牙／Wi-Fi 環境。
-- 若要確認特定手機型號與特定傳輸方向是否相容，仍需要使用實體手機測試。
 
 ## 免責聲明
 
-OShare PC 是非官方專案，與 OPPO 或 OnePlus 並無關聯，亦未獲其認可或背書。
+OShare PC 是非官方專案，與 OPPO 或 OnePlus 並沒有關聯
 
 ## 授權
 
