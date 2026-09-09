@@ -458,28 +458,42 @@ internal static class Program
         if (totalSize != expectedTotal) { Log.Error("MOCKPHONE FAIL: totalSize mismatch"); failures++; }
         await Send(new Envelope { Type = "ack", Seq = sr.Seq, Method = "sendRequest", Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { }), HasPayload = true });
 
-        // 3. download the ZIP like the receiver does (folder-stream) — plaintext, the
-        //    pad's wlan flow connects without TLS (sender version >= 10015)
+        // 3. Download exactly like a stock OnePlus receiver. The official iOS sender
+        //    uses a chunked application/zip response named files.zip with direct
+        //    filenames and ZIP method STORED (0), not our legacy 0/ folder-stream.
         using var http = new System.Net.Http.HttpClient();
         var url = $"http://127.0.0.1:{SenderEngine.DefaultPort}/download?taskId={task.TaskId}";
         Log.Info($"MOCKPHONE: GET {url}");
         var resp = await http.GetAsync(url, cts.Token);
         if (!resp.IsSuccessStatusCode) { Log.Error($"MOCKPHONE FAIL: HTTP {(int)resp.StatusCode}"); failures++; return failures == 0 ? 0 : 1; }
-        Log.Info($"MOCKPHONE: HTTP {(int)resp.StatusCode}, oshare-transfer-type={(resp.Headers.TryGetValues("Oshare-Transfer-Type", out var tt) ? string.Join(",", tt!) : "none")}, len={resp.Content.Headers.ContentLength?.ToString() ?? "chunked"}");
-        if (!resp.Headers.TryGetValues("Oshare-Transfer-Type", out var osh) || !osh.Contains("folder-stream"))
-        { Log.Error("MOCKPHONE FAIL: missing Oshare-Transfer-Type: folder-stream"); failures++; }
+        Log.Info($"MOCKPHONE: HTTP {(int)resp.StatusCode}, transfer-type={(resp.Headers.TryGetValues("Oshare-Transfer-Type", out var tt) ? string.Join(",", tt!) : "none")}, len={resp.Content.Headers.ContentLength?.ToString() ?? "chunked"}");
 
-        await using var zipStream = await resp.Content.ReadAsStreamAsync(cts.Token);
-        using var zip = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Read);
+        if (resp.Headers.TryGetValues("Oshare-Transfer-Type", out _))
+        { Log.Error("MOCKPHONE FAIL: stock path must not advertise legacy Oshare-Transfer-Type"); failures++; }
+        var disposition = resp.Content.Headers.ContentDisposition?.FileName?.Trim('"');
+        if (!string.Equals(disposition, "files.zip", StringComparison.OrdinalIgnoreCase))
+        { Log.Error($"MOCKPHONE FAIL: Content-Disposition filename was '{disposition}', expected files.zip"); failures++; }
+
+        var zipBytes = await resp.Content.ReadAsByteArrayAsync(cts.Token);
+        if (zipBytes.Length < 30 || BitConverter.ToUInt32(zipBytes, 0) != 0x04034B50u)
+        { Log.Error("MOCKPHONE FAIL: invalid ZIP local header"); failures++; }
+        else if (BitConverter.ToUInt16(zipBytes, 8) != 0)
+        { Log.Error($"MOCKPHONE FAIL: ZIP compression method={BitConverter.ToUInt16(zipBytes, 8)}, expected STORED(0)"); failures++; }
+        else Log.Info("MOCKPHONE: local ZIP header confirms STORED method 0");
+
+        using var zipMemory = new MemoryStream(zipBytes, writable: false);
+        using var zip = new System.IO.Compression.ZipArchive(zipMemory, System.IO.Compression.ZipArchiveMode.Read);
         var entryNames = zip.Entries.Select(e => e.FullName).ToArray();
         Log.Info($"MOCKPHONE: zip entries: [{string.Join(", ", entryNames)}]");
-        if (entryNames.Length != 2 || entryNames.Any(n => !n.StartsWith("0/")))
-        { Log.Error("MOCKPHONE FAIL: entries not under 0/"); failures++; }
+        if (entryNames.Length != 2 || entryNames.Any(n => n.Contains('/')))
+        { Log.Error("MOCKPHONE FAIL: stock ZIP entries must be direct filenames"); failures++; }
         else
         {
             var ok = true;
             foreach (var entry in zip.Entries)
             {
+                if (entry.CompressedLength != entry.Length)
+                { Log.Error($"MOCKPHONE FAIL: {entry.FullName} is compressed ({entry.CompressedLength}/{entry.Length})"); ok = false; }
                 var src = entry.FullName.EndsWith(".txt") ? tmp1 : tmp2;
                 var downloaded = await File.ReadAllBytesAsync(src, cts.Token);
                 await using var es = entry.Open();
@@ -487,7 +501,8 @@ internal static class Program
                 await es.CopyToAsync(ms, cts.Token);
                 if (!ms.ToArray().SequenceEqual(downloaded)) { Log.Error($"MOCKPHONE FAIL: content mismatch for {entry.FullName}"); ok = false; }
             }
-            if (ok) Log.Info($"MOCKPHONE: content verified for {entryNames.Length} entries");
+            if (ok) Log.Info($"MOCKPHONE: official STORED content verified for {entryNames.Length} entries");
+            else failures++;
         }
 
         // 4. phone sends final status

@@ -575,29 +575,67 @@ public sealed class TransferServer : IAsyncDisposable
             // Always answer with a zip whose entries are the transfer files (stock
             // sender does the same for nd_zip != false, aa/b.java -> ga.c).
             var single = new List<string> { task.Files[idx] };
-            ctx.Response.StatusCode = (int)HttpStatusCode.OK;
-            ctx.Response.ContentType = "application/zip";
-            ctx.Response.Headers["nd_zip"] = "true";
-            ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
-            ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(Path.GetFileName(single[0]))}\"";
-            await WriteFolderStreamZip(ctx, single, new FileInfo(single[0]).Length, _cancelCts.Token);
+            await WriteDownloadZip(
+                ctx,
+                single,
+                new FileInfo(single[0]).Length,
+                Path.GetFileName(single[0]),
+                _cancelCts.Token);
             Log.Info($"HTTP: per-file zip done: {single[0]}");
             try { DownloadFinished?.Invoke(task.TaskId); } catch { }
             return;
         }
 
-        // whole-batch mode — same zip layout
-        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
-        ctx.Response.ContentType = "application/zip";
-        ctx.Response.Headers["nd_zip"] = "true";
-        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
-        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(task.FirstFileName)}\"";
-        await WriteFolderStreamZip(ctx, task.Files, task.TotalSize, _cancelCts.Token);
+        // whole-batch mode — stock OnePlus peers use the official STORED ZIP path;
+        // custom/CatShare peers retain the legacy folder-stream compatibility path.
+        await WriteDownloadZip(ctx, task.Files, task.TotalSize, task.FirstFileName, _cancelCts.Token);
         try { DownloadFinished?.Invoke(task.TaskId); } catch { }
     }
 
-    /// <summary>Streams the given files as a zip (entries under 0/) — the ONLY body
-    /// shape the pad's receiver parses correctly.</summary>
+    /// <summary>
+    /// Stock OnePlus/OShare peers use the APK's iOSFileResponse/FileChunkedInput
+    /// format: application/zip, chunked HTTP, direct filenames, STORED entries with
+    /// CRC/size known before the local header, and 1 MiB data chunks. The legacy
+    /// folder-stream path remains only for the custom CatShare-compatible peer.
+    /// </summary>
+    private async Task WriteDownloadZip(
+        HttpContext ctx,
+        IReadOnlyList<string> files,
+        long total,
+        string legacyDispositionName,
+        CancellationToken cancelToken)
+    {
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/zip";
+
+        if (PeerLooksStock)
+        {
+            ctx.Response.Headers.Remove("nd_zip");
+            ctx.Response.Headers.Remove("Oshare-Transfer-Type");
+            ctx.Response.Headers["Content-Disposition"] = "attachment; filename=\"files.zip\"";
+            Log.Info($"HTTP: OnePlus-compatible STORED ZIP response, files={files.Count}, payload={total}");
+
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+            await OfficialStoredZipWriter.WriteAsync(
+                ctx.Response.Body,
+                files,
+                total,
+                (sent, expected) =>
+                {
+                    try { DownloadProgress?.Invoke(sent, expected); } catch { }
+                },
+                linked.Token);
+            return;
+        }
+
+        ctx.Response.Headers["nd_zip"] = "true";
+        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(legacyDispositionName)}\"";
+        await WriteFolderStreamZip(ctx, files, total, cancelToken);
+    }
+
+    /// <summary>Legacy CatShare compatibility ZIP (entries under 0/). Stock OnePlus
+    /// peers do not use this path.</summary>
     private async Task WriteFolderStreamZip(HttpContext ctx, IReadOnlyList<string> files, long total, CancellationToken cancelToken)
     {
         long sent = 0;
