@@ -23,7 +23,7 @@ jobs:
           function Replace-Exact([string]$Path, [string]$Old, [string]$New) {
             $text = [System.IO.File]::ReadAllText($Path)
             if (-not $text.Contains($Old)) {
-              throw "Expected text not found in $Path: $Old"
+              throw "Expected text not found in ${Path}: $Old"
             }
             [System.IO.File]::WriteAllText(
               $Path,
