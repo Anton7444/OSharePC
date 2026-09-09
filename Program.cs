@@ -335,8 +335,8 @@ internal static class Program
     /// </summary>
     private static async Task<int> ZipProbe()
     {
-        using var engine = new SenderEngine();
-        await engine.StartAsync(SenderEngine.DefaultPort);
+        await using var server = new TransferServer();
+        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
 
         var tmp = Path.Combine(Path.GetTempPath(), "probe.pptx");
         using (var fs = File.Create(tmp))
@@ -346,8 +346,15 @@ internal static class Program
             using var w = new StreamWriter(e1.Open());
             w.Write("<probe/>");
         }
-        var task = engine.StageFiles(new[] { tmp })!;
-        engine.Server.AuthorizeLoopbackTest(task);
+        var task = new TransferTask
+        {
+            Files = new List<string> { tmp },
+            SenderName = "OSharePC-ZipProbe",
+            SenderId = "0000",
+        };
+        task.ComputeSize();
+        server.SetTask(task);
+        server.AuthorizeLoopbackTest(task);
 
         var http = new HttpClient();
         foreach (var url in new[]
@@ -384,16 +391,23 @@ internal static class Program
     private static async Task<int> RunMockPhone()
     {
         int failures = 0;
-        using var engine = new SenderEngine();
-        await engine.StartAsync(SenderEngine.DefaultPort);
+        await using var server = new TransferServer();
+        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
 
         // stage temp files (one small, one larger) to exercise the multi-file zip
         var tmp1 = Path.Combine(Path.GetTempPath(), "catshare-selftest.txt");
         var tmp2 = Path.Combine(Path.GetTempPath(), "catshare-selftest.bin");
         await File.WriteAllTextAsync(tmp1, "hello from catshare sender selftest");
         await File.WriteAllBytesAsync(tmp2, RandomNumberGenerator.GetBytes(128 * 1024));
-        var task = engine.StageFiles(new[] { tmp1, tmp2 })!;
-        engine.Server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
+        var task = new TransferTask
+        {
+            Files = new List<string> { tmp1, tmp2 },
+            SenderName = "OSharePC-MockPhone",
+            SenderId = "0000",
+        };
+        task.ComputeSize();
+        server.SetTask(task);
+        server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
 
         // --- play the phone ---
         var ws = new System.Net.WebSockets.ClientWebSocket();
@@ -482,7 +496,7 @@ internal static class Program
 
         File.Delete(tmp1);
         File.Delete(tmp2);
-        await engine.StopAsync();
+        await server.StopAsync();
         Log.Info(failures == 0 ? "MOCKPHONE PASSED" : $"MOCKPHONE FAILED ({failures})");
         return failures == 0 ? 0 : 1;
     }

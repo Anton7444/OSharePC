@@ -162,7 +162,7 @@ public sealed class TransferServer : IAsyncDisposable
         }
     }
 
-    public async Task StartAsync(int port)
+    public async Task StartAsync(int port, bool configureFirewall = true)
     {
         await _startStop.WaitAsync();
         try
@@ -204,7 +204,10 @@ public sealed class TransferServer : IAsyncDisposable
             _app = app;
             await app.StartAsync();
             IsRunning = true;
-            TryAddFirewallRule(port);
+            if (configureFirewall)
+                TryAddFirewallRule(port);
+            else
+                Log.Info("TransferServer: firewall setup skipped for isolated test server");
             Log.Info($"TransferServer listening on http://0.0.0.0:{port} (ws /websocket, /download)");
         }
         finally
