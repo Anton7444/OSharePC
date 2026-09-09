@@ -25,7 +25,6 @@ jobs:
 
           echo "Current cleanup run: $current"
 
-          # Cancel every other run that is still active so it can be deleted.
           gh api --paginate "repos/$repo/actions/runs?per_page=100" \
             --jq '.workflow_runs[] | [.id,.status] | @tsv' > /tmp/runs.tsv
 
@@ -41,7 +40,6 @@ jobs:
 
           sleep 8
 
-          # Delete every run except this cleanup run. Retry because cancellation is asynchronous.
           for attempt in 1 2 3 4 5 6; do
             gh api --paginate "repos/$repo/actions/runs?per_page=100" \
               --jq '.workflow_runs[].id' > /tmp/run_ids.txt
@@ -57,9 +55,31 @@ jobs:
             done < /tmp/run_ids.txt
 
             [ "$remaining" -eq 0 ] && break
-            sleep 6
+            sleep 5
           done
 
-          # Try to remove this cleanup run itself as the final operation.
-          # GitHub may terminate the runner immediately if it accepts the deletion.
-          gh api --method DELETE "repos/$repo/actions/runs/$current" >/dev/null 2>&1 || true
+          # Detached helper: cancel this final cleanup run, then delete it.
+          # Clearing RUNNER_TRACKING_ID prevents the runner from immediately reaping the helper.
+          env -u RUNNER_TRACKING_ID \
+            GH_TOKEN="$GH_TOKEN" REPO="$repo" RUN_ID="$current" \
+            setsid bash -c '
+              sleep 4
+              curl -fsS -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/cancel" >/dev/null 2>&1 || true
+              sleep 3
+              for i in 1 2 3 4 5; do
+                if curl -fsS -X DELETE \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID" >/dev/null 2>&1; then
+                  exit 0
+                fi
+                sleep 2
+              done
+            ' >/dev/null 2>&1 < /dev/null &
+
+          echo "Final self-delete helper started."
