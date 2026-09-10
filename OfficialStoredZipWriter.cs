@@ -135,34 +135,8 @@ internal static class OfficialStoredZipWriter
         Log.Info($"HTTP: official STORED ZIP complete, payload={sent}/{totalBytes} bytes, entries={entries.Count}, wire={writer.Offset} bytes, zip64={needsZip64}");
     }
 
-    private static async Task<uint> ComputeCrc32Async(string path, CancellationToken cancellationToken)
-    {
-        uint crc = 0xFFFFFFFFu;
-        var buffer = ArrayPool<byte>.Shared.Rent(CrcBufferSize);
-        try
-        {
-            await using var fs = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                CrcBufferSize,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-            while (true)
-            {
-                var read = await fs.ReadAsync(buffer.AsMemory(0, CrcBufferSize), cancellationToken);
-                if (read <= 0) break;
-                for (var i = 0; i < read; i++)
-                    crc = CrcTable[(crc ^ buffer[i]) & 0xFF] ^ (crc >> 8);
-            }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-        return ~crc;
-    }
+    private static Task<uint> ComputeCrc32Async(string path, CancellationToken cancellationToken) =>
+        PreparedCrcCache.GetCrc32Async(path, cancellationToken);
 
     private static readonly uint[] CrcTable = BuildCrcTable();
 
@@ -331,3 +305,4 @@ internal static class OfficialStoredZipWriter
         }
     }
 }
+

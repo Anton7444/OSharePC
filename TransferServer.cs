@@ -616,6 +616,11 @@ public sealed class TransferServer : IAsyncDisposable
             Log.Info($"HTTP: OnePlus-compatible STORED ZIP response, files={files.Count}, payload={total}");
 
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+            // Commit the HTTP 200 + headers immediately. STORED ZIP needs a CRC
+            // before its local header, but the phone must not sit waiting for the
+            // first body byte and mistake preparation time for a dead server.
+            await ctx.Response.StartAsync(linked.Token);
+            Log.Info("HTTP: response headers committed; waiting for prepared CRC if needed");
             await OfficialStoredZipWriter.WriteAsync(
                 ctx.Response.Body,
                 files,
@@ -690,3 +695,4 @@ public sealed class TransferServer : IAsyncDisposable
         return string.IsNullOrWhiteSpace(name) ? "file" : name;
     }
 }
+
