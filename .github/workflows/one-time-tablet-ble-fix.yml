@@ -1,0 +1,119 @@
+name: Apply tablet BLE address-type fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-tablet-ble-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.x'
+      - name: Patch BLE connection address type
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'missing anchor: {label}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Windows exposes the BLE address type on each advertisement.  Passing only
+          # the 48-bit address makes WinRT guess the address type; that works for some
+          # phones but can leave unpaired tablets with a resolvable-private address in
+          # GattCommunicationStatus.Unreachable forever.
+          replace_once(
+              'PhoneScanner.cs',
+              'using System.Text;\nusing Windows.Devices.Bluetooth.Advertisement;\n',
+              'using System.Text;\nusing Windows.Devices.Bluetooth;\nusing Windows.Devices.Bluetooth.Advertisement;\n',
+              'PhoneScanner Bluetooth namespace')
+          replace_once(
+              'PhoneScanner.cs',
+              '    public ulong Address { get; init; }\n    public string AddressStr => FormatAddress(Address);\n',
+              '    public ulong Address { get; init; }\n    public BluetoothAddressType AddressType { get; set; } = BluetoothAddressType.Unspecified;\n    public string AddressStr => FormatAddress(Address);\n',
+              'PhoneDevice address type field')
+          replace_once(
+              'PhoneScanner.cs',
+              '                device = new PhoneDevice { Address = args.BluetoothAddress, Kind = kind };\n',
+              '                device = new PhoneDevice { Address = args.BluetoothAddress, AddressType = args.BluetoothAddressType, Kind = kind };\n',
+              'new PhoneDevice address type')
+          replace_once(
+              'PhoneScanner.cs',
+              '            device.Rssi = args.RawSignalStrengthInDBm;\n            device.LastSeen = now;\n',
+              '            device.AddressType = args.BluetoothAddressType;\n            device.Rssi = args.RawSignalStrengthInDBm;\n            device.LastSeen = now;\n',
+              'refresh address type')
+          replace_once(
+              'PhoneScanner.cs',
+              '        Log.Info($"BLE: seen {device.KindLabel} \'{device.Name}\' {device.AddressStr} rssi={device.Rssi} " +\n                 $"id=\'{device.DeviceId}\' senderId=\'{device.SenderId}\' vender={device.Vender} flag={device.BleFlag}");\n',
+              '        Log.Info($"BLE: seen {device.KindLabel} \'{device.Name}\' {device.AddressStr} rssi={device.Rssi} " +\n                 $"addrType={device.AddressType} advType={args.AdvertisementType} " +\n                 $"id=\'{device.DeviceId}\' senderId=\'{device.SenderId}\' vender={device.Vender} flag={device.BleFlag}");\n',
+              'scanner diagnostics')
+
+          replace_once(
+              'GattLink.cs',
+              '    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default)\n',
+              '    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified)\n',
+              'GattLink typed signature')
+          replace_once(
+              'GattLink.cs',
+              '                device = await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress);\n',
+              '                device = addressType == BluetoothAddressType.Unspecified\n                    ? await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress)\n                    : await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress, addressType);\n',
+              'typed WinRT device creation')
+          replace_once(
+              'GattLink.cs',
+              '                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} \'{link._device.Name}\' (flow={flow}, attempt {attempt})");\n',
+              '                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} \'{link._device.Name}\' (addressType={addressType}, flow={flow}, attempt {attempt})");\n',
+              'GattLink diagnostics')
+
+          replace_once(
+              'SenderEngine.cs',
+              '                    s => TransferStateChanged?.Invoke(_staged.TaskId, s),\n                    ct);\n',
+              '                    s => TransferStateChanged?.Invoke(_staged.TaskId, s),\n                    ct,\n                    candidate.AddressType);\n',
+              'pass observed address type')
+
+          print('tablet BLE address-type fix applied')
+          '@ | Set-Content -LiteralPath patch_tablet_ble.py -Encoding UTF8
+          python patch_tablet_ble.py
+          Remove-Item patch_tablet_ble.py
+      - name: Check diff
+        shell: pwsh
+        run: git diff --check
+      - name: Build backend
+        run: dotnet build CatShareSender.csproj -c Release
+      - name: Backend selftest
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
+          $p = Start-Process $exe.FullName -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "selftest exited $($p.ExitCode)" }
+      - name: Mock phone regressions
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
+          foreach ($arg in @('--mockphone', '--mockphone-cancel')) {
+            $p = Start-Process $exe.FullName -ArgumentList $arg -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "$arg exited $($p.ExitCode)" }
+          }
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add PhoneScanner.cs GattLink.cs SenderEngine.cs
+          git diff --cached --check
+          git commit -m 'Use BLE address type when connecting to tablets'
+          git push origin HEAD:main
