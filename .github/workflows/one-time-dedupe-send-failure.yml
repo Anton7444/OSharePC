@@ -20,21 +20,10 @@ jobs:
         run: |
           $p = 'CatShareBridgeServer.cs'
           $s = Get-Content -LiteralPath $p -Raw
-          $old = @'
-                  if (type == 1)
-                      Push("sendCompleted", new { taskId });
-                  else if (type == 3)
-                      Push("sendFailed", new { taskId, error = string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason });
-          '@
-          $new = @'
-                  if (type == 1)
-                      Push("sendCompleted", new { taskId });
-                  // type=3 is normalized by TransferServer.TransferFailed below,
-                  // so failure reaches Flutter exactly once.
-          '@
-          if (-not $s.Contains($old)) { throw 'status bridge anchor missing' }
-          $s = $s.Replace($old, $new)
-          Set-Content -LiteralPath $p -Value $s -Encoding utf8
+          $pattern = '(?ms)^\s*else if \(type == 3\)\r?\n\s*Push\("sendFailed", new \{ taskId, error = string\.IsNullOrWhiteSpace\(reason\) \? "Phone refused the transfer\." : reason \}\);\r?\n'
+          $updated = [regex]::Replace($s, $pattern, '', 1)
+          if ($updated -eq $s) { throw 'type-3 bridge branch not found' }
+          Set-Content -LiteralPath $p -Value $updated -Encoding utf8
           dotnet build CatShareSender.csproj -c Release
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
