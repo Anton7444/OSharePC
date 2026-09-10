@@ -1,0 +1,47 @@
+name: Run stat cancellation patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-run-stat-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Patch source
+        run: python scripts/patch-stat-cancel.py
+      - name: Build backend
+        run: dotnet build CatShareSender.csproj -c Release
+      - name: Verify normal transfer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
+          $p = Start-Process $exe.FullName -ArgumentList '--mockphone' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "mockphone exited $($p.ExitCode)" }
+      - name: Verify phone cancel
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item $log -Force -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
+          $p = Start-Process $exe.FullName -ArgumentList '--mockphone-cancel' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { if (Test-Path $log) { Get-Content $log }; throw "mockphone-cancel exited $($p.ExitCode)" }
+          if (-not (Select-String $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) { Get-Content $log; throw 'MOCKCANCEL PASSED missing' }
+          Get-Content $log | Select-String -Pattern 'WS: stat|MOCKCANCEL|remote transfer failed'
+      - name: Commit source
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TransferServer.cs Program.cs
+          git commit -m 'Handle OnePlus stat cancellation explicitly'
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
