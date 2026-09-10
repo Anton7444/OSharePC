@@ -70,6 +70,7 @@ class _SettingsTabState extends State<SettingsTab> {
   Future<void> _loadTrayPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
       setState(() {
         _minimizeToTray = prefs.getBool('minimize_to_tray') ?? true;
         _closeToTray = prefs.getBool('close_to_tray') ?? true;

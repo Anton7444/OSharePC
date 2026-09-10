@@ -11,7 +11,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CatShareSender;
 
-/// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides REST/SSE/event bridge.</summary>
+/// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides a REST/polling event bridge.</summary>
 public sealed class CatShareBridgeServer : IAsyncDisposable
 {
     public const int Port = 8960;

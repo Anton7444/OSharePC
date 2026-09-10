@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../config/language.dart';
 import '../models/models.dart';
 
 class BridgeClient extends ChangeNotifier {
@@ -42,6 +43,7 @@ class BridgeClient extends ChangeNotifier {
   List<DeviceModel> _devices = [];
   QuickSaveMode _quickSaveMode = QuickSaveMode.favorites;
   bool _receiveSuccessNotifications = true;
+  AppLanguage _language = AppLanguage.english;
   TransferStateModel _transferState = TransferStateModel();
   IncomingTransferOffer? _pendingIncomingOffer;
   final Set<String> _dismissedTransferIds = {};
@@ -78,13 +80,39 @@ class BridgeClient extends ChangeNotifier {
       _quickSaveMode = QuickSaveMode.values[modeIndex.clamp(0, 2)];
       _receiveSuccessNotifications =
           prefs.getBool('receive_success_notifications') ?? true;
+      final languageIndex = prefs.getInt('language') ?? AppLanguage.english.index;
+      _language = AppLanguage.values[languageIndex.clamp(0, AppLanguage.values.length - 1)];
       notifyListeners();
     } catch (e) {
       debugPrint('Error loading prefs: $e');
     }
   }
 
-  Future<void> setQuickSaveMode(QuickSaveMode mode) async {
+  void setLanguage(AppLanguage language) {
+  _language = language;
+}
+
+  String _localizedTransferError(String? raw, {required bool isSending}) {
+    final lower = (raw ?? '').toLowerCase();
+    if (lower.contains('user interrupt') || lower.contains('cancel')) {
+      return appText(_language, 'remoteCancelled');
+    }
+    if (lower.contains('reject') || lower.contains('declin')) {
+      return appText(_language, 'remoteRejected');
+    }
+    if (lower.contains('timeout') || lower.contains('timed out')) {
+      return appText(_language, 'transferTimedOut');
+    }
+    if (lower.contains('disconnect') ||
+        lower.contains('connection') ||
+        lower.contains('closed') ||
+        lower.contains('websocket')) {
+      return appText(_language, 'connectionLost');
+    }
+    return appText(_language, isSending ? 'sendFailed' : 'receiveFailed');
+  }
+
+    Future<void> setQuickSaveMode(QuickSaveMode mode) async {
     _quickSaveMode = mode;
     notifyListeners();
     try {
@@ -370,21 +398,27 @@ class BridgeClient extends ChangeNotifier {
         );
         _pendingIncomingOffer = null;
       } else if (type == 'receiveFailed' || type == 'sendFailed') {
-        onNotification?.call('OsharePC', 'File transfer failed.');
-        final error = data is Map ? data['error']?.toString() : null;
-        _transferState = TransferStateModel(
-          active: true,
-          isSending: type == 'sendFailed' ? true : false,
-          targetDevice: _transferState.targetDevice,
-          fileName: _transferState.fileName,
-          fileCount: _transferState.fileCount,
-          sentBytes: _transferState.sentBytes,
-          totalBytes: _transferState.totalBytes,
-          phase: 'failed',
-          statusText: 'Transfer failed',
-          errorText: error ?? 'Could not save the received file',
-        );
-        _pendingIncomingOffer = null;
+  final isSendingFailure = type == 'sendFailed';
+  final error = data is Map ? data['error']?.toString() : null;
+  final localizedError = _localizedTransferError(
+    error,
+    isSending: isSendingFailure,
+  );
+  debugPrint('Backend transfer failure detail: ${error ?? '(none)'}');
+  onNotification?.call('OsharePC', appText(_language, 'transferFailed'));
+  _transferState = TransferStateModel(
+    active: true,
+    isSending: isSendingFailure,
+    targetDevice: _transferState.targetDevice,
+    fileName: _transferState.fileName,
+    fileCount: _transferState.fileCount,
+    sentBytes: _transferState.sentBytes,
+    totalBytes: _transferState.totalBytes,
+    phase: 'failed',
+    statusText: appText(_language, 'transferFailed'),
+    errorText: localizedError,
+  );
+  _pendingIncomingOffer = null;
       } else if (type == 'state' && data is Map) {
         final st = data['state']?.toString() ?? '';
         if (st.contains('fail') ||
@@ -503,27 +537,27 @@ class BridgeClient extends ChangeNotifier {
       if (resp.statusCode == 202) return true;
       final body = resp.body.isNotEmpty ? jsonDecode(resp.body) : null;
       final error = body is Map ? body['error']?.toString() : null;
-      _transferState = TransferStateModel(
-        active: true,
-        isSending: true,
-        targetDevice: device.name,
-        phase: 'failed',
-        statusText: 'Transfer failed',
-        errorText:
-            error ?? 'Could not start the transfer (${resp.statusCode}).',
-      );
-      notifyListeners();
-      return false;
+  debugPrint('Backend send failure detail: ${error ?? 'HTTP ${resp.statusCode}'}');
+  _transferState = TransferStateModel(
+    active: true,
+    isSending: true,
+    targetDevice: device.name,
+    phase: 'failed',
+    statusText: appText(_language, 'transferFailed'),
+    errorText: _localizedTransferError(error, isSending: true),
+  );
+  notifyListeners();
+  return false;
     } catch (e) {
-      debugPrint('Error sending to device: $e');
-      _transferState = TransferStateModel(
-        active: true,
-        isSending: true,
-        targetDevice: device.name,
-        phase: 'failed',
-        statusText: 'Transfer failed',
-        errorText: 'Could not start the transfer: $e',
-      );
+  debugPrint('Error sending to device: $e');
+  _transferState = TransferStateModel(
+    active: true,
+    isSending: true,
+    targetDevice: device.name,
+    phase: 'failed',
+    statusText: appText(_language, 'transferFailed'),
+    errorText: appText(_language, 'sendFailed'),
+  );
       notifyListeners();
       Future.delayed(const Duration(seconds: 4), () {
         _transferState = TransferStateModel();

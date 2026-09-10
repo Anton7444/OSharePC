@@ -49,6 +49,8 @@ void main() async {
         savedIndex.clamp(0, AppLanguage.values.length - 1)];
   }
 
+  bridgeClient.setLanguage(initialLanguage);
+
   runApp(
     CatShareApp(
       bridgeClient: bridgeClient,
@@ -100,6 +102,7 @@ class _CatShareAppState extends State<CatShareApp> {
 
   Future<void> _onLanguageChanged(AppLanguage language) async {
     setState(() => _language = language);
+    widget.bridgeClient.setLanguage(language);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('language', language.index);
   }

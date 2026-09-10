@@ -19,7 +19,21 @@ internal static class WifiJoiner
     /// list doesn't accumulate networks that don't exist.</summary>
     public static async Task CleanupStaleProfiles()
     {
-        try
+        var staleXml = Path.Combine(Path.GetTempPath(), ProfileName + ".xml");
+    try
+    {
+        if (File.Exists(staleXml))
+        {
+            File.Delete(staleXml);
+            Log.Info($"RX: removed stale WLAN profile XML '{staleXml}'");
+        }
+    }
+    catch (Exception ex)
+    {
+        Log.Warn($"RX: stale WLAN profile XML cleanup failed: {ex.Message}");
+    }
+
+    try
         {
             var shown = await Netsh("wlan show profiles");
             foreach (var line in shown.Stdout.Split('\n'))
