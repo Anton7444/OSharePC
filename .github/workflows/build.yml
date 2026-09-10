@@ -60,6 +60,22 @@ jobs:
             if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
             throw 'MOCKPHONE PASSED not found in sender.log'
           }
+      - name: Run phone cancellation regression
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--mockphone-cancel' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            Write-Host '===== sender.log ====='
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw "MOCKPHONE-CANCEL process exited with $($process.ExitCode)"
+          }
+          if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) {
+            Write-Host '===== sender.log ====='
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw 'MOCKCANCEL PASSED not found in sender.log'
+          }
       - name: Build Flutter Windows release
         working-directory: catshare_gui
         run: flutter build windows --release
