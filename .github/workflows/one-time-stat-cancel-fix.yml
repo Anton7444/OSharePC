@@ -1,0 +1,285 @@
+name: Apply explicit OnePlus stat cancellation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-stat-cancel-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Patch stat cancellation and regression test
+        shell: pwsh
+        run: |
+          $py = @'
+          from pathlib import Path
+
+          p = Path('TransferServer.cs')
+          s = p.read_text(encoding='utf-8')
+          old = '''                if (e.IsAction && e.Method == "status")
+                {
+                    var type = e.PayloadInt("type");
+                    var reason = e.PayloadString("reason");
+                    var taskId = e.PayloadString("taskId");
+                    Log.Info($"WS: status type={type} reason='{reason}'");
+                    _owner.OnStatus(taskId, type, reason);
+                    await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
+                    // Stock OnePlus commonly sends success as type=1 with an empty reason.
+                    if (type == 1) return "transfer completed";
+                    if (type == 3) return $"refused: {reason}";
+                }
+                else if (e.IsAction)
+                {
+                    await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+                }'''
+          new = '''                if (e.IsAction && (e.Method == "status" || e.Method == "stat"))
+                {
+                    // Stock OnePlus uses status for ordinary terminal results. Phone-side
+                    // Cancel is observed as action:*:stat, followed by ack:*:stat and
+                    // mCanceled=true on the receiver. Handle it before the socket closes.
+                    var type = e.PayloadInt("type", int.MinValue);
+                    if (type == int.MinValue) type = e.PayloadInt("status", int.MinValue);
+                    var reason = e.PayloadString("reason");
+                    if (string.IsNullOrWhiteSpace(reason)) reason = e.PayloadString("message");
+                    var taskId = e.PayloadString("taskId");
+                    if (string.IsNullOrWhiteSpace(taskId)) taskId = e.PayloadString("id");
+                    Log.Info($"WS: {e.Method} type={(type == int.MinValue ? "?" : type)} reason='{reason}' payload={(e.HasPayload ? e.Payload.GetRawText() : "<none>")}");
+
+                    // ACK the exact method name: OnePlus waits for ack:*:stat when the
+                    // user cancels from the phone.
+                    await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+
+                    if (e.Method == "stat")
+                    {
+                        if (type == 1)
+                        {
+                            _owner.OnStatus(taskId, 1, reason);
+                            return "transfer completed";
+                        }
+
+                        var why = string.IsNullOrWhiteSpace(reason)
+                            ? "Phone cancelled the transfer."
+                            : reason;
+                        _owner.ReportTransferFailure(taskId, why);
+                        return $"phone cancelled: {why}";
+                    }
+
+                    _owner.OnStatus(taskId, type, reason);
+                    if (type == 1) return "transfer completed";
+                    if (type == 2) return string.IsNullOrWhiteSpace(reason) ? "transfer failed on phone" : $"transfer failed: {reason}";
+                    if (type == 3) return string.IsNullOrWhiteSpace(reason) ? "phone refused transfer" : $"refused: {reason}";
+                }
+                else if (e.IsAction)
+                {
+                    await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+                }'''
+          if old not in s: raise SystemExit('ReceiveLoop status anchor missing')
+          s = s.replace(old, new, 1)
+
+          old = '''        if (type == 1)
+            MarkSuccessful(taskId);
+        else if (type == 3)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason);
+
+        try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+        if (type is 1 or 3)
+            DisarmTransfer($"terminal status {type}: {reason}");'''
+          new = '''        if (type == 1)
+            MarkSuccessful(taskId);
+        else if (type == 2)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone cancelled or failed the transfer." : reason);
+        else if (type == 3)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason);
+
+        try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+        if (type is 1 or 2 or 3)
+            DisarmTransfer($"terminal status {type}: {reason}");'''
+          if old not in s: raise SystemExit('OnStatus anchor missing')
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+
+          p = Path('Program.cs')
+          s = p.read_text(encoding='utf-8')
+          old = '''            if (args.Contains("--mockphone"))
+            {
+                var rc = RunMockPhone().GetAwaiter().GetResult();
+                mutex.ReleaseMutex();
+                return rc;
+            }
+            if (args.Contains("--zipprobe"))'''
+          new = '''            if (args.Contains("--mockphone"))
+            {
+                var rc = RunMockPhone().GetAwaiter().GetResult();
+                mutex.ReleaseMutex();
+                return rc;
+            }
+            if (args.Contains("--mockphone-cancel"))
+            {
+                var rc = RunMockPhoneCancel().GetAwaiter().GetResult();
+                mutex.ReleaseMutex();
+                return rc;
+            }
+            if (args.Contains("--zipprobe"))'''
+          if old not in s: raise SystemExit('Program arg anchor missing')
+          s = s.replace(old, new, 1)
+
+          marker = '    /// <summary>Offline verification of the crypto + advertisement layout, no UI/BLE needed.</summary>'
+          if marker not in s: raise SystemExit('Program insertion marker missing')
+          method = r'''    private static async Task<int> RunMockPhoneCancel()
+    {
+        var failures = 0;
+        await using var server = new TransferServer();
+        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
+
+        var tmp = Path.Combine(Path.GetTempPath(), "catshare-cancel-selftest.bin");
+        await File.WriteAllBytesAsync(tmp, RandomNumberGenerator.GetBytes(4096));
+        var task = new TransferTask
+        {
+            Files = new List<string> { tmp },
+            SenderName = "OSharePC-MockCancel",
+            SenderId = "0000",
+        };
+        task.ComputeSize();
+        server.SetTask(task);
+        server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
+
+        var failed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.TransferFailed += (id, reason) =>
+        {
+            if (id == task.TaskId) failed.TrySetResult(reason);
+        };
+
+        using var ws = new System.Net.WebSockets.ClientWebSocket();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await ws.ConnectAsync(new Uri($"ws://127.0.0.1:{SenderEngine.DefaultPort}/websocket"), cts.Token);
+        var buf = new byte[8192];
+
+        async Task<Envelope> RecvEnvelope()
+        {
+            while (true)
+            {
+                var r = await ws.ReceiveAsync(buf, cts.Token);
+                if (r.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
+                    throw new IOException("closed");
+                var text = System.Text.Encoding.UTF8.GetString(buf, 0, r.Count);
+                var env = Envelope.Parse(text);
+                if (env is { IsRaw: false }) return env;
+                Log.Info($"MOCKCANCEL: raw frame '{env?.Method}'");
+            }
+        }
+
+        async Task Send(Envelope e) => await ws.SendAsync(
+            System.Text.Encoding.UTF8.GetBytes(e.ToString()),
+            System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+
+        var vn = await RecvEnvelope();
+        await Send(new Envelope
+        {
+            Type = "ack", Seq = vn.Seq, Method = "versionNegotiation",
+            Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { version = 1, threadLimit = 5 }), HasPayload = true
+        });
+        var sr = await RecvEnvelope();
+        await Send(new Envelope
+        {
+            Type = "ack", Seq = sr.Seq, Method = "sendRequest",
+            Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { }), HasPayload = true
+        });
+
+        // Consume the stock bare 'files' trigger, then reproduce the phone-side
+        // cancellation frame seen in the OnePlus trace.
+        var raw = await ws.ReceiveAsync(buf, cts.Token);
+        var rawText = System.Text.Encoding.UTF8.GetString(buf, 0, raw.Count);
+        if (rawText != "files")
+        {
+            Log.Error($"MOCKCANCEL FAIL: expected files trigger, got '{rawText}'");
+            failures++;
+        }
+
+        await Send(new Envelope
+        {
+            Type = "action", Seq = 77, Method = "stat",
+            Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { reason = "user interrupt" }), HasPayload = true
+        });
+        var ack = await RecvEnvelope();
+        if (!(ack.IsAck && ack.Seq == 77 && ack.Method == "stat"))
+        {
+            Log.Error($"MOCKCANCEL FAIL: expected ack:77:stat, got {ack}");
+            failures++;
+        }
+
+        string failureReason;
+        try { failureReason = await failed.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch { failureReason = ""; }
+        if (failureReason != "user interrupt")
+        {
+            Log.Error($"MOCKCANCEL FAIL: expected user interrupt failure, got '{failureReason}'");
+            failures++;
+        }
+        else
+        {
+            Log.Info("MOCKCANCEL: action:stat -> ack:stat -> TransferFailed verified");
+        }
+
+        try { File.Delete(tmp); } catch { }
+        await server.StopAsync();
+        Log.Info(failures == 0 ? "MOCKCANCEL PASSED" : $"MOCKCANCEL FAILED ({failures})");
+        return failures == 0 ? 0 : 1;
+    }
+
+'''
+          s = s.replace(marker, method + marker, 1)
+          p.write_text(s, encoding='utf-8')
+          '@
+          Set-Content -LiteralPath patch_stat_cancel.py -Value $py -Encoding utf8
+          python patch_stat_cancel.py
+          Remove-Item patch_stat_cancel.py
+          git diff --check
+
+      - name: Build backend
+        shell: pwsh
+        run: dotnet build CatShareSender.csproj -c Release
+
+      - name: Run normal mock phone
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'CatShareSender.exe not found' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "mockphone exited $($p.ExitCode)" }
+
+      - name: Run explicit phone cancel test
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone-cancel' -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $log) { Get-Content $log }
+            throw "mockphone-cancel exited $($p.ExitCode)"
+          }
+          if (-not (Select-String -LiteralPath $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) {
+            Get-Content $log
+            throw 'MOCKCANCEL PASSED missing'
+          }
+          Get-Content $log | Select-String -Pattern 'MOCKCANCEL|WS: stat|remote transfer failed'
+
+      - name: Commit source fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TransferServer.cs Program.cs
+          git diff --cached --check
+          git commit -m 'Handle OnePlus stat cancellation explicitly'
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
