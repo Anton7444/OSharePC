@@ -18,6 +18,7 @@ jobs:
       - name: Remove duplicate type-3 bridge event
         shell: pwsh
         run: |
+          git pull --rebase origin main
           $p = 'CatShareBridgeServer.cs'
           $s = Get-Content -LiteralPath $p -Raw
           $pattern = '(?ms)^\s*else if \(type == 3\)\r?\n\s*Push\("sendFailed", new \{ taskId, error = string\.IsNullOrWhiteSpace\(reason\) \? "Phone refused the transfer\." : reason \}\);\r?\n'
