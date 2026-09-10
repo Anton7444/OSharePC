@@ -1,0 +1,44 @@
+name: Dedupe send failure events
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-dedupe-send-failure.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Remove duplicate type-3 bridge event
+        shell: pwsh
+        run: |
+          $p = 'CatShareBridgeServer.cs'
+          $s = Get-Content -LiteralPath $p -Raw
+          $old = @'
+                  if (type == 1)
+                      Push("sendCompleted", new { taskId });
+                  else if (type == 3)
+                      Push("sendFailed", new { taskId, error = string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason });
+          '@
+          $new = @'
+                  if (type == 1)
+                      Push("sendCompleted", new { taskId });
+                  // type=3 is normalized by TransferServer.TransferFailed below,
+                  // so failure reaches Flutter exactly once.
+          '@
+          if (-not $s.Contains($old)) { throw 'status bridge anchor missing' }
+          $s = $s.Replace($old, $new)
+          Set-Content -LiteralPath $p -Value $s -Encoding utf8
+          dotnet build CatShareSender.csproj -c Release
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add CatShareBridgeServer.cs
+          git diff --cached --check
+          git commit -m 'Deduplicate phone failure events'
+          git push origin HEAD:main
