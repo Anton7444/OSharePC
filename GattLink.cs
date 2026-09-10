@@ -85,7 +85,7 @@ public sealed class GattLink : IDisposable
 
     /// <summary>Connect with retries — 'Unreachable' from GetGattServicesAsync is
     /// usually transient (address rotation, advertisement timing, RF).</summary>
-    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default)
+    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified)
     {
         Exception? last = null;
         for (int attempt = 1; attempt <= retries; attempt++)
@@ -96,7 +96,9 @@ public sealed class GattLink : IDisposable
             GattSession? session = null;
             try
             {
-                device = await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress);
+                device = addressType == BluetoothAddressType.Unspecified
+                    ? await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress)
+                    : await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress, addressType);
                 if (device is null)
                     throw new InvalidOperationException("device not found — is the phone still advertising?");
 
@@ -118,7 +120,7 @@ public sealed class GattLink : IDisposable
                 link._services.AddRange(svcResult.Services);
                 device = null;       // ownership moved to the link
                 session = null;
-                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (flow={flow}, attempt {attempt})");
+                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, attempt {attempt})");
 
                 try
                 {

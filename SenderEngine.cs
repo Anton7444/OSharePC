@@ -360,7 +360,8 @@ public sealed class SenderEngine : IDisposable
                     flow,
                     1,
                     s => TransferStateChanged?.Invoke(_staged.TaskId, s),
-                    ct);
+                    ct,
+                    candidate.AddressType);
                 break;
             }
             catch (Exception ex) when (attempt < 3)

@@ -1,4 +1,5 @@
 using System.Text;
+using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Storage.Streams;
 
@@ -17,6 +18,7 @@ public enum PhoneKind
 public sealed class PhoneDevice
 {
     public ulong Address { get; init; }
+    public BluetoothAddressType AddressType { get; set; } = BluetoothAddressType.Unspecified;
     public string AddressStr => FormatAddress(Address);
     public string Name { get; set; } = "";
     public PhoneKind Kind { get; set; }
@@ -258,7 +260,7 @@ public sealed class PhoneScanner : IDisposable
                 ushort firstUuid = sections.Count > 0 ? sections[0].Uuid16 : (ushort)0;
                 if (!hasAllianceUuid && !IsKnownSectionUuid(firstUuid))
                     return;
-                device = new PhoneDevice { Address = args.BluetoothAddress, Kind = kind };
+                device = new PhoneDevice { Address = args.BluetoothAddress, AddressType = args.BluetoothAddressType, Kind = kind };
                 _devices[device.Address] = device;
             }
 
@@ -266,6 +268,7 @@ public sealed class PhoneScanner : IDisposable
             var beforePart1 = device.DeviceIdPart1;
             var beforePart2 = device.DeviceIdPart2;
 
+            device.AddressType = args.BluetoothAddressType;
             device.Rssi = args.RawSignalStrengthInDBm;
             device.LastSeen = now;
             device.SeenCount++;
@@ -358,6 +361,7 @@ public sealed class PhoneScanner : IDisposable
         }
 
         Log.Info($"BLE: seen {device.KindLabel} '{device.Name}' {device.AddressStr} rssi={device.Rssi} " +
+                 $"addrType={device.AddressType} advType={args.AdvertisementType} " +
                  $"id='{device.DeviceId}' senderId='{device.SenderId}' vender={device.Vender} flag={device.BleFlag}");
 
         DeviceSeen?.Invoke(device);
