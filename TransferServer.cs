@@ -41,6 +41,9 @@ public sealed class TransferServer : IAsyncDisposable
     /// <summary>The task offered on the active websocket session (null until sending).</summary>
     private volatile TransferTask? _activeTask;
     private CancellationTokenSource _cancelCts = new();
+    private string? _successfulTaskId;
+    private string? _reportedFailureTaskId;
+    private string? _locallyCancelledTaskId;
 
     // A staged task is NOT remotely readable until the BLE credential flow arms it.
     // Once a WebSocket peer claims the armed task, every /download request must come
@@ -54,8 +57,9 @@ public sealed class TransferServer : IAsyncDisposable
     /// <summary>Raised when the phone accepts and the ZIP download begins.</summary>
     public event Action<string>? DownloadStarted;
     public event Action<long, long>? DownloadProgress;      // (sent, total)
-    public event Action<string>? DownloadFinished;          // taskId
+    public event Action<string>? DownloadFinished;          // taskId; HTTP body finished, not receiver success
     public event Action<string, int, string>? StatusReceived; // (taskId, type, reason)
+    public event Action<string, string>? TransferFailed;      // (taskId, reason)
 
     public void SetTask(TransferTask? task)
     {
@@ -77,6 +81,9 @@ public sealed class TransferServer : IAsyncDisposable
             _allowedLocalIp = Parse(allowedLocalIp);
             _expectedPeerIp = Parse(expectedPeerIp);
             _authorizedPeerIp = null;
+            _successfulTaskId = null;
+            _reportedFailureTaskId = null;
+            _locallyCancelledTaskId = null;
         }
         Log.Info($"TransferServer: armed task {task.TaskId}; local={_allowedLocalIp?.ToString() ?? "any"}; expectedPeer={_expectedPeerIp?.ToString() ?? "first-valid-peer"}");
     }
@@ -104,6 +111,8 @@ public sealed class TransferServer : IAsyncDisposable
 
     public void CancelActiveTransfer()
     {
+        lock (_peerGate)
+            _locallyCancelledTaskId = _activeTask?.TaskId;
         _cancelCts.Cancel();
         _cancelCts.Dispose();
         _cancelCts = new CancellationTokenSource();
@@ -113,6 +122,41 @@ public sealed class TransferServer : IAsyncDisposable
 
     private static IPAddress? NormalizeIp(IPAddress? ip) =>
         ip?.IsIPv4MappedToIPv6 == true ? ip.MapToIPv4() : ip;
+
+    private bool IsSuccessful(string taskId)
+    {
+        lock (_peerGate) return _successfulTaskId == taskId;
+    }
+
+    private bool IsLocalCancellation(string taskId)
+    {
+        lock (_peerGate) return _locallyCancelledTaskId == taskId;
+    }
+
+    private void MarkSuccessful(string taskId)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? "";
+        if (string.IsNullOrWhiteSpace(taskId)) return;
+        lock (_peerGate)
+        {
+            _successfulTaskId = taskId;
+            _reportedFailureTaskId = null;
+        }
+    }
+
+    private void ReportTransferFailure(string taskId, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? "";
+        if (string.IsNullOrWhiteSpace(taskId)) return;
+        lock (_peerGate)
+        {
+            if (_successfulTaskId == taskId || _locallyCancelledTaskId == taskId || _reportedFailureTaskId == taskId)
+                return;
+            _reportedFailureTaskId = taskId;
+        }
+        Log.Warn($"TransferServer: remote transfer failed task={taskId}: {reason}");
+        try { TransferFailed?.Invoke(taskId, reason); } catch { }
+    }
 
     private bool TryClaimWebSocketPeer(HttpContext ctx, TransferTask task)
     {
@@ -388,10 +432,23 @@ public sealed class TransferServer : IAsyncDisposable
             // Wait for the download + final status.
             var done = await session.ReceiveLoopAsync(TimeSpan.FromMinutes(30));
             Log.Info($"WS: session ended ({done})");
+            if (committed && done != "transfer completed" && !IsSuccessful(task.TaskId))
+                ReportTransferFailure(task.TaskId, "Phone cancelled or disconnected before confirming receipt.");
         }
         catch (Exception ex)
         {
-            Log.Error("WS: session error", ex);
+            if (committed && !IsSuccessful(task.TaskId))
+            {
+                ReportTransferFailure(task.TaskId,
+                    ex is System.Net.WebSockets.WebSocketException
+                        ? "Phone cancelled the transfer or disconnected."
+                        : $"Transfer connection failed: {ex.Message}");
+                Log.Warn($"WS: committed session ended before success confirmation: {ex.Message}");
+            }
+            else
+            {
+                Log.Error("WS: session error", ex);
+            }
         }
         finally
         {
@@ -450,7 +507,8 @@ public sealed class TransferServer : IAsyncDisposable
                     Log.Info($"WS: status type={type} reason='{reason}'");
                     _owner.OnStatus(taskId, type, reason);
                     await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
-                    if (type == 1 && reason == "ok") return "transfer completed";
+                    // Stock OnePlus commonly sends success as type=1 with an empty reason.
+                    if (type == 1) return "transfer completed";
                     if (type == 3) return $"refused: {reason}";
                 }
                 else if (e.IsAction)
@@ -501,6 +559,12 @@ public sealed class TransferServer : IAsyncDisposable
 
     private void OnStatus(string taskId, int type, string reason)
     {
+        if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? taskId;
+        if (type == 1)
+            MarkSuccessful(taskId);
+        else if (type == 3)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason);
+
         try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
         if (type is 1 or 3)
             DisarmTransfer($"terminal status {type}: {reason}");
@@ -575,12 +639,26 @@ public sealed class TransferServer : IAsyncDisposable
             // Always answer with a zip whose entries are the transfer files (stock
             // sender does the same for nd_zip != false, aa/b.java -> ga.c).
             var single = new List<string> { task.Files[idx] };
-            await WriteDownloadZip(
-                ctx,
-                single,
-                new FileInfo(single[0]).Length,
-                Path.GetFileName(single[0]),
-                _cancelCts.Token);
+            try
+            {
+                await WriteDownloadZip(
+                    ctx,
+                    single,
+                    new FileInfo(single[0]).Length,
+                    Path.GetFileName(single[0]),
+                    _cancelCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                if (ctx.RequestAborted.IsCancellationRequested && !IsLocalCancellation(task.TaskId))
+                    ReportTransferFailure(task.TaskId, "Phone cancelled the download.");
+                return;
+            }
+            catch (IOException ex) when (ctx.RequestAborted.IsCancellationRequested)
+            {
+                ReportTransferFailure(task.TaskId, $"Phone disconnected during download: {ex.Message}");
+                return;
+            }
             Log.Info($"HTTP: per-file zip done: {single[0]}");
             try { DownloadFinished?.Invoke(task.TaskId); } catch { }
             return;
@@ -588,7 +666,21 @@ public sealed class TransferServer : IAsyncDisposable
 
         // whole-batch mode — stock OnePlus peers use the official STORED ZIP path;
         // custom/CatShare peers retain the legacy folder-stream compatibility path.
-        await WriteDownloadZip(ctx, task.Files, task.TotalSize, task.FirstFileName, _cancelCts.Token);
+        try
+        {
+            await WriteDownloadZip(ctx, task.Files, task.TotalSize, task.FirstFileName, _cancelCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            if (ctx.RequestAborted.IsCancellationRequested && !IsLocalCancellation(task.TaskId))
+                ReportTransferFailure(task.TaskId, "Phone cancelled the download.");
+            return;
+        }
+        catch (IOException ex) when (ctx.RequestAborted.IsCancellationRequested)
+        {
+            ReportTransferFailure(task.TaskId, $"Phone disconnected during download: {ex.Message}");
+            return;
+        }
         try { DownloadFinished?.Invoke(task.TaskId); } catch { }
     }
 

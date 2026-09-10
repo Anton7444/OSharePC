@@ -59,7 +59,17 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
             Push("receiveFailed", new { sender, error });
         };
         _engine.Server.DownloadProgress += (sent, total) => Push("sendProgress", new { sent, total });
-        _engine.Server.DownloadFinished += taskId => Push("sendCompleted", new { taskId });
+        // Do NOT mark success when the HTTP body merely finished writing. The phone
+        // can still cancel/reject before acknowledging receipt.
+        _engine.Server.StatusReceived += (taskId, type, reason) =>
+        {
+            if (type == 1)
+                Push("sendCompleted", new { taskId });
+            else if (type == 3)
+                Push("sendFailed", new { taskId, error = string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason });
+        };
+        _engine.Server.TransferFailed += (taskId, error) =>
+            Push("sendFailed", new { taskId, error });
 
         _engine.ConfirmIncomingTransfer = (name, mimeType, count) => ConfirmViaBridge(name, mimeType, count);
 

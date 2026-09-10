@@ -62,13 +62,17 @@ public sealed class SenderEngine : IDisposable
         Server.DownloadStarted += taskId => TransferStateChanged?.Invoke(taskId, "phone is downloading");
         Server.DownloadProgress += (sent, total) =>
             TransferStateChanged?.Invoke(_staged?.TaskId ?? "?", $"{sent}/{total}");
+        // HTTP body completion only means Windows finished writing bytes.
+        // Receiver success is authoritative only after the phone sends status type=1.
         Server.DownloadFinished += taskId =>
-        {
-            TransferStateChanged?.Invoke(taskId, "download complete");
-            if (_staged?.TaskId == taskId) _staged.Complete = true;
-        };
+            TransferStateChanged?.Invoke(taskId, "upload stream complete — waiting for phone confirmation");
         Server.StatusReceived += (taskId, type, reason) =>
+        {
+            if (type == 1 && _staged?.TaskId == taskId) _staged.Complete = true;
             TransferStateChanged?.Invoke(taskId, $"status {type}: {reason}");
+        };
+        Server.TransferFailed += (taskId, reason) =>
+            TransferStateChanged?.Invoke(taskId, $"send failed: {reason}");
 
         // Stock OEM 互传 Receiver wiring
         Receiver.StateChanged += state => TransferStateChanged?.Invoke("", $"receive: {state}");
