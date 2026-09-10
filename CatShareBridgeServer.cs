@@ -65,8 +65,6 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         {
             if (type == 1)
                 Push("sendCompleted", new { taskId });
-            else if (type == 3)
-                Push("sendFailed", new { taskId, error = string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason });
         };
         _engine.Server.TransferFailed += (taskId, error) =>
             Push("sendFailed", new { taskId, error });
@@ -340,3 +338,4 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address);
 }
+
