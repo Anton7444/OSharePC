@@ -13,6 +13,7 @@ internal static class Program
     // bump with every package refresh — the single-file exe has no Assembly.Location,
     // so this constant is the only reliable way to tell WHICH build is running.
     internal const string Version = "2026.09.06-2330";
+    private const string BridgeTokenEnvironment = "OSHAREPC_BRIDGE_TOKEN";
 
     [STAThread]
     private static int Main(string[] args)
@@ -72,15 +73,30 @@ internal static class Program
             }
             if (args.Contains("--bridge"))
             {
-                var rc = RunBridge(ParseParentPid(args)).GetAwaiter().GetResult();
+                var authToken = Environment.GetEnvironmentVariable(BridgeTokenEnvironment);
+                if (string.IsNullOrWhiteSpace(authToken))
+                {
+                    Log.Error($"Bridge mode requires {BridgeTokenEnvironment}; refusing to expose an unauthenticated localhost control plane.");
+                    mutex.ReleaseMutex();
+                    return 2;
+                }
+
+                var rc = RunBridge(ParseParentPid(args), authToken).GetAwaiter().GetResult();
                 mutex.ReleaseMutex();
                 return rc;
             }
+            if (args.Contains("--legacy-ui"))
+            {
+                Log.Warn("Starting unsupported legacy WinForms debug UI (--legacy-ui).");
+                ApplicationConfiguration.Initialize();
+                Application.Run(new MainForm());
+                mutex.ReleaseMutex();
+                return 0;
+            }
 
-            ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm());
+            Log.Warn("No backend mode selected. Launch catshare_gui.exe for the supported UI; use --legacy-ui only for backend debugging.");
             mutex.ReleaseMutex();
-            return 0;
+            return 2;
         }
         catch
         {
@@ -98,9 +114,9 @@ internal static class Program
         return 0;
     }
 
-    private static async Task<int> RunBridge(int parentPid)
+    private static async Task<int> RunBridge(int parentPid, string authToken)
     {
-        await using var bridge = new CatShareBridgeServer();
+        await using var bridge = new CatShareBridgeServer(authToken);
         await bridge.StartAsync();
         if (parentPid <= 0)
         {

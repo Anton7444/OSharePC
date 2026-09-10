@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
@@ -9,6 +10,33 @@ import '../models/models.dart';
 
 class BridgeClient extends ChangeNotifier {
   static const String baseUrl = 'http://127.0.0.1:8960';
+  static const String _tokenHeader = 'X-OSharePC-Bridge-Token';
+  static const String _tokenEnvironment = 'OSHAREPC_BRIDGE_TOKEN';
+  final String _bridgeToken = _generateBridgeToken();
+
+  static String _generateBridgeToken() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64UrlEncode(bytes).replaceAll('=', '');
+  }
+
+  Map<String, String> get _authHeaders => {_tokenHeader: _bridgeToken};
+  Map<String, String> get _jsonHeaders => {
+    ..._authHeaders,
+    'Content-Type': 'application/json',
+  };
+
+  Future<http.Response> _get(String path) =>
+      http.get(Uri.parse('$baseUrl$path'), headers: _authHeaders);
+
+  Future<http.Response> _post(String path) =>
+      http.post(Uri.parse('$baseUrl$path'), headers: _authHeaders);
+
+  Future<http.Response> _postJson(String path, Object body) => http.post(
+    Uri.parse('$baseUrl$path'),
+    headers: _jsonHeaders,
+    body: jsonEncode(body),
+  );
 
   EngineStatus _status = EngineStatus.initial();
   List<DeviceModel> _devices = [];
@@ -89,8 +117,7 @@ class BridgeClient extends ChangeNotifier {
 
   Future<void> _poll() async {
     try {
-      final statusResp = await http
-          .get(Uri.parse('$baseUrl/api/status'))
+      final statusResp = await _get('/api/status')
           .timeout(const Duration(milliseconds: 1500));
       if (statusResp.statusCode == 200) {
         _isConnecting = false;
@@ -123,8 +150,7 @@ class BridgeClient extends ChangeNotifier {
         }
 
         // Fetch devices
-        final devResp = await http
-            .get(Uri.parse('$baseUrl/api/devices'))
+        final devResp = await _get('/api/devices')
             .timeout(const Duration(milliseconds: 1500));
         if (devResp.statusCode == 200) {
           final devList = jsonDecode(devResp.body) as List;
@@ -132,8 +158,7 @@ class BridgeClient extends ChangeNotifier {
         }
 
         // Fetch incremental events
-        final evResp = await http
-            .get(Uri.parse('$baseUrl/api/events?since=$_lastEventSeq'))
+        final evResp = await _get('/api/events?since=$_lastEventSeq')
             .timeout(const Duration(milliseconds: 1500));
         if (evResp.statusCode == 200) {
           final events = jsonDecode(evResp.body) as List;
@@ -214,7 +239,12 @@ class BridgeClient extends ChangeNotifier {
     List<String> arguments,
   ) async {
     try {
-      final process = await Process.start(executable, arguments);
+      final process = await Process.start(
+        executable,
+        arguments,
+        environment: {_tokenEnvironment: _bridgeToken},
+        includeParentEnvironment: true,
+      );
       if (_disposed) {
         process.kill();
         return;
@@ -421,11 +451,7 @@ class BridgeClient extends ChangeNotifier {
 
   Future<bool> setReceiveEnabled(bool enabled) async {
     try {
-      final resp = await http.post(
-        Uri.parse('$baseUrl/api/receive'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'enabled': enabled}),
-      );
+      final resp = await _postJson('/api/receive', {'enabled': enabled});
       if (resp.statusCode == 200) {
         _status = EngineStatus(
           connected: _status.connected,
@@ -453,11 +479,7 @@ class BridgeClient extends ChangeNotifier {
 
   Future<Map<String, dynamic>?> stageFiles(List<String> files) async {
     try {
-      final resp = await http.post(
-        Uri.parse('$baseUrl/api/stage'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'files': files}),
-      );
+      final resp = await _postJson('/api/stage', {'files': files});
       if (resp.statusCode == 200) {
         return jsonDecode(resp.body) as Map<String, dynamic>;
       }
@@ -477,11 +499,7 @@ class BridgeClient extends ChangeNotifier {
       );
       notifyListeners();
 
-      final resp = await http.post(
-        Uri.parse('$baseUrl/api/send'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'address': device.address}),
-      );
+      final resp = await _postJson('/api/send', {'address': device.address});
       if (resp.statusCode == 202) return true;
       final body = resp.body.isNotEmpty ? jsonDecode(resp.body) : null;
       final error = body is Map ? body['error']?.toString() : null;
@@ -537,11 +555,7 @@ class BridgeClient extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await http.post(
-        Uri.parse('$baseUrl/api/confirm-receive'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'id': id, 'accept': accept}),
-      );
+      await _postJson('/api/confirm-receive', {'id': id, 'accept': accept});
     } catch (e) {
       debugPrint('Error confirming receive: $e');
     }
@@ -553,12 +567,7 @@ class BridgeClient extends ChangeNotifier {
       _dismissedTransferIds.add(id);
       _pendingIncomingOffer = null;
       notifyListeners();
-      http
-          .post(
-            Uri.parse('$baseUrl/api/confirm-receive'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'id': id, 'accept': false}),
-          )
+      _postJson('/api/confirm-receive', {'id': id, 'accept': false})
           .catchError((_) => http.Response('', 500));
     }
   }
@@ -578,11 +587,7 @@ class BridgeClient extends ChangeNotifier {
       if (minimizeToTray != null) payload['minimizeToTray'] = minimizeToTray;
       if (closeToTray != null) payload['closeToTray'] = closeToTray;
 
-      final resp = await http.post(
-        Uri.parse('$baseUrl/api/settings'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(payload),
-      );
+      final resp = await _postJson('/api/settings', payload);
       if (resp.statusCode == 200) {
         final json = jsonDecode(resp.body);
         _status = EngineStatus(
@@ -614,7 +619,7 @@ class BridgeClient extends ChangeNotifier {
 
   Future<bool> cancelTransfer() async {
     try {
-      final resp = await http.post(Uri.parse('$baseUrl/api/cancel'));
+      final resp = await _post('/api/cancel');
       return resp.statusCode == 200;
     } catch (e) {
       debugPrint('Error cancelling transfer: $e');
@@ -626,8 +631,7 @@ class BridgeClient extends ChangeNotifier {
     _pollTimer?.cancel();
     _pendingIncomingOffer = null;
     try {
-      await http
-          .post(Uri.parse('$baseUrl/api/shutdown'))
+      await _post('/api/shutdown')
           .timeout(const Duration(milliseconds: 500));
     } catch (_) {}
     try {

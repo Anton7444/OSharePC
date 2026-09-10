@@ -48,7 +48,7 @@ flutter build windows --release
 cd ..
 ```
 
-To assemble the production runtime, copy the Flutter release output to `deploy-gui`, create `deploy-gui\engine`, and place the published `artifacts\backend\CatShareSender.exe` in that engine directory. The GUI starts the backend beside it in bridge mode.
+To assemble the production runtime, copy the Flutter release output to `deploy-gui`, create `deploy-gui\engine`, and place the published `artifacts\backend\CatShareSender.exe` in that engine directory. The GUI starts the backend beside it in authenticated bridge mode. `CatShareSender.exe` is the backend engine; running it without a mode exits instead of opening a second product UI. The old WinForms interface is retained only as an unsupported debugging surface and must be started explicitly with `CatShareSender.exe --legacy-ui`.
 
 For offline backend checks, run `CatShareSender.exe --selftest` and `CatShareSender.exe --mockphone`. Because the backend is a Windows GUI executable, check `%LOCALAPPDATA%\CatShareSender\sender.log` and confirm that `SELFTEST PASSED` and `MOCKPHONE PASSED` appear.
 
