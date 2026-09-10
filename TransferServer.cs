@@ -499,17 +499,35 @@ public sealed class TransferServer : IAsyncDisposable
                 if (closed) return "peer closed";
                 if (e is null) continue;
 
-                if (e.IsAction && e.Method == "status")
+                if (e.IsAction && (e.Method == "status" || e.Method == "stat"))
                 {
-                    var type = e.PayloadInt("type");
+                    // OnePlus phone-side Cancel sends action:*:stat and waits for
+                    // ack:*:stat before closing with mCanceled=true.
+                    var type = e.PayloadInt("type", int.MinValue);
+                    if (type == int.MinValue) type = e.PayloadInt("status", int.MinValue);
                     var reason = e.PayloadString("reason");
+                    if (string.IsNullOrWhiteSpace(reason)) reason = e.PayloadString("message");
                     var taskId = e.PayloadString("taskId");
-                    Log.Info($"WS: status type={type} reason='{reason}'");
+                    if (string.IsNullOrWhiteSpace(taskId)) taskId = e.PayloadString("id");
+                    Log.Info($"WS: {e.Method} type={(type == int.MinValue ? "?" : type)} reason='{reason}'");
+                    await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+
+                    if (e.Method == "stat")
+                    {
+                        if (type == 1)
+                        {
+                            _owner.OnStatus(taskId, 1, reason);
+                            return "transfer completed";
+                        }
+                        var why = string.IsNullOrWhiteSpace(reason) ? "Phone cancelled the transfer." : reason;
+                        _owner.ReportTransferFailure(taskId, why);
+                        return $"phone cancelled: {why}";
+                    }
+
                     _owner.OnStatus(taskId, type, reason);
-                    await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
-                    // Stock OnePlus commonly sends success as type=1 with an empty reason.
                     if (type == 1) return "transfer completed";
-                    if (type == 3) return $"refused: {reason}";
+                    if (type == 2) return string.IsNullOrWhiteSpace(reason) ? "transfer failed on phone" : $"transfer failed: {reason}";
+                    if (type == 3) return string.IsNullOrWhiteSpace(reason) ? "phone refused transfer" : $"refused: {reason}";
                 }
                 else if (e.IsAction)
                 {
@@ -562,11 +580,13 @@ public sealed class TransferServer : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? taskId;
         if (type == 1)
             MarkSuccessful(taskId);
+        else if (type == 2)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone cancelled or failed the transfer." : reason);
         else if (type == 3)
             ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason);
 
         try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
-        if (type is 1 or 3)
+        if (type is 1 or 2 or 3)
             DisarmTransfer($"terminal status {type}: {reason}");
     }
 

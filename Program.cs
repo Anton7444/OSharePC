@@ -46,6 +46,12 @@ internal static class Program
                 mutex.ReleaseMutex();
                 return rc;
             }
+            if (args.Contains("--mockphone-cancel"))
+            {
+                var rc = RemoteCancelSelfTest.RunAsync().GetAwaiter().GetResult();
+                mutex.ReleaseMutex();
+                return rc;
+            }
             if (args.Contains("--zipprobe"))
             {
                 var rc = ZipProbe().GetAwaiter().GetResult();
