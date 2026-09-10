@@ -1,0 +1,87 @@
+name: Apply fast CRC preparation pipeline
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-fast-crc-pipeline.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Patch CRC usage and immediate HTTP headers
+        shell: pwsh
+        run: |
+          $writerPath = 'OfficialStoredZipWriter.cs'
+          $writer = Get-Content -LiteralPath $writerPath -Raw
+          $pattern = '(?s)    private static async Task<uint> ComputeCrc32Async\(string path, CancellationToken cancellationToken\)\s*\{.*?\r?\n    \}\r?\n\r?\n    private static readonly uint\[\] CrcTable = BuildCrcTable\(\);'
+          $replacement = @'
+              private static Task<uint> ComputeCrc32Async(string path, CancellationToken cancellationToken) =>
+                  PreparedCrcCache.GetCrc32Async(path, cancellationToken);
+
+              private static readonly uint[] CrcTable = BuildCrcTable();
+          '@
+          $updatedWriter = [regex]::Replace($writer, $pattern, $replacement, 1)
+          if ($updatedWriter -eq $writer) { throw 'OfficialStoredZipWriter CRC method pattern not found' }
+          Set-Content -LiteralPath $writerPath -Value $updatedWriter -Encoding utf8
+
+          $serverPath = 'TransferServer.cs'
+          $server = Get-Content -LiteralPath $serverPath -Raw
+          $old = @'
+                      using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+                      await OfficialStoredZipWriter.WriteAsync(
+          '@
+          $new = @'
+                      using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+                      // Commit the HTTP 200 + headers immediately. STORED ZIP needs a CRC
+                      // before its local header, but the phone must not sit waiting for the
+                      // first body byte and mistake preparation time for a dead server.
+                      await ctx.Response.StartAsync(linked.Token);
+                      Log.Info("HTTP: response headers committed; waiting for prepared CRC if needed");
+                      await OfficialStoredZipWriter.WriteAsync(
+          '@
+          if (-not $server.Contains($old)) { throw 'TransferServer stock ZIP block not found' }
+          $server = $server.Replace($old, $new)
+          Set-Content -LiteralPath $serverPath -Value $server -Encoding utf8
+
+          if (-not (Select-String -LiteralPath $writerPath -Pattern 'PreparedCrcCache.GetCrc32Async' -Quiet)) { throw 'CRC cache call missing after patch' }
+          if (-not (Select-String -LiteralPath $serverPath -Pattern 'response headers committed' -Quiet)) { throw 'HTTP StartAsync patch missing' }
+
+      - name: Build backend
+        shell: pwsh
+        run: dotnet build CatShareSender.csproj -c Release
+
+      - name: Run mock phone
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'CatShareSender.exe not found after build' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone' -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $log) { Get-Content $log }
+            throw "mockphone exited $($p.ExitCode)"
+          }
+          if (-not (Test-Path $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKPHONE PASSED' -Quiet)) {
+            if (Test-Path $log) { Get-Content $log }
+            throw 'MOCKPHONE PASSED missing'
+          }
+          Get-Content $log | Select-String -Pattern 'CRC prepare|STORED|MOCKPHONE'
+
+      - name: Commit source fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add OfficialStoredZipWriter.cs TransferServer.cs
+          git diff --cached --check
+          git commit -m 'Prepare STORED ZIP CRC before download'
+          git push origin HEAD:main
