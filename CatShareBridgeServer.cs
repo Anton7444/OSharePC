@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -13,14 +15,24 @@ namespace CatShareSender;
 public sealed class CatShareBridgeServer : IAsyncDisposable
 {
     public const int Port = 8960;
+    public const string TokenHeader = "X-OSharePC-Bridge-Token";
+
     private readonly SenderEngine _engine = new();
     private readonly ConcurrentQueue<BridgeEvent> _events = new();
     private readonly ConcurrentDictionary<string, PendingTransferInfo> _pendingTransfers = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentlyRejected = new();
+    private readonly byte[] _authTokenBytes;
     private long _seq = 0;
     private WebApplication? _app;
     private string _lastState = "starting";
     private Task? _sendTask;
+
+    public CatShareBridgeServer(string authToken)
+    {
+        if (string.IsNullOrWhiteSpace(authToken) || authToken.Length < 32)
+            throw new ArgumentException("Bridge authentication token is missing or too short.", nameof(authToken));
+        _authTokenBytes = Encoding.UTF8.GetBytes(authToken);
+    }
 
     public async Task StartAsync()
     {
@@ -81,6 +93,45 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         builder.WebHost.ConfigureKestrel(options => options.Listen(System.Net.IPAddress.Loopback, Port));
         builder.Services.AddRouting();
         var app = builder.Build();
+
+        // The bridge is a native localhost-only control plane, not a browser API.
+        // Every /api request must carry the per-GUI-process token. Browser-originated
+        // requests are rejected outright; the custom header also forces CORS preflight
+        // for ordinary web pages before they can reach any state-changing endpoint.
+        app.Use(async (ctx, next) =>
+        {
+            if (!ctx.Request.Path.StartsWithSegments("/api"))
+            {
+                await next();
+                return;
+            }
+
+            if (HttpMethods.IsOptions(ctx.Request.Method) || ctx.Request.Headers.ContainsKey("Origin"))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
+            if (!ctx.Request.Headers.TryGetValue(TokenHeader, out var suppliedValues))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            var supplied = suppliedValues.ToString();
+            var suppliedBytes = Encoding.UTF8.GetBytes(supplied);
+            var valid = suppliedBytes.Length == _authTokenBytes.Length &&
+                        CryptographicOperations.FixedTimeEquals(suppliedBytes, _authTokenBytes);
+            CryptographicOperations.ZeroMemory(suppliedBytes);
+            if (!valid)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            ctx.Response.Headers.CacheControl = "no-store";
+            await next();
+        });
 
         app.MapGet("/api/status", () =>
         {
@@ -244,7 +295,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
 
         _app = app;
         await app.StartAsync();
-        Log.Info($"Flutter bridge listening on http://127.0.0.1:{Port}");
+        Log.Info($"Authenticated Flutter bridge listening on http://127.0.0.1:{Port}");
     }
 
     private static string DisplayName(PhoneDevice device, IReadOnlyList<PhoneDevice>? all = null)
@@ -323,6 +374,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         ClearPendingTransfers();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
+        CryptographicOperations.ZeroMemory(_authTokenBytes);
     }
 
     private sealed record BridgeEvent(long Seq, string Type, object Data, DateTimeOffset At);
@@ -338,4 +390,3 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address);
 }
-

@@ -48,7 +48,7 @@ flutter build windows --release
 cd ..
 ```
 
-若要组装正式运行环境，请将 Flutter release 输出复制到 `deploy-gui`，创建 `deploy-gui\engine`，并将已 publish 的 `artifacts\backend\CatShareSender.exe` 放到该 engine 目录中。GUI 会以 bridge 模式启动位于其旁边的后端。
+若要组装正式运行环境，请将 Flutter release 输出复制到 `deploy-gui`，创建 `deploy-gui\engine`，并将已 publish 的 `artifacts\backend\CatShareSender.exe` 放到该 engine 目录中。GUI 会以带验证的 bridge 模式启动位于其旁边的后端。`CatShareSender.exe` 定位为后端 engine；不带模式参数直接启动时会退出，不再打开第二套产品 UI。旧 WinForms 界面只保留作不受支持的调试用途，必须明确使用 `CatShareSender.exe --legacy-ui` 启动。
 
 若要进行离线后端检查，请运行 `CatShareSender.exe --selftest` 与 `CatShareSender.exe --mockphone`。由于后端是 Windows GUI 可执行文件，请查看 `%LOCALAPPDATA%\CatShareSender\sender.log`，确认其中出现 `SELFTEST PASSED` 与 `MOCKPHONE PASSED`。
 
