@@ -1,0 +1,89 @@
+name: Apply remote cancel detection v3
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-remote-cancel-fix-v3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Apply v1 source patch with CRLF preserved
+        shell: pwsh
+        run: |
+          $yaml = Get-Content -LiteralPath '.github/workflows/one-time-remote-cancel-fix.yml'
+          $nameIndex = [Array]::IndexOf($yaml, '      - name: Patch remote cancellation handling')
+          if ($nameIndex -lt 0) { throw 'v1 patch step not found' }
+          $runIndex = -1
+          for ($i = $nameIndex + 1; $i -lt $yaml.Count; $i++) {
+            if ($yaml[$i] -eq '        run: |') { $runIndex = $i; break }
+          }
+          if ($runIndex -lt 0) { throw 'v1 run block not found' }
+          $lines = New-Object System.Collections.Generic.List[string]
+          for ($i = $runIndex + 1; $i -lt $yaml.Count; $i++) {
+            if ($yaml[$i] -match '^      - name: ') { break }
+            $line = $yaml[$i]
+            if ($line.StartsWith('          ')) { $line = $line.Substring(10) }
+            $lines.Add($line)
+          }
+          $script = ($lines -join "`r`n") -replace '(?m)^git diff --check\s*$', ''
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP/remote-cancel-patch.ps1", $script, [Text.UTF8Encoding]::new($false))
+          & "$env:RUNNER_TEMP/remote-cancel-patch.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # Workflow changes are applied separately through the GitHub connector.
+          git checkout -- .github/workflows/build.yml
+          foreach ($path in @('TransferServer.cs','SenderEngine.cs','CatShareBridgeServer.cs','Program.cs')) {
+            $text = [IO.File]::ReadAllText((Resolve-Path $path))
+            $text = $text.TrimEnd("`r","`n") + "`r`n"
+            [IO.File]::WriteAllText((Resolve-Path $path), $text, [Text.UTF8Encoding]::new($false))
+          }
+          git diff --check
+
+      - name: Build backend
+        shell: pwsh
+        run: dotnet build CatShareSender.csproj -c Release
+
+      - name: Run success protocol test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'CatShareSender.exe not found' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "mockphone exited $($p.ExitCode)" }
+
+      - name: Run phone-cancel protocol test
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'CatShareSender.exe not found' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone-cancel' -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $log) { Get-Content $log }
+            throw "mockphone-cancel exited $($p.ExitCode)"
+          }
+          if (-not (Test-Path $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) {
+            if (Test-Path $log) { Get-Content $log }
+            throw 'MOCKCANCEL PASSED missing'
+          }
+          Get-Content $log | Select-String -Pattern 'MOCKCANCEL|stat|transfer failed'
+
+      - name: Commit source fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TransferServer.cs SenderEngine.cs CatShareBridgeServer.cs Program.cs
+          git diff --cached --check
+          git commit -m 'Detect phone-side transfer cancellation'
+          git push origin HEAD:main
