@@ -80,8 +80,10 @@ class BridgeClient extends ChangeNotifier {
       _quickSaveMode = QuickSaveMode.values[modeIndex.clamp(0, 2)];
       _receiveSuccessNotifications =
           prefs.getBool('receive_success_notifications') ?? true;
-      final languageIndex = prefs.getInt('language') ?? AppLanguage.english.index;
-      _language = AppLanguage.values[languageIndex.clamp(0, AppLanguage.values.length - 1)];
+      final languageIndex =
+          prefs.getInt('language') ?? AppLanguage.english.index;
+      _language = AppLanguage
+          .values[languageIndex.clamp(0, AppLanguage.values.length - 1)];
       notifyListeners();
     } catch (e) {
       debugPrint('Error loading prefs: $e');
@@ -89,8 +91,8 @@ class BridgeClient extends ChangeNotifier {
   }
 
   void setLanguage(AppLanguage language) {
-  _language = language;
-}
+    _language = language;
+  }
 
   String _localizedTransferError(String? raw, {required bool isSending}) {
     final lower = (raw ?? '').toLowerCase();
@@ -112,7 +114,7 @@ class BridgeClient extends ChangeNotifier {
     return appText(_language, isSending ? 'sendFailed' : 'receiveFailed');
   }
 
-    Future<void> setQuickSaveMode(QuickSaveMode mode) async {
+  Future<void> setQuickSaveMode(QuickSaveMode mode) async {
     _quickSaveMode = mode;
     notifyListeners();
     try {
@@ -145,8 +147,9 @@ class BridgeClient extends ChangeNotifier {
 
   Future<void> _poll() async {
     try {
-      final statusResp = await _get('/api/status')
-          .timeout(const Duration(milliseconds: 1500));
+      final statusResp = await _get(
+        '/api/status',
+      ).timeout(const Duration(milliseconds: 1500));
       if (statusResp.statusCode == 200) {
         _isConnecting = false;
         _restartAttempts = 0;
@@ -178,16 +181,18 @@ class BridgeClient extends ChangeNotifier {
         }
 
         // Fetch devices
-        final devResp = await _get('/api/devices')
-            .timeout(const Duration(milliseconds: 1500));
+        final devResp = await _get(
+          '/api/devices',
+        ).timeout(const Duration(milliseconds: 1500));
         if (devResp.statusCode == 200) {
           final devList = jsonDecode(devResp.body) as List;
           _devices = devList.map((d) => DeviceModel.fromJson(d)).toList();
         }
 
         // Fetch incremental events
-        final evResp = await _get('/api/events?since=$_lastEventSeq')
-            .timeout(const Duration(milliseconds: 1500));
+        final evResp = await _get(
+          '/api/events?since=$_lastEventSeq',
+        ).timeout(const Duration(milliseconds: 1500));
         if (evResp.statusCode == 200) {
           final events = jsonDecode(evResp.body) as List;
           _processEvents(events);
@@ -398,27 +403,27 @@ class BridgeClient extends ChangeNotifier {
         );
         _pendingIncomingOffer = null;
       } else if (type == 'receiveFailed' || type == 'sendFailed') {
-  final isSendingFailure = type == 'sendFailed';
-  final error = data is Map ? data['error']?.toString() : null;
-  final localizedError = _localizedTransferError(
-    error,
-    isSending: isSendingFailure,
-  );
-  debugPrint('Backend transfer failure detail: ${error ?? '(none)'}');
-  onNotification?.call('OsharePC', appText(_language, 'transferFailed'));
-  _transferState = TransferStateModel(
-    active: true,
-    isSending: isSendingFailure,
-    targetDevice: _transferState.targetDevice,
-    fileName: _transferState.fileName,
-    fileCount: _transferState.fileCount,
-    sentBytes: _transferState.sentBytes,
-    totalBytes: _transferState.totalBytes,
-    phase: 'failed',
-    statusText: appText(_language, 'transferFailed'),
-    errorText: localizedError,
-  );
-  _pendingIncomingOffer = null;
+        final isSendingFailure = type == 'sendFailed';
+        final error = data is Map ? data['error']?.toString() : null;
+        final localizedError = _localizedTransferError(
+          error,
+          isSending: isSendingFailure,
+        );
+        debugPrint('Backend transfer failure detail: ${error ?? '(none)'}');
+        onNotification?.call('OsharePC', appText(_language, 'transferFailed'));
+        _transferState = TransferStateModel(
+          active: true,
+          isSending: isSendingFailure,
+          targetDevice: _transferState.targetDevice,
+          fileName: _transferState.fileName,
+          fileCount: _transferState.fileCount,
+          sentBytes: _transferState.sentBytes,
+          totalBytes: _transferState.totalBytes,
+          phase: 'failed',
+          statusText: appText(_language, 'transferFailed'),
+          errorText: localizedError,
+        );
+        _pendingIncomingOffer = null;
       } else if (type == 'state' && data is Map) {
         final st = data['state']?.toString() ?? '';
         if (st.contains('fail') ||
@@ -537,27 +542,29 @@ class BridgeClient extends ChangeNotifier {
       if (resp.statusCode == 202) return true;
       final body = resp.body.isNotEmpty ? jsonDecode(resp.body) : null;
       final error = body is Map ? body['error']?.toString() : null;
-  debugPrint('Backend send failure detail: ${error ?? 'HTTP ${resp.statusCode}'}');
-  _transferState = TransferStateModel(
-    active: true,
-    isSending: true,
-    targetDevice: device.name,
-    phase: 'failed',
-    statusText: appText(_language, 'transferFailed'),
-    errorText: _localizedTransferError(error, isSending: true),
-  );
-  notifyListeners();
-  return false;
+      debugPrint(
+        'Backend send failure detail: ${error ?? 'HTTP ${resp.statusCode}'}',
+      );
+      _transferState = TransferStateModel(
+        active: true,
+        isSending: true,
+        targetDevice: device.name,
+        phase: 'failed',
+        statusText: appText(_language, 'transferFailed'),
+        errorText: _localizedTransferError(error, isSending: true),
+      );
+      notifyListeners();
+      return false;
     } catch (e) {
-  debugPrint('Error sending to device: $e');
-  _transferState = TransferStateModel(
-    active: true,
-    isSending: true,
-    targetDevice: device.name,
-    phase: 'failed',
-    statusText: appText(_language, 'transferFailed'),
-    errorText: appText(_language, 'sendFailed'),
-  );
+      debugPrint('Error sending to device: $e');
+      _transferState = TransferStateModel(
+        active: true,
+        isSending: true,
+        targetDevice: device.name,
+        phase: 'failed',
+        statusText: appText(_language, 'transferFailed'),
+        errorText: appText(_language, 'sendFailed'),
+      );
       notifyListeners();
       Future.delayed(const Duration(seconds: 4), () {
         _transferState = TransferStateModel();
@@ -601,8 +608,10 @@ class BridgeClient extends ChangeNotifier {
       _dismissedTransferIds.add(id);
       _pendingIncomingOffer = null;
       notifyListeners();
-      _postJson('/api/confirm-receive', {'id': id, 'accept': false})
-          .catchError((_) => http.Response('', 500));
+      _postJson('/api/confirm-receive', {
+        'id': id,
+        'accept': false,
+      }).catchError((_) => http.Response('', 500));
     }
   }
 
@@ -665,8 +674,7 @@ class BridgeClient extends ChangeNotifier {
     _pollTimer?.cancel();
     _pendingIncomingOffer = null;
     try {
-      await _post('/api/shutdown')
-          .timeout(const Duration(milliseconds: 500));
+      await _post('/api/shutdown').timeout(const Duration(milliseconds: 500));
     } catch (_) {}
     try {
       _backendProcess?.kill();

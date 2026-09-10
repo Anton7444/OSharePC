@@ -8,16 +8,13 @@ import 'pages/home_page.dart';
 import 'services/bridge_client.dart';
 import 'services/tray_service.dart';
 
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
 
   final bridgeClient = BridgeClient();
   final trayService = TrayService(bridgeClient: bridgeClient);
   bridgeClient.onNotification = trayService.showNotification;
   await trayService.init();
-
 
   final startup = Platform.executableArguments.contains('--startup');
   final prefs = await SharedPreferences.getInstance();
@@ -45,8 +42,8 @@ void main() async {
 
   if (hasSavedLanguage) {
     final savedIndex = prefs.getInt('language') ?? AppLanguage.english.index;
-    initialLanguage = AppLanguage.values[
-        savedIndex.clamp(0, AppLanguage.values.length - 1)];
+    initialLanguage =
+        AppLanguage.values[savedIndex.clamp(0, AppLanguage.values.length - 1)];
   }
 
   bridgeClient.setLanguage(initialLanguage);
@@ -61,13 +58,11 @@ void main() async {
   );
 }
 
-
 class CatShareApp extends StatefulWidget {
   final BridgeClient bridgeClient;
   final TrayService trayService;
   final bool startHidden;
   final AppLanguage initialLanguage;
-
 
   const CatShareApp({
     super.key,
@@ -77,16 +72,13 @@ class CatShareApp extends StatefulWidget {
     required this.initialLanguage,
   });
 
-
   @override
   State<CatShareApp> createState() => _CatShareAppState();
 }
 
-
 class _CatShareAppState extends State<CatShareApp> {
   ThemeMode _themeMode = ThemeMode.dark;
   late AppLanguage _language;
-
 
   @override
   void initState() {
