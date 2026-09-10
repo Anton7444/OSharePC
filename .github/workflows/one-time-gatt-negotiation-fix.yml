@@ -1,0 +1,303 @@
+name: Apply GATT negotiation compatibility fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/one-time-gatt-negotiation-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.x'
+      - name: Patch GATT negotiation
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'missing anchor: {label}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # PC -> Android: mirror the official Android client's sequencing more closely.
+          # Establish a real GATT session first, wait for Windows to report it Active,
+          # then discover only the protocol service we actually need.  The previous
+          # full-database uncached discovery was the exact operation returning
+          # Unreachable on the OnePlus Pad while the Android GATT server showed a
+          # physical connect immediately followed by a clean disconnect.
+          gl = Path('GattLink.cs')
+          text = gl.read_text(encoding='utf-8')
+          old = '''                // MaintainConnection forces the stack to actually establish the LE link
+                try
+                {
+                    session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                    if (session is not null) session.MaintainConnection = true;
+                }
+                catch (Exception ex) { Log.Warn($"BLE: GattSession unavailable ({ex.Message})"); }
+
+                var svcResult = await device.GetGattServicesAsync(BluetoothCacheMode.Uncached);
+                if (svcResult.Status != GattCommunicationStatus.Success)
+                    throw new InvalidOperationException($"service discovery failed ({svcResult.Status})");
+
+                var link = new GattLink();
+                link._device = device;
+                link._session = session;
+                link._services.AddRange(svcResult.Services);
+                device = null;       // ownership moved to the link
+                session = null;
+                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, attempt {attempt})");
+
+                try
+                {
+                    await link.EnumerateAsync(flow, svcResult.Services);
+                    return link;
+                }
+'''
+          new = '''                // Match the stock Android client lifecycle: first establish a real LE/GATT
+                // session, then perform protocol service discovery.  Do not race a full,
+                // uncached database walk against the physical connection coming up.
+                try
+                {
+                    session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                    if (session is not null)
+                    {
+                        Log.Info($"BLE: GATT session created status={session.SessionStatus} pdu={session.MaxPduSize} canMaintain={session.CanMaintainConnection}");
+                        if (session.CanMaintainConnection)
+                        {
+                            session.MaintainConnection = true;
+                            var activeDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
+                            while (session.SessionStatus != GattSessionStatus.Active && DateTimeOffset.UtcNow < activeDeadline)
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                await Task.Delay(25, ct);
+                            }
+                        }
+                        Log.Info($"BLE: GATT session ready status={session.SessionStatus} pdu={session.MaxPduSize}");
+                    }
+                }
+                catch (Exception ex) { Log.Warn($"BLE: GattSession unavailable ({ex.Message})"); }
+
+                var discoveredServices = new List<GattDeviceService>();
+                GattCommunicationStatus discoveryStatus;
+                string discoveryLabel;
+
+                if (flow == SendFlow.CatShareHotspot)
+                {
+                    var result = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                    discoveryStatus = result.Status;
+                    discoveryLabel = "9955";
+                    if (result.Status == GattCommunicationStatus.Success)
+                        discoveredServices.AddRange(result.Services);
+                }
+                else
+                {
+                    Log.Info("BLE: discovering target OConnect service 9999 only");
+                    var oconnect = await device.GetGattServicesForUuidAsync(OConnectServiceUuid, BluetoothCacheMode.Uncached);
+                    discoveryStatus = oconnect.Status;
+                    discoveryLabel = "9999";
+                    if (oconnect.Status == GattCommunicationStatus.Success)
+                        discoveredServices.AddRange(oconnect.Services);
+
+                    // Auto mode may be talking to the CatShare app rather than stock OShare.
+                    // Fall back to 9955 only when 9999 was queried successfully but absent;
+                    // never launch a second discovery over a link that already failed.
+                    if (flow == SendFlow.Auto &&
+                        discoveryStatus == GattCommunicationStatus.Success &&
+                        discoveredServices.Count == 0)
+                    {
+                        Log.Info("BLE: service 9999 absent; probing 9955 fallback");
+                        var alliance = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                        discoveryStatus = alliance.Status;
+                        discoveryLabel = "9955";
+                        if (alliance.Status == GattCommunicationStatus.Success)
+                            discoveredServices.AddRange(alliance.Services);
+                    }
+                }
+
+                if (discoveryStatus != GattCommunicationStatus.Success)
+                    throw new InvalidOperationException($"target service {discoveryLabel} discovery failed ({discoveryStatus})");
+                if (discoveredServices.Count == 0)
+                    throw new InvalidOperationException($"target service {discoveryLabel} is not exposed by the device");
+
+                var link = new GattLink();
+                link._device = device;
+                link._session = session;
+                link._services.AddRange(discoveredServices);
+                device = null;       // ownership moved to the link
+                session = null;
+                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, target={discoveryLabel}, attempt {attempt})");
+
+                try
+                {
+                    await link.EnumerateAsync(flow, discoveredServices);
+                    return link;
+                }
+'''
+          if old not in text:
+              raise SystemExit('missing anchor: GattLink discovery lifecycle')
+          gl.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Android -> PC: publish a stable, fully-created local GATT database before
+          # exposing the connectable 8881 beacon. Keep every protocol characteristic
+          # explicitly pairless/plain so Android must never need a bond for OShare.
+          rg = Path('ReceiveGattServer.cs')
+          text = rg.read_text(encoding='utf-8')
+          start = text.index('        // 1. Discovery beacon: 00008881 (standard base)')
+          end_marker = '        State($"Receive server active (beacon 8881 + service 9999), BT Name=\'{BluetoothName(DeviceName)}\'");'
+          end = text.index(end_marker, start) + len(end_marker)
+          replacement = '''        // Build the complete protocol GATT database BEFORE opening the connectable
+        // discovery beacon. Android caches GATT aggressively; exposing 8881 while 9999
+        // is still being added can leave a peer with a transient/incomplete database.
+        // All OShare control characteristics are deliberately Plain: this protocol is
+        // pairless and must never trigger a Bluetooth bonding prompt.
+        var svc = await GattServiceProvider.CreateAsync(
+            new Guid("00009999-0000-1000-8000-00805f9b34fb"));
+        if (svc.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 9999 provider failed: {svc.Error}");
+
+        var hs = await svc.ServiceProvider.Service.CreateCharacteristicAsync(
+            new Guid("00009898-0000-1000-8000-00805f9b34fb"),
+            new GattLocalCharacteristicParameters
+            {
+                CharacteristicProperties = GattCharacteristicProperties.Read,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
+            });
+        if (hs.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 0x9898 create failed: {hs.Error}");
+        _handshake = hs.Characteristic;
+        _handshake.ReadRequested += OnHandshakeRead;
+
+        var cmd = await svc.ServiceProvider.Service.CreateCharacteristicAsync(
+            new Guid("00009896-0000-1000-8000-00805f9b34fb"),
+            new GattLocalCharacteristicParameters
+            {
+                CharacteristicProperties = GattCharacteristicProperties.Write | GattCharacteristicProperties.WriteWithoutResponse,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
+            });
+        if (cmd.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 0x9896 create failed: {cmd.Error}");
+        _cmd = cmd.Characteristic;
+        _cmd.WriteRequested += OnCommandWrite;
+
+        var notify = await svc.ServiceProvider.Service.CreateCharacteristicAsync(
+            new Guid("00009895-0000-1000-8000-00805f9b34fb"),
+            new GattLocalCharacteristicParameters
+            {
+                CharacteristicProperties = GattCharacteristicProperties.Notify,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
+            });
+        if (notify.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 0x9895 create failed: {notify.Error}");
+        _notify = notify.Characteristic;
+        _notify.SubscribedClientsChanged += (_, _) =>
+            State($"0x9895 subscribers = {_notify?.SubscribedClients.Count ?? 0}");
+
+        _service = svc.ServiceProvider;
+        _service.AdvertisementStatusChanged += (_, e) => State($"9999 adv -> {e.Status}");
+        _service.StartAdvertising(new GattServiceProviderAdvertisingParameters
+        {
+            IsDiscoverable = false,
+            IsConnectable = false,
+        });
+
+        // Discovery beacon: 00008881 (standard base). It is opened only after the
+        // complete 9999 protocol service above is ready, so the first peer connection
+        // sees the final database rather than a service table that changes underneath it.
+        var beacon = await GattServiceProvider.CreateAsync(
+            new Guid("00008881-0000-1000-8000-00805f9b34fb"));
+        if (beacon.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 8881 provider failed: {beacon.Error}");
+
+        var beaconChar = await beacon.ServiceProvider.Service.CreateCharacteristicAsync(
+            new Guid("00008882-0000-1000-8000-00805f9b34fb"),
+            new GattLocalCharacteristicParameters
+            {
+                CharacteristicProperties = GattCharacteristicProperties.Read,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
+            });
+        if (beaconChar.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 0x8882 create failed: {beaconChar.Error}");
+
+        beacon.ServiceProvider.AdvertisementStatusChanged += (_, e) =>
+        {
+            State($"8881 beacon -> {e.Status}");
+            try
+            {
+                if (e.Status == GattServiceProviderAdvertisementStatus.Started)
+                {
+                    BeaconStarted?.Invoke();
+                }
+                else if (e.Status == GattServiceProviderAdvertisementStatus.Aborted)
+                {
+                    BeaconAborted?.Invoke();
+                    RetryBeaconAsync(beacon.ServiceProvider);
+                }
+            }
+            catch { }
+        };
+
+        // Mark running before StartAdvertising: Windows can raise Aborted
+        // synchronously, and the retry loop must be allowed to recover it.
+        IsRunning = true;
+        _beacon = beacon.ServiceProvider;
+        State("Local GATT database ready (8881 + 9999, pairless/plain); starting connectable beacon");
+        beacon.ServiceProvider.StartAdvertising(new GattServiceProviderAdvertisingParameters
+        {
+            IsDiscoverable = true,
+            IsConnectable = true,
+        });
+
+        State($"Receive server active (beacon 8881 + service 9999), BT Name='{BluetoothName(DeviceName)}'");'''
+          rg.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
+
+          print('GATT negotiation compatibility patch applied')
+          '@ | Set-Content -LiteralPath patch_gatt.py -Encoding UTF8
+          python patch_gatt.py
+          Remove-Item patch_gatt.py
+      - name: Check diff
+        shell: pwsh
+        run: git diff --check
+      - name: Build backend
+        run: dotnet build CatShareSender.csproj -c Release
+      - name: Backend selftest
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
+          $p = Start-Process $exe.FullName -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "selftest exited $($p.ExitCode)" }
+      - name: Mock phone regressions
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
+          foreach ($arg in @('--mockphone', '--mockphone-cancel')) {
+            $p = Start-Process $exe.FullName -ArgumentList $arg -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "$arg exited $($p.ExitCode)" }
+          }
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add GattLink.cs ReceiveGattServer.cs
+          git diff --cached --check
+          git commit -m 'Stabilize pairless GATT negotiation on tablets'
+          git push origin HEAD:main
