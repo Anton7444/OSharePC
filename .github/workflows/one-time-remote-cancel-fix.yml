@@ -1,0 +1,523 @@
+name: Apply remote cancel detection
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-time-remote-cancel-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Patch remote cancellation handling
+        shell: pwsh
+        run: |
+          function Replace-Exact([string]$Path, [string]$Old, [string]$New) {
+            $text = Get-Content -LiteralPath $Path -Raw
+            if (-not $text.Contains($Old)) { throw "Pattern not found in $Path`n---`n$Old" }
+            $text = $text.Replace($Old, $New)
+            Set-Content -LiteralPath $Path -Value $text -Encoding utf8
+          }
+
+          # TransferServer: terminal send state belongs to the phone protocol, not to
+          # the moment Kestrel finishes writing bytes.
+          $old = @'
+              public event Action<string>? DownloadFinished;          // taskId
+              public event Action<string, int, string>? StatusReceived; // (taskId, type, reason)
+          '@
+          $new = @'
+              public event Action<string>? DownloadFinished;          // HTTP payload finished locally; NOT phone-confirmed success
+              public event Action<string, int, string>? StatusReceived; // (taskId, type, reason)
+              public event Action<string>? TransferSucceeded;          // phone-confirmed terminal success
+              public event Action<string, string>? TransferFailed;     // terminal failure/cancel from phone/network
+
+              private readonly object _terminalGate = new();
+              private string? _terminalTaskId;
+              // 0=pending, 1=success, 2=remote/error failure, 3=cancelled locally.
+              private int _terminalState;
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          $old = @'
+              public void SetTask(TransferTask? task)
+              {
+                  _activeTask = task;
+                  DisarmTransfer(task is null ? "task cleared" : "new task staged");
+              }
+          '@
+          $new = @'
+              public void SetTask(TransferTask? task)
+              {
+                  _activeTask = task;
+                  lock (_terminalGate)
+                  {
+                      _terminalTaskId = task?.TaskId;
+                      _terminalState = 0;
+                  }
+                  DisarmTransfer(task is null ? "task cleared" : "new task staged");
+              }
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          $old = @'
+              public void CancelActiveTransfer()
+              {
+                  _cancelCts.Cancel();
+                  _cancelCts.Dispose();
+                  _cancelCts = new CancellationTokenSource();
+                  DisarmTransfer("active transfer cancelled");
+                  Log.Info("TransferServer: active transfer cancellation requested");
+              }
+
+              private static IPAddress? NormalizeIp(IPAddress? ip) =>
+          '@
+          $new = @'
+              public void CancelActiveTransfer()
+              {
+                  var taskId = _activeTask?.TaskId;
+                  if (!string.IsNullOrWhiteSpace(taskId))
+                  {
+                      lock (_terminalGate)
+                      {
+                          if (_terminalTaskId == taskId && _terminalState == 0)
+                              _terminalState = 3;
+                      }
+                  }
+                  _cancelCts.Cancel();
+                  _cancelCts.Dispose();
+                  _cancelCts = new CancellationTokenSource();
+                  DisarmTransfer("active transfer cancelled locally");
+                  Log.Info("TransferServer: active transfer cancellation requested locally");
+              }
+
+              private bool IsTerminal(string taskId)
+              {
+                  lock (_terminalGate)
+                      return _terminalTaskId == taskId && _terminalState != 0;
+              }
+
+              private bool TryMarkTerminal(string? taskId, bool success, string reason)
+              {
+                  var active = _activeTask;
+                  if (active is null) return false;
+                  if (string.IsNullOrWhiteSpace(taskId)) taskId = active.TaskId;
+                  if (!string.Equals(taskId, active.TaskId, StringComparison.Ordinal)) return false;
+
+                  lock (_terminalGate)
+                  {
+                      if (_terminalTaskId != taskId || _terminalState != 0) return false;
+                      _terminalState = success ? 1 : 2;
+                  }
+
+                  if (success)
+                  {
+                      Log.Info($"TransferServer: phone confirmed transfer success for {taskId}");
+                      try { TransferSucceeded?.Invoke(taskId); } catch { }
+                  }
+                  else
+                  {
+                      if (string.IsNullOrWhiteSpace(reason)) reason = "Phone cancelled or disconnected during transfer";
+                      Log.Warn($"TransferServer: transfer failed for {taskId}: {reason}");
+                      try { TransferFailed?.Invoke(taskId, reason); } catch { }
+                  }
+                  DisarmTransfer(success ? "phone-confirmed success" : $"terminal failure: {reason}");
+                  return true;
+              }
+
+              private static IPAddress? NormalizeIp(IPAddress? ip) =>
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          $old = @'
+                      // Wait for the download + final status.
+                      var done = await session.ReceiveLoopAsync(TimeSpan.FromMinutes(30));
+                      Log.Info($"WS: session ended ({done})");
+                  }
+                  catch (Exception ex)
+                  {
+                      Log.Error("WS: session error", ex);
+                  }
+          '@
+          $new = @'
+                      // Wait for the download + final status. A committed stock session
+                      // that closes without explicit success is a failed transfer, not a
+                      // silent success. Phone-side Cancel follows exactly this path.
+                      var done = await session.ReceiveLoopAsync(TimeSpan.FromMinutes(30));
+                      Log.Info($"WS: session ended ({done})");
+                      if (committed && !IsTerminal(task.TaskId))
+                          TryMarkTerminal(task.TaskId, false, done == "peer closed"
+                              ? "Phone cancelled or disconnected during transfer"
+                              : $"Transfer ended before phone confirmation: {done}");
+                  }
+                  catch (Exception ex)
+                  {
+                      Log.Error("WS: session error", ex);
+                      if (committed && !IsTerminal(task.TaskId))
+                          TryMarkTerminal(task.TaskId, false, "Phone disconnected before confirming the transfer");
+                  }
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          $old = @'
+                          if (e.IsAction && e.Method == "status")
+                          {
+                              var type = e.PayloadInt("type");
+                              var reason = e.PayloadString("reason");
+                              var taskId = e.PayloadString("taskId");
+                              Log.Info($"WS: status type={type} reason='{reason}'");
+                              _owner.OnStatus(taskId, type, reason);
+                              await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
+                              if (type == 1 && reason == "ok") return "transfer completed";
+                              if (type == 3) return $"refused: {reason}";
+                          }
+          '@
+          $new = @'
+                          if (e.IsAction && (e.Method == "status" || e.Method == "stat"))
+                          {
+                              // Stock OnePlus uses "status" for normal terminal reporting,
+                              // but phone-side Cancel has been observed as action:*:stat and
+                              // waits for ack:*:stat before closing (mCanceled=true).
+                              var type = e.PayloadInt("type", int.MinValue);
+                              if (type == int.MinValue) type = e.PayloadInt("status", int.MinValue);
+                              var reason = e.PayloadString("reason");
+                              if (string.IsNullOrWhiteSpace(reason)) reason = e.PayloadString("message");
+                              var taskId = e.PayloadString("taskId");
+                              if (string.IsNullOrWhiteSpace(taskId)) taskId = e.PayloadString("id");
+                              Log.Info($"WS: {e.Method} type={(type == int.MinValue ? "?" : type)} reason='{reason}' payload={(e.HasPayload ? e.Payload.GetRawText() : "<none>")}");
+
+                              await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+
+                              if (e.Method == "stat")
+                              {
+                                  // A stat action without an explicit success code is the
+                                  // receiver's cancel/interrupt terminal signal.
+                                  if (type == 1)
+                                  {
+                                      _owner.OnStatus(taskId, 1, reason);
+                                      return "transfer completed";
+                                  }
+                                  var why = string.IsNullOrWhiteSpace(reason) ? "Phone cancelled the transfer" : reason;
+                                  _owner.TryMarkTerminal(taskId, false, why);
+                                  return $"phone cancelled: {why}";
+                              }
+
+                              _owner.OnStatus(taskId, type, reason);
+                              // Real OnePlus success frequently has reason=""; type=1 is the
+                              // authoritative success code.
+                              if (type == 1) return "transfer completed";
+                              if (type == 2) return string.IsNullOrWhiteSpace(reason) ? "transfer failed on phone" : $"transfer failed: {reason}";
+                              if (type == 3) return string.IsNullOrWhiteSpace(reason) ? "phone rejected transfer" : $"refused: {reason}";
+                          }
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          $old = @'
+              private void OnStatus(string taskId, int type, string reason)
+              {
+                  try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+                  if (type is 1 or 3)
+                      DisarmTransfer($"terminal status {type}: {reason}");
+              }
+          '@
+          $new = @'
+              private void OnStatus(string taskId, int type, string reason)
+              {
+                  if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? "";
+                  try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+                  if (type == 1)
+                      TryMarkTerminal(taskId, true, reason);
+                  else if (type == 2)
+                      TryMarkTerminal(taskId, false, string.IsNullOrWhiteSpace(reason) ? "Phone cancelled or failed the transfer" : reason);
+                  else if (type == 3)
+                      TryMarkTerminal(taskId, false, string.IsNullOrWhiteSpace(reason) ? "Phone rejected the transfer" : reason);
+              }
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          # Detect a receiver aborting the HTTP body immediately, even before the WS
+          # close/"stat" reaches us.
+          $old = @'
+                      await OfficialStoredZipWriter.WriteAsync(
+                          ctx.Response.Body,
+                          files,
+                          total,
+                          (sent, expected) =>
+                          {
+                              try { DownloadProgress?.Invoke(sent, expected); } catch { }
+                          },
+                          linked.Token);
+                      return;
+          '@
+          $new = @'
+                      try
+                      {
+                          await OfficialStoredZipWriter.WriteAsync(
+                              ctx.Response.Body,
+                              files,
+                              total,
+                              (sent, expected) =>
+                              {
+                                  try { DownloadProgress?.Invoke(sent, expected); } catch { }
+                              },
+                              linked.Token);
+                      }
+                      catch (OperationCanceledException) when (cancelToken.IsCancellationRequested)
+                      {
+                          Log.Info("HTTP: STORED ZIP stopped by local cancellation");
+                          return;
+                      }
+                      catch (Exception ex)
+                      {
+                          var remoteAbort = ctx.RequestAborted.IsCancellationRequested;
+                          var why = remoteAbort
+                              ? "Phone cancelled or disconnected during transfer"
+                              : $"Transfer stream failed: {ex.Message}";
+                          Log.Warn($"HTTP: STORED ZIP terminated before completion ({why})");
+                          TryMarkTerminal(_activeTask?.TaskId, false, why);
+                          return;
+                      }
+                      return;
+          '@
+          Replace-Exact 'TransferServer.cs' $old $new
+
+          # SenderEngine: bytes-written is not success. Only phone-confirmed terminal
+          # status may set Complete=true.
+          $old = @'
+                  Server.DownloadFinished += taskId =>
+                  {
+                      TransferStateChanged?.Invoke(taskId, "download complete");
+                      if (_staged?.TaskId == taskId) _staged.Complete = true;
+                  };
+                  Server.StatusReceived += (taskId, type, reason) =>
+                      TransferStateChanged?.Invoke(taskId, $"status {type}: {reason}");
+          '@
+          $new = @'
+                  Server.DownloadFinished += taskId =>
+                      TransferStateChanged?.Invoke(taskId, "file data sent — waiting for phone confirmation");
+                  Server.TransferSucceeded += taskId =>
+                  {
+                      if (_staged?.TaskId == taskId) _staged.Complete = true;
+                      TransferStateChanged?.Invoke(taskId, "transfer complete");
+                  };
+                  Server.TransferFailed += (taskId, reason) =>
+                      TransferStateChanged?.Invoke(taskId, $"transfer failed: {reason}");
+                  Server.StatusReceived += (taskId, type, reason) =>
+                      TransferStateChanged?.Invoke(taskId, $"status {type}: {reason}");
+          '@
+          Replace-Exact 'SenderEngine.cs' $old $new
+
+          # Bridge: emit sendCompleted only after phone confirmation; remote cancel/error
+          # becomes sendFailed, which Flutter already renders as Transfer failed.
+          $old = @'
+                  _engine.Server.DownloadProgress += (sent, total) => Push("sendProgress", new { sent, total });
+                  _engine.Server.DownloadFinished += taskId => Push("sendCompleted", new { taskId });
+          '@
+          $new = @'
+                  _engine.Server.DownloadProgress += (sent, total) => Push("sendProgress", new { sent, total });
+                  _engine.Server.TransferSucceeded += taskId => Push("sendCompleted", new { taskId });
+                  _engine.Server.TransferFailed += (taskId, error) => Push("sendFailed", new { taskId, error });
+          '@
+          Replace-Exact 'CatShareBridgeServer.cs' $old $new
+
+          # Add a permanent protocol regression test for the observed OnePlus
+          # phone-cancel action:*:stat -> ack:*:stat sequence.
+          $old = @'
+                      if (args.Contains("--mockphone"))
+                      {
+                          var rc = RunMockPhone().GetAwaiter().GetResult();
+                          mutex.ReleaseMutex();
+                          return rc;
+                      }
+          '@
+          $new = @'
+                      if (args.Contains("--mockphone"))
+                      {
+                          var rc = RunMockPhone().GetAwaiter().GetResult();
+                          mutex.ReleaseMutex();
+                          return rc;
+                      }
+                      if (args.Contains("--mockphone-cancel"))
+                      {
+                          var rc = RunMockPhoneCancel().GetAwaiter().GetResult();
+                          mutex.ReleaseMutex();
+                          return rc;
+                      }
+          '@
+          Replace-Exact 'Program.cs' $old $new
+
+          $program = Get-Content -LiteralPath 'Program.cs' -Raw
+          $marker = '    /// <summary>Offline verification of the crypto + advertisement layout, no UI/BLE needed.</summary>'
+          if (-not $program.Contains($marker)) { throw 'Program test insertion marker not found' }
+          $cancelTest = @'
+              private static async Task<int> RunMockPhoneCancel()
+              {
+                  var failures = 0;
+                  await using var server = new TransferServer();
+                  await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
+
+                  var tmp = Path.Combine(Path.GetTempPath(), "catshare-cancel-selftest.bin");
+                  await File.WriteAllBytesAsync(tmp, RandomNumberGenerator.GetBytes(4096));
+                  var task = new TransferTask
+                  {
+                      Files = new List<string> { tmp },
+                      SenderName = "OSharePC-MockCancel",
+                      SenderId = "0000",
+                  };
+                  task.ComputeSize();
+                  server.SetTask(task);
+                  server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
+
+                  var failed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                  var succeeded = false;
+                  server.TransferFailed += (id, reason) =>
+                  {
+                      if (id == task.TaskId) failed.TrySetResult(reason);
+                  };
+                  server.TransferSucceeded += id =>
+                  {
+                      if (id == task.TaskId) succeeded = true;
+                  };
+
+                  using var ws = new System.Net.WebSockets.ClientWebSocket();
+                  using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                  await ws.ConnectAsync(new Uri($"ws://127.0.0.1:{SenderEngine.DefaultPort}/websocket"), cts.Token);
+                  var buf = new byte[8192];
+
+                  async Task<Envelope> RecvEnvelope()
+                  {
+                      while (true)
+                      {
+                          var r = await ws.ReceiveAsync(buf, cts.Token);
+                          if (r.MessageType == System.Net.WebSockets.WebSocketMessageType.Close) throw new IOException("closed");
+                          var text = System.Text.Encoding.UTF8.GetString(buf, 0, r.Count);
+                          var env = Envelope.Parse(text);
+                          if (env is { IsRaw: false }) return env;
+                          Log.Info($"MOCKCANCEL: raw frame '{env?.Method}'");
+                      }
+                  }
+
+                  async Task Send(Envelope e) => await ws.SendAsync(
+                      System.Text.Encoding.UTF8.GetBytes(e.ToString()),
+                      System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+
+                  var vn = await RecvEnvelope();
+                  await Send(new Envelope { Type = "ack", Seq = vn.Seq, Method = "versionNegotiation",
+                      Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { version = 1, threadLimit = 5 }), HasPayload = true });
+                  var sr = await RecvEnvelope();
+                  await Send(new Envelope { Type = "ack", Seq = sr.Seq, Method = "sendRequest",
+                      Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { }), HasPayload = true });
+
+                  // Consume the stock bare 'files' trigger before sending the exact
+                  // cancellation signal observed in OnePlus logs.
+                  var raw = await ws.ReceiveAsync(buf, cts.Token);
+                  var rawText = System.Text.Encoding.UTF8.GetString(buf, 0, raw.Count);
+                  if (rawText != "files") { Log.Error($"MOCKCANCEL FAIL: expected files trigger, got '{rawText}'"); failures++; }
+
+                  await Send(new Envelope { Type = "action", Seq = 77, Method = "stat",
+                      Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { reason = "user interrupt" }), HasPayload = true });
+                  var ack = await RecvEnvelope();
+                  if (!(ack.IsAck && ack.Seq == 77 && ack.Method == "stat"))
+                  { Log.Error($"MOCKCANCEL FAIL: expected ack:77:stat, got {ack}"); failures++; }
+
+                  string failureReason;
+                  try { failureReason = await failed.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+                  catch { failureReason = ""; }
+                  if (string.IsNullOrWhiteSpace(failureReason))
+                  { Log.Error("MOCKCANCEL FAIL: TransferFailed was not raised"); failures++; }
+                  else Log.Info($"MOCKCANCEL: failure detected: {failureReason}");
+                  if (succeeded) { Log.Error("MOCKCANCEL FAIL: cancellation was incorrectly marked successful"); failures++; }
+
+                  try { File.Delete(tmp); } catch { }
+                  await server.StopAsync();
+                  Log.Info(failures == 0 ? "MOCKCANCEL PASSED" : $"MOCKCANCEL FAILED ({failures})");
+                  return failures == 0 ? 0 : 1;
+              }
+
+          '@
+          $program = $program.Replace($marker, $cancelTest + $marker)
+          Set-Content -LiteralPath 'Program.cs' -Value $program -Encoding utf8
+
+          # Make the normal Build permanently cover remote cancellation.
+          $build = Get-Content -LiteralPath '.github/workflows/build.yml' -Raw
+          $needle = @'
+                - name: Build Flutter Windows release
+          '@
+          $step = @'
+                - name: Run backend mock phone cancellation
+                  shell: pwsh
+                  run: |
+                    $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+                    Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+                    $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--mockphone-cancel' -Wait -PassThru
+                    if ($process.ExitCode -ne 0) {
+                      Write-Host '===== sender.log ====='
+                      if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+                      throw "MOCKCANCEL process exited with $($process.ExitCode)"
+                    }
+                    if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) {
+                      Write-Host '===== sender.log ====='
+                      if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+                      throw 'MOCKCANCEL PASSED not found in sender.log'
+                    }
+                - name: Build Flutter Windows release
+          '@
+          if (-not $build.Contains($needle)) { throw 'build.yml insertion marker not found' }
+          $build = $build.Replace($needle, $step)
+          Set-Content -LiteralPath '.github/workflows/build.yml' -Value $build -Encoding utf8
+
+          git diff --check
+
+      - name: Build backend
+        shell: pwsh
+        run: dotnet build CatShareSender.csproj -c Release
+
+      - name: Run success protocol test
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'CatShareSender.exe not found' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "mockphone exited $($p.ExitCode)" }
+
+      - name: Run phone-cancel protocol test
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem -Path 'bin/Release' -Filter 'CatShareSender.exe' -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'CatShareSender.exe not found' }
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--mockphone-cancel' -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $log) { Get-Content $log }
+            throw "mockphone-cancel exited $($p.ExitCode)"
+          }
+          if (-not (Test-Path $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) {
+            if (Test-Path $log) { Get-Content $log }
+            throw 'MOCKCANCEL PASSED missing'
+          }
+          Get-Content $log | Select-String -Pattern 'MOCKCANCEL|stat|transfer failed'
+
+      - name: Analyze Flutter
+        shell: pwsh
+        run: |
+          Push-Location catshare_gui
+          flutter pub get
+          flutter analyze
+          Pop-Location
+
+      - name: Commit source fix
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TransferServer.cs SenderEngine.cs CatShareBridgeServer.cs Program.cs .github/workflows/build.yml
+          git diff --cached --check
+          git commit -m 'Detect phone-side transfer cancellation'
+          git push origin HEAD:main
