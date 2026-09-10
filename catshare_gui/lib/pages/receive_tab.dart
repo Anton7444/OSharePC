@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../config/theme.dart';
 import '../config/language.dart';
 import '../models/models.dart';
 import '../services/bridge_client.dart';
 import '../services/outgoing_staging_controller.dart';
-import '../widgets/custom_segmented_button.dart';
 import '../widgets/native_drop_zone.dart';
 import '../widgets/radar_logo.dart';
 
@@ -42,11 +42,6 @@ class _ReceiveTabState extends State<ReceiveTab> {
     return true;
   }
 
-  List<String> _formatIpAsHashes(String ip) {
-    if (ip.isEmpty) return ['#--'];
-    return ip.split('.').map((part) => '#$part').toList();
-  }
-
   Future<void> _handleDroppedPaths(List<String> paths) async {
     setState(() => _isDragging = false);
     if (!_isDropAllowed) {
@@ -78,13 +73,31 @@ class _ReceiveTabState extends State<ReceiveTab> {
     }
   }
 
+  Future<void> _copyIp(String ip) async {
+    if (ip.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: ip));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(appText(widget.language, 'ipCopied')),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = widget.client.status;
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final isEnabled = status.receiveEnabled;
-    final ipParts = _formatIpAsHashes(status.lanIp);
+    final ip = status.lanIp;
+    final displayIp = ip.isEmpty ? '--' : ip;
+    final quickSaveEnabled = widget.client.quickSaveMode == QuickSaveMode.on;
+    final saveDirectory = status.saveDirectory.isEmpty
+        ? 'Downloads\\CatShare'
+        : status.saveDirectory;
 
     return NativeDropZone(
       enabled: widget.isCurrentTab && _isDropAllowed,
@@ -96,265 +109,266 @@ class _ReceiveTabState extends State<ReceiveTab> {
         children: [
           Center(
             child: SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 40,
-                  horizontal: 24,
-                ),
+              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 32),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 720),
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    // 1. Center Radar Logo
-                    RadarLogo(size: 160, active: isEnabled),
-                    const SizedBox(height: 28),
-
-                    // 2. Receive Feature Toggle Switch Button
-                    InkWell(
-                      onTap: () => widget.client.setReceiveEnabled(!isEnabled),
-                      borderRadius: BorderRadius.circular(20),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 250),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 7,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isEnabled
-                              ? (isDark
-                                    ? const Color(0xFF1E3F35)
-                                    : const Color(0xFFD4EDE5))
-                              : (isDark
-                                    ? const Color(0xFF26332E)
-                                    : const Color(0xFFE2EBE6)),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: isEnabled
-                                ? (isDark
-                                      ? AppColors.darkAccent.withValues(
-                                          alpha: 0.5,
-                                        )
-                                      : AppColors.lightAccent.withValues(
-                                          alpha: 0.5,
-                                        ))
-                                : (isDark
-                                      ? AppColors.darkBorder
-                                      : AppColors.lightBorder),
-                            width: 1,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: isEnabled
-                                    ? (isDark
-                                          ? AppColors.darkAccent
-                                          : AppColors.lightAccent)
-                                    : (isDark
-                                          ? AppColors.darkTextSubtle
-                                          : AppColors.lightTextMuted),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              appText(
-                                widget.language,
-                                isEnabled ? 'receiveActive' : 'receivePaused',
-                              ),
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.8,
-                                color: isEnabled
-                                    ? (isDark
-                                          ? AppColors.darkAccent
-                                          : AppColors.lightAccent)
-                                    : (isDark
-                                          ? AppColors.darkTextMuted
-                                          : AppColors.lightTextMuted),
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Icon(
-                              isEnabled
-                                  ? Icons.pause_circle_outline_rounded
-                                  : Icons.play_circle_outline_rounded,
-                              size: 16,
-                              color: isEnabled
-                                  ? (isDark
-                                        ? AppColors.darkAccent
-                                        : AppColors.lightAccent)
-                                  : (isDark
-                                        ? AppColors.darkTextMuted
-                                        : AppColors.lightTextMuted),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+                    RadarLogo(size: 144, active: isEnabled),
                     const SizedBox(height: 24),
-
-                    // 3. Device Name (Big & friendly font)
+                    _buildReceiveStatus(isEnabled: isEnabled, isDark: isDark),
+                    const SizedBox(height: 14),
                     Text(
-                      status.deviceName.isEmpty
-                          ? 'OsharePC'
-                          : status.deviceName,
+                      status.deviceName.isEmpty ? 'OsharePC' : status.deviceName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                        fontSize: 34,
-                        fontWeight: FontWeight.w700,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.35,
                         color: isDark ? AppColors.darkText : AppColors.lightText,
-                        letterSpacing: -0.5,
                       ),
                     ),
-                    const SizedBox(height: 10),
-
-                    // 4. IP / Hash segments
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      alignment: WrapAlignment.center,
-                      children: ipParts.map((part) {
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: isDark
-                                ? AppColors.darkCard
-                                : AppColors.lightCard,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: isDark
-                                  ? AppColors.darkBorder
-                                  : AppColors.lightBorder,
-                            ),
-                          ),
-                          child: Text(
-                            part,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: isDark
-                                  ? AppColors.darkTextMuted
-                                  : AppColors.lightTextMuted,
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                    const SizedBox(height: 48),
-
-                    // 5. Quick Save Controls
+                    const SizedBox(height: 12),
                     Text(
-                      appText(widget.language, 'quickSave'),
+                      appText(widget.language, 'receiveHint'),
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 13,
-                        fontWeight: FontWeight.w500,
+                        height: 1.45,
                         color: isDark
                             ? AppColors.darkTextMuted
                             : AppColors.lightTextMuted,
                       ),
                     ),
-                    const SizedBox(height: 10),
-                    CustomSegmentedButton<QuickSaveMode>(
-                      values: const [QuickSaveMode.off, QuickSaveMode.on],
-                      labels: [
-                        appText(widget.language, 'off'),
-                        appText(widget.language, 'on'),
-                      ],
-                      selected: widget.client.quickSaveMode == QuickSaveMode.favorites
-                          ? QuickSaveMode.off
-                          : widget.client.quickSaveMode,
-                      onSelected: (mode) => widget.client.setQuickSaveMode(mode),
+                    const SizedBox(height: 24),
+                    _buildIpRow(displayIp: displayIp, rawIp: ip, isDark: isDark),
+                    const SizedBox(height: 28),
+                    Divider(
+                      height: 1,
+                      color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+                    ),
+                    const SizedBox(height: 20),
+                    _buildQuickSaveRow(
+                      isDark: isDark,
+                      enabled: quickSaveEnabled,
+                      saveDirectory: saveDirectory,
                     ),
                   ],
                 ),
               ),
             ),
           ),
-
-          // 6. Incoming Transfer Dialog Modal Overlay
           if (widget.client.pendingIncomingOffer != null)
             _buildIncomingModal(context, widget.client.pendingIncomingOffer!),
           if (widget.client.transferState.active &&
               !widget.client.transferState.isSending)
             _buildTransferModal(context, widget.client.transferState),
-
-          // 7. Drag and Drop Overlay
           if (_isDragging && _isDropAllowed)
-            Positioned.fill(
-              child: Container(
-                color: isDark
-                    ? Colors.black.withValues(alpha: 0.75)
-                    : Colors.white.withValues(alpha: 0.85),
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 32,
-                      vertical: 24,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isDark
-                          ? const Color(0xFF1B382F)
-                          : const Color(0xFFE2F3EC),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: isDark
-                            ? AppColors.darkAccent
-                            : AppColors.lightAccent,
-                        width: 2,
-                      ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Colors.black26,
-                          blurRadius: 16,
-                          offset: Offset(0, 6),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.file_upload_rounded,
-                          size: 48,
-                          color: isDark
-                              ? AppColors.darkAccent
-                              : AppColors.lightAccent,
-                        ),
-                        const SizedBox(height: 14),
-                        Text(
-                          appText(widget.language, 'dropToSendFiles'),
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+            Positioned.fill(child: _buildDragOverlay(isDark)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReceiveStatus({
+    required bool isEnabled,
+    required bool isDark,
+  }) {
+    final foreground = isEnabled
+        ? (isDark ? AppColors.darkAccent : AppColors.lightAccent)
+        : (isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted);
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => widget.client.setReceiveEnabled(!isEnabled),
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isEnabled
+                      ? foreground
+                      : (isDark
+                            ? AppColors.darkTextSubtle
+                            : AppColors.lightTextMuted),
                 ),
               ),
+              const SizedBox(width: 8),
+              Text(
+                appText(
+                  widget.language,
+                  isEnabled ? 'receiveActive' : 'receivePaused',
+                ),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: foreground,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                isEnabled ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                size: 15,
+                color: foreground,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIpRow({
+    required String displayIp,
+    required String rawIp,
+    required bool isDark,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          appText(widget.language, 'localIp'),
+          style: TextStyle(
+            fontSize: 12,
+            color: isDark
+                ? AppColors.darkTextMuted
+                : AppColors.lightTextMuted,
+          ),
+        ),
+        const SizedBox(width: 12),
+        SelectableText(
+          displayIp,
+          style: TextStyle(
+            fontFamily: 'Consolas',
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.15,
+            color: isDark ? AppColors.darkText : AppColors.lightText,
+          ),
+        ),
+        const SizedBox(width: 4),
+        IconButton(
+          tooltip: appText(widget.language, 'copy'),
+          onPressed: rawIp.isEmpty ? null : () => _copyIp(rawIp),
+          visualDensity: VisualDensity.compact,
+          iconSize: 17,
+          color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+          icon: const Icon(Icons.copy_rounded),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildQuickSaveRow({
+    required bool isDark,
+    required bool enabled,
+    required String saveDirectory,
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  appText(widget.language, 'quickSave'),
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: isDark ? AppColors.darkText : AppColors.lightText,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${appText(widget.language, 'quickSaveDestinationHint')} $saveDirectory',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.35,
+                    color: isDark
+                        ? AppColors.darkTextMuted
+                        : AppColors.lightTextMuted,
+                  ),
+                ),
+              ],
             ),
+          ),
+          const SizedBox(width: 20),
+          Switch(
+            value: enabled,
+            activeThumbColor: isDark
+                ? AppColors.darkAccent
+                : AppColors.lightAccent,
+            onChanged: (value) => widget.client.setQuickSaveMode(
+              value ? QuickSaveMode.on : QuickSaveMode.off,
+            ),
+          ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDragOverlay(bool isDark) {
+    return Container(
+      color: isDark
+          ? Colors.black.withValues(alpha: 0.75)
+          : Colors.white.withValues(alpha: 0.85),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 22),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1B382F) : const Color(0xFFE2F3EC),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+              width: 1.5,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.file_upload_rounded,
+                size: 42,
+                color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                appText(widget.language, 'dropToSendFiles'),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 
   String _formatSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
     if (bytes < 1024 * 1024 * 1024) {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
@@ -371,21 +385,21 @@ class _ReceiveTabState extends State<ReceiveTab> {
       'failed',
       'cancelled',
     ].contains(transfer.phase);
-    final determinate =
-        transfer.phase == 'receiving' && transfer.totalBytes > 0;
+    final determinate = transfer.phase == 'receiving' && transfer.totalBytes > 0;
     final title = transfer.statusText.isEmpty
         ? appText(widget.language, 'receiving')
         : transfer.statusText;
+
     return Container(
       color: Colors.black54,
       child: Center(
         child: Container(
           width: 460,
           margin: const EdgeInsets.all(24),
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.all(26),
           decoration: BoxDecoration(
             color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(18),
             border: Border.all(
               color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
             ),
@@ -412,18 +426,16 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         : (isDark
                               ? AppColors.darkAccent
                               : AppColors.lightAccent),
-                    size: 30,
+                    size: 28,
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
                       title,
                       style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: isDark
-                            ? AppColors.darkText
-                            : AppColors.lightText,
+                        fontSize: 19,
+                        fontWeight: FontWeight.w600,
+                        color: isDark ? AppColors.darkText : AppColors.lightText,
                       ),
                     ),
                   ),
@@ -442,6 +454,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 const SizedBox(height: 8),
                 Text(
                   transfer.fileName,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
                     color: isDark ? AppColors.darkText : AppColors.lightText,
@@ -575,7 +589,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       onPressed: () => widget.client.dismissTransferModal(),
                       child: Text(
                         appText(widget.language, 'close'),
-                        style: const TextStyle(fontWeight: FontWeight.w700),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
                     ),
                 ],
@@ -600,13 +614,12 @@ class _ReceiveTabState extends State<ReceiveTab> {
         child: Container(
           width: 440,
           margin: const EdgeInsets.all(24),
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.all(26),
           decoration: BoxDecoration(
             color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(18),
             border: Border.all(
               color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-              width: 1.5,
             ),
             boxShadow: const [
               BoxShadow(
@@ -622,24 +635,12 @@ class _ReceiveTabState extends State<ReceiveTab> {
             children: [
               Row(
                 children: [
-                  Container(
-                    width: 46,
-                    height: 46,
-                    decoration: BoxDecoration(
-                      color: isDark
-                          ? const Color(0xFF1E3F35)
-                          : const Color(0xFFD4EDE5),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      Icons.phone_android_rounded,
-                      color: isDark
-                          ? AppColors.darkAccent
-                          : AppColors.lightAccent,
-                      size: 26,
-                    ),
+                  Icon(
+                    Icons.phone_android_rounded,
+                    color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+                    size: 28,
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -648,7 +649,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                           appText(widget.language, 'incomingTransfer'),
                           style: TextStyle(
                             fontSize: 18,
-                            fontWeight: FontWeight.w700,
+                            fontWeight: FontWeight.w600,
                             color: isDark
                                 ? AppColors.darkText
                                 : AppColors.lightText,
@@ -657,6 +658,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         const SizedBox(height: 2),
                         Text(
                           '${offer.name} ${appText(widget.language, 'wantsToSend')}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 13,
                             color: isDark
@@ -670,63 +673,37 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 ],
               ),
               const SizedBox(height: 22),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? const Color(0xFF182923)
-                      : const Color(0xFFEFF5F2),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: isDark
-                        ? AppColors.darkBorder
-                        : AppColors.lightBorder,
+              Row(
+                children: [
+                  Icon(
+                    fileCount > 1
+                        ? Icons.folder_copy_rounded
+                        : Icons.insert_drive_file_outlined,
+                    color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+                    size: 22,
                   ),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      fileCount > 1
-                          ? Icons.folder_copy_rounded
-                          : Icons.insert_drive_file_outlined,
-                      color: isDark
-                          ? AppColors.darkAccent
-                          : AppColors.lightAccent,
-                      size: 24,
+                  const SizedBox(width: 12),
+                  Text(
+                    '$fileCount ${appText(widget.language, 'files')}',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: isDark ? AppColors.darkText : AppColors.lightText,
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '$fileCount ${appText(widget.language, 'files')}',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: isDark
-                                  ? AppColors.darkText
-                                  : AppColors.lightText,
-                            ),
-                          ),
-                          if (offer.totalBytes > 0) ...[
-                            const SizedBox(height: 2),
-                            Text(
-                              _formatSize(offer.totalBytes),
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: isDark
-                                    ? AppColors.darkTextMuted
-                                    : AppColors.lightTextMuted,
-                              ),
-                            ),
-                          ],
-                        ],
+                  ),
+                  if (offer.totalBytes > 0) ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      '• ${_formatSize(offer.totalBytes)}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isDark
+                            ? AppColors.darkTextMuted
+                            : AppColors.lightTextMuted,
                       ),
                     ),
                   ],
-                ),
+                ],
               ),
               const SizedBox(height: 24),
               Row(
@@ -736,7 +713,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(10),
                         ),
                         side: BorderSide(
                           color: isDark
@@ -768,14 +745,14 @@ class _ReceiveTabState extends State<ReceiveTab> {
                             : Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(10),
                         ),
                         elevation: 0,
                       ),
                       onPressed: () => widget.client.confirmReceive(offer.id, true),
                       child: Text(
                         appText(widget.language, 'accept'),
-                        style: const TextStyle(fontWeight: FontWeight.w700),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
                       ),
                     ),
                   ),

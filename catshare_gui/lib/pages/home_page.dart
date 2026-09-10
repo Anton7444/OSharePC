@@ -28,6 +28,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  static const double _sidebarWidth = 188;
+
   int _currentIndex = 0;
   late final OutgoingStagingController _stagingController;
 
@@ -53,9 +55,8 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       body: Row(
         children: [
-          // 1. Left Sidebar Rail (LocalSend aesthetic)
           Container(
-            width: 220,
+            width: _sidebarWidth,
             decoration: BoxDecoration(
               color: railBg,
               border: Border(
@@ -68,127 +69,100 @@ class _HomePageState extends State<HomePage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const SizedBox(height: 32),
-                // App Brand
+                const SizedBox(height: 24),
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: Row(
-                    children: [
-                      Text(
-                        'OsharePC',
-                        style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.5,
-                          color: isDark
-                              ? AppColors.darkText
-                              : AppColors.lightText,
-                        ),
-                      ),
-                    ],
+                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                  child: Text(
+                    'OsharePC',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.2,
+                      color: isDark
+                          ? AppColors.darkTextMuted
+                          : AppColors.lightTextMuted,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 36),
-
-                // Navigation Items
+                const SizedBox(height: 24),
                 _buildNavItem(
                   index: 0,
                   icon: Icons.wifi_tethering_rounded,
                   label: appText(widget.currentLanguage, 'receive'),
                   isDark: isDark,
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 _buildNavItem(
                   index: 1,
                   icon: Icons.send_rounded,
                   label: appText(widget.currentLanguage, 'send'),
                   isDark: isDark,
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 _buildNavItem(
                   index: 2,
                   icon: Icons.settings_rounded,
                   label: appText(widget.currentLanguage, 'settings'),
                   isDark: isDark,
                 ),
-
                 const Spacer(),
-
-                // Bottom Connection Status Indicator
                 Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isDark ? AppColors.darkCard : AppColors.lightCard,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: isDark
-                            ? AppColors.darkBorder
-                            : AppColors.lightBorder,
-                        width: 1,
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: widget.client.isConnecting
+                              ? Colors.amber
+                              : (isDark
+                                    ? AppColors.darkAccent
+                                    : AppColors.lightAccent),
+                        ),
                       ),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: widget.client.isConnecting
-                                ? Colors.amber
-                                : (isDark
-                                      ? AppColors.darkAccent
-                                      : AppColors.lightAccent),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                widget.client.isConnecting
-                                    ? 'Connecting...'
-                                    : 'Online',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: isDark
-                                      ? AppColors.darkText
-                                      : AppColors.lightText,
-                                ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              widget.client.isConnecting
+                                  ? 'Connecting...'
+                                  : 'Online',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: isDark
+                                    ? AppColors.darkText
+                                    : AppColors.lightText,
                               ),
-                              Text(
-                                status.lanIp.isEmpty
-                                    ? 'Mutual Transmission'
-                                    : status.lanIp,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: isDark
-                                      ? AppColors.darkTextMuted
-                                      : AppColors.lightTextMuted,
-                                ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              status.lanIp.isEmpty
+                                  ? 'Mutual Transmission'
+                                  : status.lanIp,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: isDark
+                                    ? AppColors.darkTextMuted
+                                    : AppColors.lightTextMuted,
                               ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
           ),
-
-          // 2. Right Main Content Panel
           Expanded(
             child: IndexedStack(
               index: _currentIndex,
@@ -228,33 +202,33 @@ class _HomePageState extends State<HomePage> {
     required bool isDark,
   }) {
     final isSelected = _currentIndex == index;
-    final activeBg = isDark ? const Color(0xFF1E3F35) : const Color(0xFFD4EDE5);
+    final activeBg = isDark ? const Color(0xFF1B352D) : const Color(0xFFDCEBE5);
     final activeFg = isDark ? AppColors.darkAccent : AppColors.lightAccent;
     final inactiveFg = isDark
         ? AppColors.darkTextMuted
         : AppColors.lightTextMuted;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       child: InkWell(
         onTap: () => setState(() => _currentIndex = index),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(10),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             color: isSelected ? activeBg : Colors.transparent,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: BorderRadius.circular(10),
           ),
           child: Row(
             children: [
-              Icon(icon, size: 20, color: isSelected ? activeFg : inactiveFg),
-              const SizedBox(width: 14),
+              Icon(icon, size: 19, color: isSelected ? activeFg : inactiveFg),
+              const SizedBox(width: 11),
               Text(
                 label,
                 style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                  fontSize: 13,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
                   color: isSelected ? activeFg : inactiveFg,
                 ),
               ),

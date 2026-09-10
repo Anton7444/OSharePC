@@ -31,6 +31,7 @@ class SettingsTab extends StatefulWidget {
 
 class _SettingsTabState extends State<SettingsTab> {
   static const _guiVersion = '1.0';
+
   bool _minimizeToTray = true;
   bool _closeToTray = true;
   bool _launchAtStartup = false;
@@ -55,21 +56,22 @@ class _SettingsTabState extends State<SettingsTab> {
     } catch (_) {}
   }
 
-  Future<void> _saveLaunchAtStartup(bool val) async {
-    final saved = await StartupService.setEnabled(val);
+  Future<void> _saveLaunchAtStartup(bool value) async {
+    final saved = await StartupService.setEnabled(value);
     if (!mounted) return;
-    setState(() => _launchAtStartup = saved ? val : false);
+    setState(() => _launchAtStartup = saved ? value : false);
   }
 
-  Future<void> _saveStartMinimized(bool val) async {
-    setState(() => _startMinimized = val);
+  Future<void> _saveStartMinimized(bool value) async {
+    setState(() => _startMinimized = value);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('start_minimized', val);
+    await prefs.setBool('start_minimized', value);
   }
 
   Future<void> _loadTrayPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
       setState(() {
         _minimizeToTray = prefs.getBool('minimize_to_tray') ?? true;
         _closeToTray = prefs.getBool('close_to_tray') ?? true;
@@ -77,18 +79,18 @@ class _SettingsTabState extends State<SettingsTab> {
     } catch (_) {}
   }
 
-  Future<void> _saveMinimizeToTray(bool val) async {
-    setState(() => _minimizeToTray = val);
+  Future<void> _saveMinimizeToTray(bool value) async {
+    setState(() => _minimizeToTray = value);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('minimize_to_tray', val);
-    await widget.client.updateSettings(minimizeToTray: val);
+    await prefs.setBool('minimize_to_tray', value);
+    await widget.client.updateSettings(minimizeToTray: value);
   }
 
-  Future<void> _saveCloseToTray(bool val) async {
-    setState(() => _closeToTray = val);
+  Future<void> _saveCloseToTray(bool value) async {
+    setState(() => _closeToTray = value);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('close_to_tray', val);
-    await widget.client.updateSettings(closeToTray: val);
+    await prefs.setBool('close_to_tray', value);
+    await widget.client.updateSettings(closeToTray: value);
   }
 
   Future<void> _pickFolder() async {
@@ -117,232 +119,42 @@ class _SettingsTabState extends State<SettingsTab> {
   }
 
   @override
-  void dispose() {
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final status = widget.client.status;
 
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
       children: [
-        // Section: General
         _buildSectionHeader(appText(widget.currentLanguage, 'general'), isDark),
         const SizedBox(height: 12),
         _buildCard(
           isDark,
           children: [
-            // Destination Folder
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          appText(widget.currentLanguage, 'destination'),
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          status.saveDirectory.isEmpty
-                              ? 'Downloads\\CatShare'
-                              : status.saveDirectory,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: _pickFolder,
-                    icon: const Icon(Icons.folder_open, size: 16),
-                    label: Text(appText(widget.currentLanguage, 'browse')),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: isDark
-                          ? AppColors.darkAccent
-                          : AppColors.lightAccent,
-                      side: BorderSide(
-                        color: isDark
-                            ? AppColors.darkBorder
-                            : AppColors.lightBorder,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: appText(widget.currentLanguage, 'openFolder'),
-                    onPressed: _openFolder,
-                    icon: const Icon(Icons.open_in_new, size: 18),
-                    color: isDark
-                        ? AppColors.darkTextMuted
-                        : AppColors.lightTextMuted,
-                  ),
-                ],
-              ),
-            ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-            // Quick Save
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          appText(widget.currentLanguage, 'quickSave'),
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          appText(widget.currentLanguage, 'quickSaveHint'),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  CustomSegmentedButton<QuickSaveMode>(
-                    values: const [QuickSaveMode.off, QuickSaveMode.on],
-                    labels: [
-                      appText(widget.currentLanguage, 'off'),
-                      appText(widget.currentLanguage, 'on'),
-                    ],
-                    selected:
-                        widget.client.quickSaveMode == QuickSaveMode.favorites
-                        ? QuickSaveMode.off
-                        : widget.client.quickSaveMode,
-                    onSelected: (mode) => widget.client.setQuickSaveMode(mode),
-                  ),
-                ],
-              ),
-            ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          appText(widget.currentLanguage, 'language'),
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          appText(widget.currentLanguage, 'chooseLanguage'),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  CustomSegmentedButton<AppLanguage>(
-                    values: AppLanguage.values,
-                    labels: AppLanguage.values
-                        .map((language) => language.label)
-                        .toList(),
-                    selected: widget.currentLanguage,
-                    onSelected: widget.onLanguageChanged,
-                  ),
-                ],
-              ),
-            ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-            SwitchListTile(
-              title: Text(
-                appText(widget.currentLanguage, 'launchAtStartup'),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
-                ),
-              ),
+            _buildDestinationRow(status.saveDirectory, isDark),
+            _divider(isDark),
+            _buildQuickSaveRow(isDark),
+            _divider(isDark),
+            _buildLanguageRow(isDark),
+            _divider(isDark),
+            _buildSwitchRow(
+              title: appText(widget.currentLanguage, 'launchAtStartup'),
               value: _launchAtStartup,
-              activeThumbColor: isDark
-                  ? AppColors.darkAccent
-                  : AppColors.lightAccent,
+              isDark: isDark,
               onChanged: StartupService.isInstalledBuild
                   ? _saveLaunchAtStartup
                   : null,
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-            SwitchListTile(
-              title: Text(
-                appText(widget.currentLanguage, 'startMinimized'),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
-                ),
-              ),
+            _divider(isDark),
+            _buildSwitchRow(
+              title: appText(widget.currentLanguage, 'startMinimized'),
               value: _startMinimized,
-              activeThumbColor: isDark
-                  ? AppColors.darkAccent
-                  : AppColors.lightAccent,
+              isDark: isDark,
               onChanged: _saveStartMinimized,
             ),
           ],
         ),
-
         const SizedBox(height: 28),
-
-        // Section: System Tray
         _buildSectionHeader(
           appText(widget.currentLanguage, 'systemTray'),
           isDark,
@@ -351,95 +163,38 @@ class _SettingsTabState extends State<SettingsTab> {
         _buildCard(
           isDark,
           children: [
-            SwitchListTile(
-              title: Text(
-                appText(widget.currentLanguage, 'closeTray'),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
-                ),
-              ),
-              subtitle: Text(
-                appText(widget.currentLanguage, 'closeTrayHint'),
-                style: TextStyle(
-                  fontSize: 12,
-                  color: isDark
-                      ? AppColors.darkTextMuted
-                      : AppColors.lightTextMuted,
-                ),
-              ),
+            _buildSwitchRow(
+              title: appText(widget.currentLanguage, 'closeTray'),
+              subtitle: appText(widget.currentLanguage, 'closeTrayHint'),
               value: _closeToTray,
-              activeThumbColor: isDark
-                  ? AppColors.darkAccent
-                  : AppColors.lightAccent,
+              isDark: isDark,
               onChanged: _saveCloseToTray,
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-            SwitchListTile(
-              title: Text(
-                appText(widget.currentLanguage, 'minimizeTray'),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
-                ),
-              ),
-              subtitle: Text(
-                appText(widget.currentLanguage, 'minimizeTrayHint'),
-                style: TextStyle(
-                  fontSize: 12,
-                  color: isDark
-                      ? AppColors.darkTextMuted
-                      : AppColors.lightTextMuted,
-                ),
-              ),
+            _divider(isDark),
+            _buildSwitchRow(
+              title: appText(widget.currentLanguage, 'minimizeTray'),
+              subtitle: appText(widget.currentLanguage, 'minimizeTrayHint'),
               value: _minimizeToTray,
-              activeThumbColor: isDark
-                  ? AppColors.darkAccent
-                  : AppColors.lightAccent,
+              isDark: isDark,
               onChanged: _saveMinimizeToTray,
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
-            SwitchListTile(
-              title: Text(
-                appText(widget.currentLanguage, 'receiveSuccessNotification'),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
-                ),
+            _divider(isDark),
+            _buildSwitchRow(
+              title: appText(
+                widget.currentLanguage,
+                'receiveSuccessNotification',
               ),
-              subtitle: Text(
-                appText(
-                  widget.currentLanguage,
-                  'receiveSuccessNotificationHint',
-                ),
-                style: TextStyle(
-                  fontSize: 12,
-                  color: isDark
-                      ? AppColors.darkTextMuted
-                      : AppColors.lightTextMuted,
-                ),
+              subtitle: appText(
+                widget.currentLanguage,
+                'receiveSuccessNotificationHint',
               ),
               value: widget.client.receiveSuccessNotifications,
-              activeThumbColor: isDark
-                  ? AppColors.darkAccent
-                  : AppColors.lightAccent,
+              isDark: isDark,
               onChanged: widget.client.setReceiveSuccessNotifications,
             ),
           ],
         ),
-
         const SizedBox(height: 28),
-
-        // Section: Appearance
         _buildSectionHeader(
           appText(widget.currentLanguage, 'appearance'),
           isDark,
@@ -449,36 +204,17 @@ class _SettingsTabState extends State<SettingsTab> {
           isDark,
           children: [
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
               child: Row(
                 children: [
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          appText(widget.currentLanguage, 'theme'),
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          appText(widget.currentLanguage, 'themeHint'),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                      ],
+                    child: _buildLabel(
+                      appText(widget.currentLanguage, 'theme'),
+                      appText(widget.currentLanguage, 'themeHint'),
+                      isDark,
                     ),
                   ),
+                  const SizedBox(width: 16),
                   CustomSegmentedButton<ThemeMode>(
                     values: const [
                       ThemeMode.dark,
@@ -498,10 +234,7 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
           ],
         ),
-
         const SizedBox(height: 28),
-
-        // Section: Network & Info
         _buildSectionHeader(appText(widget.currentLanguage, 'network'), isDark),
         const SizedBox(height: 12),
         _buildCard(
@@ -512,86 +245,44 @@ class _SettingsTabState extends State<SettingsTab> {
               status.lanIp.isEmpty ? '127.0.0.1' : status.lanIp,
               isDark,
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
+            _divider(isDark),
             _buildInfoRow(
               appText(widget.currentLanguage, 'transferPort'),
               '${status.transferPort} (Stock 互传)',
               isDark,
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
+            _divider(isDark),
             _buildInfoRow(
               appText(widget.currentLanguage, 'bridgeServer'),
               'http://127.0.0.1:8960',
               isDark,
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
+            _divider(isDark),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 children: [
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          appText(widget.currentLanguage, 'logFolder'),
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '%LOCALAPPDATA%\\CatShareSender',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                      ],
+                    child: _buildLabel(
+                      appText(widget.currentLanguage, 'logFolder'),
+                      '%LOCALAPPDATA%\\CatShareSender',
+                      isDark,
+                      compact: true,
                     ),
                   ),
+                  const SizedBox(width: 16),
                   OutlinedButton.icon(
                     onPressed: _openLogFolder,
                     icon: const Icon(Icons.folder_open, size: 16),
                     label: Text(
                       appText(widget.currentLanguage, 'openLogFolder'),
                     ),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: isDark
-                          ? AppColors.darkAccent
-                          : AppColors.lightAccent,
-                      side: BorderSide(
-                        color: isDark
-                            ? AppColors.darkBorder
-                            : AppColors.lightBorder,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
+                    style: _outlinedButtonStyle(isDark),
                   ),
                 ],
               ),
             ),
-            Divider(
-              height: 1,
-              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-            ),
+            _divider(isDark),
             _buildInfoRow(
               appText(widget.currentLanguage, 'version'),
               'OsharePC GUI $_guiVersion',
@@ -603,12 +294,163 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
+  Widget _buildDestinationRow(String saveDirectory, bool isDark) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildLabel(
+              appText(widget.currentLanguage, 'destination'),
+              saveDirectory.isEmpty ? 'Downloads\\CatShare' : saveDirectory,
+              isDark,
+            ),
+          ),
+          const SizedBox(width: 16),
+          OutlinedButton.icon(
+            onPressed: _pickFolder,
+            icon: const Icon(Icons.folder_open, size: 16),
+            label: Text(appText(widget.currentLanguage, 'browse')),
+            style: _outlinedButtonStyle(isDark),
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            tooltip: appText(widget.currentLanguage, 'openFolder'),
+            onPressed: _openFolder,
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.open_in_new, size: 18),
+            color: isDark
+                ? AppColors.darkTextMuted
+                : AppColors.lightTextMuted,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickSaveRow(bool isDark) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildLabel(
+              appText(widget.currentLanguage, 'quickSave'),
+              appText(widget.currentLanguage, 'quickSaveHint'),
+              isDark,
+            ),
+          ),
+          const SizedBox(width: 16),
+          Switch(
+            value: widget.client.quickSaveMode == QuickSaveMode.on,
+            activeThumbColor: isDark
+                ? AppColors.darkAccent
+                : AppColors.lightAccent,
+            onChanged: (value) => widget.client.setQuickSaveMode(
+              value ? QuickSaveMode.on : QuickSaveMode.off,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLanguageRow(bool isDark) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildLabel(
+              appText(widget.currentLanguage, 'language'),
+              appText(widget.currentLanguage, 'chooseLanguage'),
+              isDark,
+            ),
+          ),
+          const SizedBox(width: 16),
+          CustomSegmentedButton<AppLanguage>(
+            values: AppLanguage.values,
+            labels: AppLanguage.values.map((language) => language.label).toList(),
+            selected: widget.currentLanguage,
+            onSelected: widget.onLanguageChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSwitchRow({
+    required String title,
+    String? subtitle,
+    required bool value,
+    required bool isDark,
+    required ValueChanged<bool>? onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          Expanded(child: _buildLabel(title, subtitle, isDark)),
+          const SizedBox(width: 16),
+          Switch(
+            value: value,
+            activeThumbColor: isDark
+                ? AppColors.darkAccent
+                : AppColors.lightAccent,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLabel(
+    String title,
+    String? subtitle,
+    bool isDark, {
+    bool compact = false,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: compact ? 13 : 14,
+            fontWeight: FontWeight.w600,
+            color: compact
+                ? (isDark
+                      ? AppColors.darkTextMuted
+                      : AppColors.lightTextMuted)
+                : (isDark ? AppColors.darkText : AppColors.lightText),
+          ),
+        ),
+        if (subtitle != null && subtitle.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.35,
+              color: isDark
+                  ? AppColors.darkTextMuted
+                  : AppColors.lightTextMuted,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
   Widget _buildSectionHeader(String title, bool isDark) {
     return Text(
       title,
       style: TextStyle(
-        fontSize: 18,
-        fontWeight: FontWeight.w700,
+        fontSize: 17,
+        fontWeight: FontWeight.w600,
         color: isDark ? AppColors.darkText : AppColors.lightText,
       ),
     );
@@ -618,16 +460,22 @@ class _SettingsTabState extends State<SettingsTab> {
     return Container(
       decoration: BoxDecoration(
         color: isDark ? AppColors.darkCard : AppColors.lightCard,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
-          width: 1,
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: children,
       ),
+    );
+  }
+
+  Widget _divider(bool isDark) {
+    return Divider(
+      height: 1,
+      color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
     );
   }
 
@@ -646,17 +494,32 @@ class _SettingsTabState extends State<SettingsTab> {
                   : AppColors.lightTextMuted,
             ),
           ),
-          const Spacer(),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: isDark ? AppColors.darkText : AppColors.lightText,
+          const SizedBox(width: 20),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.end,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: isDark ? AppColors.darkText : AppColors.lightText,
+              ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  ButtonStyle _outlinedButtonStyle(bool isDark) {
+    return OutlinedButton.styleFrom(
+      foregroundColor: isDark ? AppColors.darkAccent : AppColors.lightAccent,
+      side: BorderSide(
+        color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
     );
   }
 }
