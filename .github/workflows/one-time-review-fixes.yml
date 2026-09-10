@@ -1,4 +1,4 @@
-name: Apply requested code review fixes
+name: Normalize requested review fixes
 
 on:
   push:
@@ -10,50 +10,48 @@ permissions:
   contents: write
 
 jobs:
-  apply:
+  normalize:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - name: Set up .NET
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
-        with:
-          dotnet-version: '10.0.x'
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
         with:
           channel: stable
           flutter-version: '3.44.3'
           cache: true
-      - name: Apply fixes
+      - name: Normalize touched files
         shell: pwsh
         run: |
+          dart format catshare_gui/lib/pages/settings_tab.dart catshare_gui/lib/config/language.dart catshare_gui/lib/services/bridge_client.dart catshare_gui/lib/main.dart
           @'
           from pathlib import Path
+          p = Path('WifiJoiner.cs')
+          text = p.read_text(encoding='utf-8')
+          old = '''        var staleXml = Path.Combine(Path.GetTempPath(), ProfileName + ".xml");
+          try
+          {
+              if (File.Exists(staleXml))
+              {
+                  File.Delete(staleXml);
+                  Log.Info($"RX: removed stale WLAN profile XML '{staleXml}'");
+              }
+          }
+          catch (Exception ex)
+          {
+              Log.Warn($"RX: stale WLAN profile XML cleanup failed: {ex.Message}");
+          }
+
+          try
+              {
+          '''
+          # GitHub rendering may de-indent the inserted block differently, so normalize by
+          # replacing the region structurally from staleXml through the second try opener.
           import re
-
-          def sub_once(path, pattern, replacement, label, flags=0):
-              p = Path(path)
-              text = p.read_text(encoding='utf-8')
-              text, count = re.subn(pattern, replacement, text, count=1, flags=flags)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected 1 match, got {count}')
-              p.write_text(text, encoding='utf-8')
-
-          # 1) settings_tab.dart: guard setState after await.
-          sub_once(
-              'catshare_gui/lib/pages/settings_tab.dart',
-              r'(Future<void> _loadTrayPrefs\(\) async \{\s*try \{\s*final prefs = await SharedPreferences\.getInstance\(\);\s*)(setState\(\(\) \{)',
-              r'\1if (!mounted) return;\n      \2',
-              'settings mounted guard')
-
-          # 2) WifiJoiner.cs: delete a plaintext WLAN XML left by a hard kill,
-          # independently from netsh cleanup so either cleanup can still run if the other fails.
-          sub_once(
-              'WifiJoiner.cs',
-              r'(public static async Task CleanupStaleProfiles\(\)\s*\{\s*)(try\s*\{\s*var shown = await Netsh\("wlan show profiles"\);)',
-              '''\\1var staleXml = Path.Combine(Path.GetTempPath(), ProfileName + ".xml");
+          pattern = re.compile(r'''        var staleXml = Path\.Combine\(Path\.GetTempPath\(\), ProfileName \+ "\\.xml"\);\n\s*try\n\s*\{\n\s*if \(File\.Exists\(staleXml\)\)\n\s*\{\n\s*File\.Delete\(staleXml\);\n\s*Log\.Info\(\$"RX: removed stale WLAN profile XML '\{staleXml\}'"\);\n\s*\}\n\s*\}\n\s*catch \(Exception ex\)\n\s*\{\n\s*Log\.Warn\(\$"RX: stale WLAN profile XML cleanup failed: \{ex\.Message\}"\);\n\s*\}\n\s*try\n\s*\{''')
+          replacement = '''        var staleXml = Path.Combine(Path.GetTempPath(), ProfileName + ".xml");
               try
               {
                   if (File.Exists(staleXml))
@@ -67,208 +65,29 @@ jobs:
                   Log.Warn($"RX: stale WLAN profile XML cleanup failed: {ex.Message}");
               }
 
-              \\2''',
-              'WifiJoiner stale XML cleanup')
-
-          # 3) Add stable user-facing translations. Raw backend error detail stays in debug logs.
-          p = Path('catshare_gui/lib/config/language.dart')
-          text = p.read_text(encoding='utf-8')
-          inserts = [
-              ("      'stagingFailed': 'Could not stage the selected files.',\n", """      'stagingFailed': 'Could not stage the selected files.',
-              'transferFailed': 'Transfer failed',
-              'sendFailed': 'Could not send the file.',
-              'receiveFailed': 'Could not receive the file.',
-              'remoteCancelled': 'The phone cancelled the transfer.',
-              'remoteRejected': 'The phone rejected the transfer.',
-              'connectionLost': 'The connection to the phone was lost.',
-              'transferTimedOut': 'The transfer timed out.',
-          """),
-              ("      'stagingFailed': '无法暂存所选文件。',\n", """      'stagingFailed': '无法暂存所选文件。',
-              'transferFailed': '传输失败',
-              'sendFailed': '无法发送文件。',
-              'receiveFailed': '无法接收文件。',
-              'remoteCancelled': '手机已取消传输。',
-              'remoteRejected': '手机已拒绝传输。',
-              'connectionLost': '与手机的连接已断开。',
-              'transferTimedOut': '传输超时。',
-          """),
-              ("      'stagingFailed': '無法暫存選取的檔案。',\n", """      'stagingFailed': '無法暫存選取的檔案。',
-              'transferFailed': '傳送失敗',
-              'sendFailed': '無法傳送檔案。',
-              'receiveFailed': '無法接收檔案。',
-              'remoteCancelled': '手機已取消傳送。',
-              'remoteRejected': '手機已拒絕傳送。',
-              'connectionLost': '與手機的連線已中斷。',
-              'transferTimedOut': '傳送逾時。',
-          """),
-          ]
-          for old, new in inserts:
-              if text.count(old) != 1:
-                  raise SystemExit(f'language anchor count={text.count(old)} for {old!r}')
-              text = text.replace(old, new, 1)
+              try
+              {'''
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'WifiJoiner formatting region matches={count}')
           p.write_text(text, encoding='utf-8')
-
-          p = Path('catshare_gui/lib/services/bridge_client.dart')
-          text = p.read_text(encoding='utf-8')
-          if "import '../config/language.dart';" not in text:
-              text = text.replace("import '../models/models.dart';\n", "import '../config/language.dart';\nimport '../models/models.dart';\n", 1)
-          if 'AppLanguage _language = AppLanguage.english;' not in text:
-              marker = '  bool _receiveSuccessNotifications = true;\n'
-              if marker not in text: raise SystemExit('BridgeClient language field marker missing')
-              text = text.replace(marker, marker + '  AppLanguage _language = AppLanguage.english;\n', 1)
-          if "final languageIndex = prefs.getInt('language')" not in text:
-              marker = "      _receiveSuccessNotifications =\n          prefs.getBool('receive_success_notifications') ?? true;\n"
-              if marker not in text: raise SystemExit('BridgeClient prefs marker missing')
-              text = text.replace(marker, marker + "      final languageIndex = prefs.getInt('language') ?? AppLanguage.english.index;\n      _language = AppLanguage.values[languageIndex.clamp(0, AppLanguage.values.length - 1)];\n", 1)
-          if 'String _localizedTransferError(' not in text:
-              marker = '  Future<void> setQuickSaveMode(QuickSaveMode mode) async {\n'
-              if marker not in text: raise SystemExit('BridgeClient method marker missing')
-              helper = '''  void setLanguage(AppLanguage language) {
-            _language = language;
-          }
-
-            String _localizedTransferError(String? raw, {required bool isSending}) {
-              final lower = (raw ?? '').toLowerCase();
-              if (lower.contains('user interrupt') || lower.contains('cancel')) {
-                return appText(_language, 'remoteCancelled');
-              }
-              if (lower.contains('reject') || lower.contains('declin')) {
-                return appText(_language, 'remoteRejected');
-              }
-              if (lower.contains('timeout') || lower.contains('timed out')) {
-                return appText(_language, 'transferTimedOut');
-              }
-              if (lower.contains('disconnect') ||
-                  lower.contains('connection') ||
-                  lower.contains('closed') ||
-                  lower.contains('websocket')) {
-                return appText(_language, 'connectionLost');
-              }
-              return appText(_language, isSending ? 'sendFailed' : 'receiveFailed');
-            }
-
-            '''
-              text = text.replace(marker, helper + marker, 1)
-
-          event_pattern = re.compile(
-              r"      \} else if \(type == 'receiveFailed' \|\| type == 'sendFailed'\) \{\n.*?\n        _pendingIncomingOffer = null;",
-              re.S)
-          event_replacement = '''      } else if (type == 'receiveFailed' || type == 'sendFailed') {
-            final isSendingFailure = type == 'sendFailed';
-            final error = data is Map ? data['error']?.toString() : null;
-            final localizedError = _localizedTransferError(
-              error,
-              isSending: isSendingFailure,
-            );
-            debugPrint('Backend transfer failure detail: ${error ?? '(none)'}');
-            onNotification?.call('OsharePC', appText(_language, 'transferFailed'));
-            _transferState = TransferStateModel(
-              active: true,
-              isSending: isSendingFailure,
-              targetDevice: _transferState.targetDevice,
-              fileName: _transferState.fileName,
-              fileCount: _transferState.fileCount,
-              sentBytes: _transferState.sentBytes,
-              totalBytes: _transferState.totalBytes,
-              phase: 'failed',
-              statusText: appText(_language, 'transferFailed'),
-              errorText: localizedError,
-            );
-            _pendingIncomingOffer = null;'''
-          text, count = event_pattern.subn(event_replacement, text, count=1)
-          if count != 1: raise SystemExit(f'BridgeClient failed-event block matches={count}')
-
-          response_pattern = re.compile(
-              r"      final error = body is Map \? body\['error'\]\?\.toString\(\) : null;\n.*?\n      notifyListeners\(\);\n      return false;",
-              re.S)
-          response_replacement = '''      final error = body is Map ? body['error']?.toString() : null;
-            debugPrint('Backend send failure detail: ${error ?? 'HTTP ${resp.statusCode}'}');
-            _transferState = TransferStateModel(
-              active: true,
-              isSending: true,
-              targetDevice: device.name,
-              phase: 'failed',
-              statusText: appText(_language, 'transferFailed'),
-              errorText: _localizedTransferError(error, isSending: true),
-            );
-            notifyListeners();
-            return false;'''
-          text, count = response_pattern.subn(response_replacement, text, count=1)
-          if count != 1: raise SystemExit(f'BridgeClient send-response block matches={count}')
-
-          catch_pattern = re.compile(
-              r"    \} catch \(e\) \{\n      debugPrint\('Error sending to device: \$e'\);\n      _transferState = TransferStateModel\(\n.*?\n      \);",
-              re.S)
-          catch_replacement = '''    } catch (e) {
-            debugPrint('Error sending to device: $e');
-            _transferState = TransferStateModel(
-              active: true,
-              isSending: true,
-              targetDevice: device.name,
-              phase: 'failed',
-              statusText: appText(_language, 'transferFailed'),
-              errorText: appText(_language, 'sendFailed'),
-            );'''
-          text, count = catch_pattern.subn(catch_replacement, text, count=1)
-          if count != 1: raise SystemExit(f'BridgeClient send catch block matches={count}')
-          p.write_text(text, encoding='utf-8')
-
-          # Synchronize BridgeClient language with current UI language.
-          p = Path('catshare_gui/lib/main.dart')
-          text = p.read_text(encoding='utf-8')
-          if 'bridgeClient.setLanguage(initialLanguage);' not in text:
-              marker = '  runApp(\n'
-              if marker not in text: raise SystemExit('main runApp marker missing')
-              text = text.replace(marker, '  bridgeClient.setLanguage(initialLanguage);\n\n' + marker, 1)
-          if 'widget.bridgeClient.setLanguage(language);' not in text:
-              marker = '    setState(() => _language = language);\n'
-              if marker not in text: raise SystemExit('main language-change marker missing')
-              text = text.replace(marker, marker + '    widget.bridgeClient.setLanguage(language);\n', 1)
-          p.write_text(text, encoding='utf-8')
-
-          # 6) Correct stale SSE wording.
-          p = Path('CatShareBridgeServer.cs')
-          text = p.read_text(encoding='utf-8')
-          old = '/// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides REST/SSE/event bridge.</summary>'
-          new = '/// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides a REST/polling event bridge.</summary>'
-          if old not in text: raise SystemExit('bridge summary marker missing')
-          p.write_text(text.replace(old, new, 1), encoding='utf-8')
-
-          print('requested code review fixes applied')
-          '@ | Set-Content -LiteralPath review_fixes.py -Encoding UTF8
-          python review_fixes.py
-          Remove-Item review_fixes.py
-      - name: Check diff
-        shell: pwsh
-        run: git diff --check
-      - name: Build backend
-        run: dotnet build CatShareSender.csproj -c Release
-      - name: Backend selftest
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
-          $p = Start-Process $exe.FullName -ArgumentList '--selftest' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "selftest exited $($p.ExitCode)" }
-      - name: Mock phone tests
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem bin/Release -Filter CatShareSender.exe -Recurse | Select-Object -First 1
-          foreach ($arg in @('--mockphone', '--mockphone-cancel')) {
-            $p = Start-Process $exe.FullName -ArgumentList $arg -Wait -PassThru
-            if ($p.ExitCode -ne 0) { throw "$arg exited $($p.ExitCode)" }
-          }
-      - name: Analyze Flutter
+          '@ | Set-Content normalize.py -Encoding UTF8
+          python normalize.py
+          Remove-Item normalize.py
+          git diff --check
+      - name: Verify Flutter
         working-directory: catshare_gui
         run: |
           flutter pub get
-          dart format --output=none --set-exit-if-changed lib
           flutter analyze
-      - name: Commit fixes
+      - name: Commit formatting
         shell: pwsh
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add WifiJoiner.cs CatShareBridgeServer.cs catshare_gui/lib/pages/settings_tab.dart catshare_gui/lib/config/language.dart catshare_gui/lib/services/bridge_client.dart catshare_gui/lib/main.dart
+          git add WifiJoiner.cs catshare_gui/lib/pages/settings_tab.dart catshare_gui/lib/config/language.dart catshare_gui/lib/services/bridge_client.dart catshare_gui/lib/main.dart
           git diff --cached --check
-          git commit -m 'Fix review findings for cleanup lifecycle and localization'
-          git push origin HEAD:main
+          if (-not (git diff --cached --quiet)) {
+            git commit -m 'Normalize review fix formatting'
+            git push origin HEAD:main
+          }
