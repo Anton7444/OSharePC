@@ -102,29 +102,84 @@ public sealed class GattLink : IDisposable
                 if (device is null)
                     throw new InvalidOperationException("device not found — is the phone still advertising?");
 
-                // MaintainConnection forces the stack to actually establish the LE link
+                // Match the stock Android client lifecycle: establish a real LE/GATT
+                // session first, then perform protocol service discovery. Do not race
+                // a full uncached database walk against the physical link coming up.
                 try
                 {
                     session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
-                    if (session is not null) session.MaintainConnection = true;
+                    if (session is not null)
+                    {
+                        Log.Info($"BLE: GATT session created status={session.SessionStatus} pdu={session.MaxPduSize} canMaintain={session.CanMaintainConnection}");
+                        if (session.CanMaintainConnection)
+                        {
+                            session.MaintainConnection = true;
+                            var activeDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
+                            while (session.SessionStatus != GattSessionStatus.Active && DateTimeOffset.UtcNow < activeDeadline)
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                await Task.Delay(25, ct);
+                            }
+                        }
+                        Log.Info($"BLE: GATT session ready status={session.SessionStatus} pdu={session.MaxPduSize}");
+                    }
                 }
                 catch (Exception ex) { Log.Warn($"BLE: GattSession unavailable ({ex.Message})"); }
 
-                var svcResult = await device.GetGattServicesAsync(BluetoothCacheMode.Uncached);
-                if (svcResult.Status != GattCommunicationStatus.Success)
-                    throw new InvalidOperationException($"service discovery failed ({svcResult.Status})");
+                var discoveredServices = new List<GattDeviceService>();
+                GattCommunicationStatus discoveryStatus;
+                string discoveryLabel;
+
+                if (flow == SendFlow.CatShareHotspot)
+                {
+                    Log.Info("BLE: discovering target alliance service 9955 only");
+                    var result = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                    discoveryStatus = result.Status;
+                    discoveryLabel = "9955";
+                    if (result.Status == GattCommunicationStatus.Success)
+                        discoveredServices.AddRange(result.Services);
+                }
+                else
+                {
+                    Log.Info("BLE: discovering target OConnect service 9999 only");
+                    var oconnect = await device.GetGattServicesForUuidAsync(OConnectServiceUuid, BluetoothCacheMode.Uncached);
+                    discoveryStatus = oconnect.Status;
+                    discoveryLabel = "9999";
+                    if (oconnect.Status == GattCommunicationStatus.Success)
+                        discoveredServices.AddRange(oconnect.Services);
+
+                    // Auto can also target CatShare. Probe 9955 only if 9999 was
+                    // queried successfully and is genuinely absent. Never start a
+                    // second discovery after an already-failed physical link.
+                    if (flow == SendFlow.Auto &&
+                        discoveryStatus == GattCommunicationStatus.Success &&
+                        discoveredServices.Count == 0)
+                    {
+                        Log.Info("BLE: service 9999 absent; probing 9955 fallback");
+                        var alliance = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                        discoveryStatus = alliance.Status;
+                        discoveryLabel = "9955";
+                        if (alliance.Status == GattCommunicationStatus.Success)
+                            discoveredServices.AddRange(alliance.Services);
+                    }
+                }
+
+                if (discoveryStatus != GattCommunicationStatus.Success)
+                    throw new InvalidOperationException($"target service {discoveryLabel} discovery failed ({discoveryStatus})");
+                if (discoveredServices.Count == 0)
+                    throw new InvalidOperationException($"target service {discoveryLabel} is not exposed by the device");
 
                 var link = new GattLink();
                 link._device = device;
                 link._session = session;
-                link._services.AddRange(svcResult.Services);
+                link._services.AddRange(discoveredServices);
                 device = null;       // ownership moved to the link
                 session = null;
-                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, attempt {attempt})");
+                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, target={discoveryLabel}, attempt {attempt})");
 
                 try
                 {
-                    await link.EnumerateAsync(flow, svcResult.Services);
+                    await link.EnumerateAsync(flow, discoveredServices);
                     return link;
                 }
                 catch
