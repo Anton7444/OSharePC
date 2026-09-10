@@ -1,6 +1,6 @@
 name: Build
 
-# CI packages use one shared assembled runtime.
+# Every successful CI run publishes both Windows packages from one shared assembled runtime.
 
 on:
   push:
@@ -111,12 +111,12 @@ jobs:
       - name: Upload portable package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: OSharePC-Portable-win-x64
+          name: OSharePC-Portable-win-x64.zip
           path: OSharePC-Portable-win-x64.zip
           if-no-files-found: error
       - name: Upload setup package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: OSharePC-Setup-win-x64
+          name: OSharePC-Setup-win-x64.exe
           path: OSharePC-Setup-win-x64.exe
           if-no-files-found: error
