@@ -114,9 +114,11 @@ jobs:
           name: OSharePC-Portable-win-x64.zip
           path: OSharePC-Portable-win-x64.zip
           if-no-files-found: error
+          retention-days: 3
       - name: Upload setup package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OSharePC-Setup-win-x64.exe
           path: OSharePC-Setup-win-x64.exe
           if-no-files-found: error
+          retention-days: 3
