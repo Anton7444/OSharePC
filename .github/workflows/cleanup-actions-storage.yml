@@ -1,0 +1,52 @@
+name: Cleanup Actions Storage
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete artifacts from older commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Keeping artifacts belonging to current commit: $CURRENT_SHA"
+
+          page=1
+          deleted=0
+          kept=0
+
+          while true; do
+            response="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=$page")"
+            count="$(jq '.artifacts | length' <<<"$response")"
+            [ "$count" -eq 0 ] && break
+
+            while IFS=$'\t' read -r id name sha size; do
+              if [ "$sha" = "$CURRENT_SHA" ]; then
+                echo "KEEP   $id  $name  sha=$sha  bytes=$size"
+                kept=$((kept + 1))
+              else
+                echo "DELETE $id  $name  sha=$sha  bytes=$size"
+                gh api --method DELETE "/repos/$REPO/actions/artifacts/$id"
+                deleted=$((deleted + 1))
+              fi
+            done < <(jq -r '.artifacts[] | [.id, .name, (.workflow_run.head_sha // ""), .size_in_bytes] | @tsv' <<<"$response")
+
+            # Deletions shrink the collection, so restart from page 1 to avoid skipping entries.
+            page=1
+            remaining="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=1" | jq '[.artifacts[] | select((.workflow_run.head_sha // "") != env.CURRENT_SHA)] | length')"
+            [ "$remaining" -eq 0 ] && break
+          done
+
+          echo "Deleted $deleted old artifact(s); kept $kept artifact(s) from the current commit."
