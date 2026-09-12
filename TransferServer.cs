@@ -41,6 +41,7 @@ public sealed class TransferServer : IAsyncDisposable
     /// <summary>The task offered on the active websocket session (null until sending).</summary>
     private volatile TransferTask? _activeTask;
     private CancellationTokenSource _cancelCts = new();
+    private readonly object _cancelGate = new();
 
     /// <summary>Raised when the phone accepts and the ZIP download begins.</summary>
     public event Action<string>? DownloadStarted;
@@ -52,9 +53,13 @@ public sealed class TransferServer : IAsyncDisposable
 
     public void CancelActiveTransfer()
     {
-        _cancelCts.Cancel();
-        _cancelCts.Dispose();
-        _cancelCts = new CancellationTokenSource();
+        CancellationTokenSource old;
+        lock (_cancelGate)
+        {
+            old = _cancelCts;
+            _cancelCts = new CancellationTokenSource();
+        }
+        try { old.Cancel(); } finally { old.Dispose(); }
         Log.Info("TransferServer: active transfer cancellation requested");
     }
 
@@ -116,6 +121,7 @@ public sealed class TransferServer : IAsyncDisposable
         {
             if (_app is not null)
             {
+                CancelActiveTransfer();
                 try { await _app.StopAsync(TimeSpan.FromSeconds(2)); } catch { }
                 await _app.DisposeAsync();
                 _app = null;
