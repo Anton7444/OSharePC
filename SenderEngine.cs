@@ -352,16 +352,62 @@ public sealed class SenderEngine : IDisposable
 
             try
             {
-                // One GATT attempt per advertisement generation. An Unreachable
-                // service discovery means this radio instance was not ready; wait
-                // for the next complete advertisement instead of hitting it twice more.
-                connectedLink = await GattLink.ConnectAsync(
-                    candidate.Address,
-                    flow,
-                    1,
-                    s => TransferStateChanged?.Invoke(_staged.TaskId, s),
-                    ct,
-                    candidate.AddressType);
+                if (flow == SendFlow.Auto)
+                {
+                    try
+                    {
+                        // Phones that support the iOS/OConnect path stay on the fast
+                        // pure-LAN 9999 flow used by existing working devices.
+                        connectedLink = await GattLink.ConnectAsync(
+                            candidate.Address,
+                            SendFlow.OConnectLan,
+                            1,
+                            s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                            ct,
+                            candidate.AddressType);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception oconnectEx)
+                    {
+                        // Some OnePlus tablets advertise the normal alliance record and
+                        // accept the BLE link, but tear down the iOS/common 9999 probe
+                        // before Windows can discover it. The stock Android path is the
+                        // separate 9955 service, which the tablet also creates. Reconnect
+                        // explicitly through 9955 instead of treating 9999 Unreachable as
+                        // proof that the whole GATT peer is unusable.
+                        lastConnectError = oconnectEx;
+                        Log.Warn($"BLE: OConnect 9999 unavailable on {candidate.AddressStr} ({oconnectEx.Message}); " +
+                                 "trying stock alliance 9955 fallback");
+                        TransferStateChanged?.Invoke(
+                            _staged.TaskId,
+                            $"OConnect unavailable on {candidate.Name}; trying stock 互传 BLE service…");
+
+                        // Let Android finish the first GATT disconnect before Windows
+                        // creates a fresh client for the stock service.
+                        await Task.Delay(250, ct);
+                        connectedLink = await GattLink.ConnectAsync(
+                            candidate.Address,
+                            SendFlow.CatShareHotspot,
+                            1,
+                            s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                            ct,
+                            candidate.AddressType);
+                        Log.Info($"BLE: stock alliance 9955 fallback connected to {candidate.AddressStr}");
+                    }
+                }
+                else
+                {
+                    connectedLink = await GattLink.ConnectAsync(
+                        candidate.Address,
+                        flow,
+                        1,
+                        s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                        ct,
+                        candidate.AddressType);
+                }
                 break;
             }
             catch (Exception ex) when (attempt < 3)
@@ -436,8 +482,12 @@ public sealed class SenderEngine : IDisposable
             $"hotspot '{Hotspot.Ssid}' up — the phone will switch Wi-Fi to it");
 
         Server.ArmTransfer(_staged, string.IsNullOrWhiteSpace(Hotspot.GatewayIp) ? null : Hotspot.GatewayIp);
+        var credentialMode = endpoint.IsCatShare
+            ? CredentialMode.CatShareLan
+            : CredentialMode.StockAlliance;
+        Log.Info($"BLE: using {(endpoint.IsCatShare ? "CatShare" : "stock alliance")} 9955 credentials");
         await link.SendCredentialsAsync(
-            endpoint, CredentialMode.CatShareLan, endpoint.Status, Lan, Port, _crypto, SenderId,
+            endpoint, credentialMode, endpoint.Status, Lan, Port, _crypto, SenderId,
             freq: 0,
             ssidOverride: Hotspot.Ssid,
             pskOverride: Hotspot.Psk,
