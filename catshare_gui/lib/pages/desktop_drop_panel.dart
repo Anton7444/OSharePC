@@ -32,6 +32,12 @@ enum DesktopDropPanelStage { idle, dragging, staged }
 // handling during the next build.
 const manualCancelArmsTransferCleanup = false;
 
+bool transferCleanupArmedAfterClear({
+  required bool armTransferCleanup,
+  required bool cleared,
+  required bool wasArmed,
+}) => armTransferCleanup ? !cleared : false;
+
 String fileNameForPath(String path) {
   final normalized = path.replaceAll('\\', '/');
   final parts = normalized.split('/');
@@ -438,7 +444,11 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       cleared = await _stagingController.clear(language: widget.language);
       if (mounted) {
         setState(() {
-          if (armTransferCleanup) _clearAfterTransfer = !cleared;
+          _clearAfterTransfer = transferCleanupArmedAfterClear(
+            armTransferCleanup: armTransferCleanup,
+            cleared: cleared,
+            wasArmed: _clearAfterTransfer,
+          );
           if (cleared) {
             _terminalFailureShown = false;
           }

@@ -80,6 +80,14 @@ void main() {
     // particular, a failed clear must not trigger another clear/collapse from
     // terminal transfer-state handling, and it must never send a device.
     expect(manualCancelArmsTransferCleanup, isFalse);
+    expect(
+      transferCleanupArmedAfterClear(
+        armTransferCleanup: false,
+        cleared: false,
+        wasArmed: true,
+      ),
+      isFalse,
+    );
   });
 
   test(
