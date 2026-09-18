@@ -681,13 +681,12 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               if (_isTransferActive) ...[
                 _buildTransferDetails(isDark, transfer),
                 const SizedBox(height: 10),
+              ] else if (_hasStagedDrop && !_isDragging) ...[
+                _buildStagedSummary(isDark),
+                const SizedBox(height: 10),
               ] else
                 Expanded(child: _buildDropArea(selected, isDark, transfer)),
               const SizedBox(height: 10),
-              if (_hasStagedDrop && !_isTransferActive) ...[
-                _buildStagedSummary(isDark),
-                const SizedBox(height: 10),
-              ],
               _buildDeviceStrip(devices, selected, isDark),
             ],
           ),
