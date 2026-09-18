@@ -27,6 +27,21 @@ const _cornerMargin = 16.0;
 
 enum DesktopDropPanelStage { idle, dragging, staged }
 
+String fileNameForPath(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final parts = normalized.split('/');
+  return parts.isEmpty || parts.last.isEmpty ? path : parts.last;
+}
+
+String _formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+}
+
 Size panelSizeForStage(DesktopDropPanelStage stage, {int deviceCount = 0}) {
   switch (stage) {
     case DesktopDropPanelStage.idle:
@@ -397,6 +412,14 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     }
   }
 
+  Future<void> _cancelStagedDrop() async {
+    if (_isTransferActive || !_hasStagedDrop || _clearInFlight) return;
+    final cleared = await _clearStagedFiles();
+    if (!mounted || !cleared) return;
+    setState(() => _selectedAddress = null);
+    await _collapse();
+  }
+
   Future<bool> _clearStagedFiles({bool reportFailure = true}) async {
     if (_clearInFlight) return false;
     _clearInFlight = true;
@@ -508,7 +531,8 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
                       child: _buildPill(isDark),
                     ),
                     _fadeLayer(
-                      visible: previewT > 0.04 && expansionT < 0.99,
+                      visible:
+                          _isDragging && previewT > 0.04 && expansionT < 0.99,
                       opacity:
                           ((previewT - 0.04) / 0.7).clamp(0.0, 1.0) *
                           (1 - expansionT),
@@ -613,10 +637,69 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               const SizedBox(height: 10),
               Expanded(child: _buildDropArea(selected, isDark, transfer)),
               const SizedBox(height: 10),
+              if (_hasStagedDrop) ...[
+                _buildStagedSummary(isDark),
+                const SizedBox(height: 10),
+              ],
               _buildDeviceStrip(devices, selected, isDark),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildStagedSummary(bool isDark) {
+    final files = _stagingController.selectedFiles;
+    final firstName = files.isEmpty ? '' : fileNameForPath(files.first);
+    final count = _stagingController.totalCount;
+    final bytes = _stagingController.totalBytes;
+    final muted = isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted;
+    final textColor = isDark ? AppColors.darkText : AppColors.lightText;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: isDark ? AppColors.darkCard : AppColors.lightCard,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.inventory_2_outlined, size: 18, color: muted),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  appText(widget.language, 'desktopDropStagedSummary'),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: textColor,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$firstName · $count ${appText(widget.language, 'desktopDropFiles')} · ${_formatBytes(bytes)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 10, color: muted),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            key: const ValueKey('desktop-drop-cancel-staged'),
+            tooltip: appText(widget.language, 'desktopDropCancelStaged'),
+            onPressed: _isTransferActive ? null : _cancelStagedDrop,
+            icon: const Icon(Icons.close_rounded, size: 18),
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
       ),
     );
   }

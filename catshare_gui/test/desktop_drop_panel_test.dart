@@ -70,6 +70,11 @@ void main() {
     expect(resolveSelectedDevice([], 'b'), isNull);
   });
 
+  test('fileNameForPath returns the final path component', () {
+    expect(fileNameForPath(r'C:\Users\Anton\Downloads\photo.jpg'), 'photo.jpg');
+    expect(fileNameForPath('/tmp/archive.zip'), 'archive.zip');
+  });
+
   test(
     'panel mode is detected from the environment when Dart loses runner args',
     () {
