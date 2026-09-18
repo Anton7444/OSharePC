@@ -330,6 +330,10 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
 
   void _handleDragStateChanged(bool isDragging) {
     if (!mounted) return;
+    // DragDropService can emit repeated `updated=true` events while the same
+    // drag remains over the target. Native opacity/geometry work belongs only
+    // to the actual state transition.
+    if (isDragging == _isDragging) return;
     setState(() => _isDragging = isDragging);
     if (isDragging) {
       _onDragEntered();
@@ -339,6 +343,9 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   }
 
   void _onDragEntered() {
+    // A second drag can enter while the device picker is staged. Preserve the
+    // expanded stage until that staged selection is explicitly cleared.
+    if (_hasStagedDrop) return;
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
     _collapseGeneration++;
