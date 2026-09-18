@@ -232,12 +232,14 @@ class DesktopDropPanelPage extends StatefulWidget {
   final BridgeClient client;
   final AppLanguage language;
   final OutgoingStagingController? stagingController;
+  final Future<bool> Function(DeviceModel)? sendToDeviceOverride;
 
   const DesktopDropPanelPage({
     super.key,
     required this.client,
     required this.language,
     this.stagingController,
+    this.sendToDeviceOverride,
   });
 
   @override
@@ -410,7 +412,8 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     }
 
     setState(() => _selectedAddress = device.address);
-    final sent = await widget.client.sendToDevice(device);
+    final sent = await (widget.sendToDeviceOverride?.call(device) ??
+        widget.client.sendToDevice(device));
     if (!mounted) return;
 
     setState(() => _clearAfterTransfer = true);

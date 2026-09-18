@@ -19,6 +19,10 @@ void main() {
         client: client,
         language: AppLanguage.english,
         stagingController: staging,
+        sendToDeviceOverride: (_) async {
+          staging.sendCalls++;
+          return true;
+        },
       ),
     ));
     final zone = tester.widget<NativeDropZone>(find.byType(NativeDropZone));
