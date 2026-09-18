@@ -231,11 +231,13 @@ class _DesktopDropPanelAppState extends State<DesktopDropPanelApp> {
 class DesktopDropPanelPage extends StatefulWidget {
   final BridgeClient client;
   final AppLanguage language;
+  final OutgoingStagingController? stagingController;
 
   const DesktopDropPanelPage({
     super.key,
     required this.client,
     required this.language,
+    this.stagingController,
   });
 
   @override
@@ -268,7 +270,9 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   @override
   void initState() {
     super.initState();
-    _stagingController = OutgoingStagingController(bridgeClient: widget.client);
+    _stagingController =
+        widget.stagingController ??
+        OutgoingStagingController(bridgeClient: widget.client);
     _visual = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 220),
