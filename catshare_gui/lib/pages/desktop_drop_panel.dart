@@ -10,6 +10,7 @@ import '../config/theme.dart';
 import '../models/models.dart';
 import '../services/bridge_client.dart';
 import '../services/outgoing_staging_controller.dart';
+import '../services/transfer_presentation.dart';
 import '../widgets/native_drop_zone.dart';
 
 // The panel is a real, always-present native window pinned at the bottom-right
@@ -34,8 +35,10 @@ const manualCancelArmsTransferCleanup = false;
 
 // Runtime transition used by the manual-cancel path. It deliberately clears
 // an already-armed flag even when the bridge clear fails.
-bool manualCancelCleanupState({required bool wasArmed, required bool cleared}) =>
-    false;
+bool manualCancelCleanupState({
+  required bool wasArmed,
+  required bool cleared,
+}) => false;
 
 String fileNameForPath(String path) {
   final normalized = path.replaceAll('\\', '/');
@@ -267,6 +270,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   bool _clearAfterTransfer = false;
   bool _clearInFlight = false;
   bool _terminalFailureShown = false;
+  bool _terminalCleanupAttempted = false;
   bool _selectionSyncPending = false;
 
   @override
@@ -397,6 +401,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     }
 
     _terminalFailureShown = false;
+    _terminalCleanupAttempted = false;
     if (!mounted) return;
     _collapseGeneration++;
     setState(() => _hasStagedDrop = true);
@@ -412,8 +417,9 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     }
 
     setState(() => _selectedAddress = device.address);
-    final sent = await (widget.sendToDeviceOverride?.call(device) ??
-        widget.client.sendToDevice(device));
+    final sent =
+        await (widget.sendToDeviceOverride?.call(device) ??
+            widget.client.sendToDevice(device));
     if (!mounted) return;
 
     setState(() => _clearAfterTransfer = true);
@@ -474,13 +480,16 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   }
 
   void _maybeClearAfterTransfer(TransferStateModel transfer) {
-    if (!_clearAfterTransfer || _clearInFlight) return;
+    if (!_clearAfterTransfer || _clearInFlight || _terminalCleanupAttempted) {
+      return;
+    }
     final terminal = const [
       'completed',
       'failed',
       'cancelled',
     ].contains(transfer.phase);
     if (!terminal) return;
+    _terminalCleanupAttempted = true;
 
     if (transfer.phase == 'failed' && !_terminalFailureShown) {
       _terminalFailureShown = true;
@@ -662,9 +671,13 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
             children: [
               _buildHeader(selected, isDark),
               const SizedBox(height: 10),
-              Expanded(child: _buildDropArea(selected, isDark, transfer)),
+              if (_isTransferActive) ...[
+                _buildTransferDetails(isDark, transfer),
+                const SizedBox(height: 10),
+              ] else
+                Expanded(child: _buildDropArea(selected, isDark, transfer)),
               const SizedBox(height: 10),
-              if (_hasStagedDrop) ...[
+              if (_hasStagedDrop && !_isTransferActive) ...[
                 _buildStagedSummary(isDark),
                 const SizedBox(height: 10),
               ],
@@ -672,6 +685,122 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildTransferDetails(bool isDark, TransferStateModel transfer) {
+    final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
+    final muted = isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted;
+    final textColor = isDark ? AppColors.darkText : AppColors.lightText;
+    final determinate = transfer.totalBytes > 0;
+    final eta = estimateRemaining(
+      sentBytes: transfer.sentBytes,
+      totalBytes: transfer.totalBytes,
+      speedBytesPerSec: transfer.speedBytesPerSec,
+    );
+    final percent = (transfer.progress * 100).round();
+    final speed = transfer.speedBytesPerSec > 0
+        ? '${_formatBytes(transfer.speedBytesPerSec.round())}/s'
+        : '—';
+    return Container(
+      key: const ValueKey('desktop-drop-transfer-details'),
+      padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+      decoration: BoxDecoration(
+        color: isDark ? AppColors.darkCard : AppColors.lightCard,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.inventory_2_outlined, size: 16, color: muted),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '${appText(widget.language, 'desktopDropStagedSummary')} · ${_stagingController.totalCount} ${appText(widget.language, 'desktopDropFiles')} · ${_formatBytes(_stagingController.totalBytes)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 10, color: muted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  transfer.fileName.isNotEmpty
+                      ? transfer.fileName
+                      : appText(widget.language, 'desktopDropTransfer'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: textColor,
+                  ),
+                ),
+              ),
+              Text('$percent%', style: TextStyle(fontSize: 11, color: muted)),
+              IconButton(
+                key: const ValueKey('desktop-drop-cancel-transfer'),
+                tooltip: appText(widget.language, 'cancelTransfer'),
+                onPressed: () async {
+                  final cancelled = await widget.client.cancelTransfer();
+                  if (!cancelled && mounted) {
+                    _showMessage(
+                      appText(widget.language, 'desktopDropCancelFailed'),
+                    );
+                  }
+                },
+                icon: const Icon(Icons.close_rounded, size: 18),
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(
+            value: determinate ? transfer.progress : null,
+            minHeight: 6,
+            color: accent,
+            backgroundColor: accent.withAlpha(35),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  determinate
+                      ? '${_formatBytes(transfer.sentBytes)} / ${_formatBytes(transfer.totalBytes)}'
+                      : _formatBytes(transfer.sentBytes),
+                  style: TextStyle(fontSize: 10, color: muted),
+                ),
+              ),
+              Text(
+                '${appText(widget.language, 'transferSpeed')}: $speed',
+                style: TextStyle(fontSize: 10, color: muted),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${appText(widget.language, 'transferEta')}: ${formatTransferEta(eta)}',
+                style: TextStyle(fontSize: 10, color: muted),
+              ),
+            ],
+          ),
+          if (transfer.statusText.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              transfer.statusText,
+              style: TextStyle(fontSize: 10, color: muted),
+            ),
+          ],
+        ],
       ),
     );
   }

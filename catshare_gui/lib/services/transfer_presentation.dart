@@ -19,6 +19,11 @@ String formatTransferDuration(Duration duration) {
   return '${minutes ~/ 60}h ${minutes % 60}m';
 }
 
+String formatTransferEta(Duration? duration) {
+  if (duration == null) return '—';
+  return formatTransferDuration(duration);
+}
+
 String formatByteSize(int bytes) {
   if (bytes < 1024) return '${math.max(0, bytes)} B';
   const units = ['KB', 'MB', 'GB', 'TB'];

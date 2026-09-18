@@ -29,6 +29,8 @@ void main() {
     );
     expect(formatTransferDuration(const Duration(seconds: 7)), '7s');
     expect(formatTransferDuration(const Duration(seconds: 3661)), '1h 1m');
+    expect(formatTransferEta(Duration.zero), '0s');
+    expect(formatTransferEta(null), '—');
   });
 
   test('byte sizes and paths are human-readable', () {
