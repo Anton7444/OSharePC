@@ -228,6 +228,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
 
   Offset _anchor = const Offset(1904, 1064);
   int _geometryGeneration = 0;
+  int _collapseGeneration = 0;
   Timer? _collapseTimer;
   Timer? _autoCollapseTimer;
 
@@ -260,6 +261,10 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
 
   Future<void> _setNativePanelStage(DesktopDropPanelStage stage) async {
     final generation = ++_geometryGeneration;
+    // A newer transition may have superseded this request while the caller
+    // was yielding (for example, a new drop arriving during collapse).
+    await Future<void>.value();
+    if (generation != _geometryGeneration) return;
     await windowManager.setBounds(
       anchoredRect(_anchor, panelSizeForStage(stage)),
     );
@@ -301,6 +306,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   void _onDragEntered() {
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
+    _collapseGeneration++;
     unawaited(windowManager.setOpacity(1.0));
     unawaited(_setNativePanelStage(DesktopDropPanelStage.dragging));
     _visual.animateTo(0.5, curve: Curves.easeOutCubic);
@@ -316,12 +322,17 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   }
 
   Future<void> _collapse() async {
+    final collapseGeneration = ++_collapseGeneration;
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
     await _visual.animateTo(0, curve: Curves.easeOutCubic);
+    if (!mounted || collapseGeneration != _collapseGeneration || _isDragging) {
+      return;
+    }
     _hasStagedDrop = false;
-    if (!mounted) return;
+    if (collapseGeneration != _collapseGeneration) return;
     await _setNativePanelStage(DesktopDropPanelStage.idle);
+    if (!mounted || collapseGeneration != _collapseGeneration) return;
     await windowManager.setOpacity(panelInvisibleOpacity);
   }
 
@@ -356,6 +367,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
 
     _terminalFailureShown = false;
     if (!mounted) return;
+    _collapseGeneration++;
     setState(() => _hasStagedDrop = true);
     unawaited(_setNativePanelStage(DesktopDropPanelStage.staged));
     _visual.animateTo(1, curve: Curves.easeOutCubic);
