@@ -15,7 +15,7 @@ import '../widgets/native_drop_zone.dart';
 // The panel is a real, always-present native window pinned at the bottom-right
 // corner — that's what lets Windows deliver OLE DragEnter to it the instant a
 // file drag reaches that corner, even before anything is visible. It starts
-// at [panelIdleSize], fully transparent (see AppColors/_visibility below),
+// at [panelIdleSize], fully transparent (see [panelInvisibleOpacity]),
 // grows to [panelPreviewSize] while a file is hovering, and only grows to the
 // device picker after a file has actually been dropped.
 const panelDropTargetSize = Size(360, 150);
@@ -41,6 +41,18 @@ bool panelShouldExpand({
   required bool isDragging,
   required bool hasStagedFiles,
 }) => hasStagedFiles;
+
+DesktopDropPanelStage panelStageForState({
+  required bool isDragging,
+  required bool hasStagedFiles,
+  bool terminal = false,
+}) {
+  if (terminal || (!isDragging && !hasStagedFiles)) {
+    return DesktopDropPanelStage.idle;
+  }
+  if (hasStagedFiles) return DesktopDropPanelStage.staged;
+  return DesktopDropPanelStage.dragging;
+}
 
 // Windows' WindowFromPoint (and therefore OLE drag-and-drop hit-testing)
 // silently skips a layered window at *exactly* opacity 0 — verified
@@ -209,16 +221,13 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     with TickerProviderStateMixin {
   late final OutgoingStagingController _stagingController;
 
-  // _visibility fades the whole (otherwise fully transparent) native window
-  // in/out. _preview grows the native window from the hidden hit target to the
-  // compact drag target. _expansion grows that compact target to the device
-  // picker after a drop. Windows' SetBounds is a single immediate call, so all
-  // three animations are hand-driven by re-issuing setBounds below.
-  late final AnimationController _visibility;
-  late final AnimationController _preview;
-  late final AnimationController _expansion;
+  // The native window changes size only at stage transitions. This controller
+  // is purely Flutter-side: 0 is the idle pill, 0.5 is the compact drag panel,
+  // and 1 is the expanded device picker.
+  late final AnimationController _visual;
 
   Offset _anchor = const Offset(1904, 1064);
+  int _geometryGeneration = 0;
   Timer? _collapseTimer;
   Timer? _autoCollapseTimer;
 
@@ -234,59 +243,29 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   void initState() {
     super.initState();
     _stagingController = OutgoingStagingController(bridgeClient: widget.client);
-    _visibility =
-        AnimationController(
-          vsync: this,
-          duration: const Duration(milliseconds: 130),
-        )..addListener(() {
-          final opacity =
-              panelInvisibleOpacity +
-              (1.0 - panelInvisibleOpacity) * _visibility.value;
-          windowManager.setOpacity(opacity);
-        });
-    _preview = AnimationController(
+    _visual = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 180),
-    )..addListener(_onBoundsTick);
-    _expansion =
-        AnimationController(
-            vsync: this,
-            duration: const Duration(milliseconds: 220),
-          )
-          ..addListener(_onBoundsTick)
-          ..addStatusListener((status) {
-            // setBounds() on Windows is SetWindowPos(hwnd, HWND_TOP, ...), which
-            // silently drops HWND_TOPMOST on every call the animation makes —
-            // restore it once the bounds settle at either end.
-            if (status == AnimationStatus.completed ||
-                status == AnimationStatus.dismissed) {
-              windowManager.setAlwaysOnTop(true);
-            }
-          });
+      duration: const Duration(milliseconds: 220),
+    );
     _initWindow();
   }
 
   Future<void> _initWindow() async {
     // main.dart already parked the native window at the idle rect for this
-    // same anchor before runApp(); this just caches the anchor point so the
-    // expand/collapse animation below can keep the corner pinned. Re-assert
-    // topmost defensively — see the note on _expansion's status listener.
+    // same anchor before runApp(); this just caches the anchor point so stage
+    // transitions can keep the corner pinned.
     _anchor = await resolveCornerAnchor();
     await windowManager.setAlwaysOnTop(true);
   }
 
-  Size _expandedSize() => panelExpandedSize;
-
-  void _onBoundsTick() {
-    final idleRect = anchoredRect(_anchor, panelIdleSize);
-    final previewRect = anchoredRect(_anchor, panelPreviewSize);
-    final expandedRect = anchoredRect(_anchor, _expandedSize());
-    final previewT = Curves.easeOutCubic.transform(_preview.value);
-    final expansionT = Curves.easeOutCubic.transform(_expansion.value);
-    final rect = _expansion.value > 0
-        ? Rect.lerp(previewRect, expandedRect, expansionT)!
-        : Rect.lerp(idleRect, previewRect, previewT)!;
-    windowManager.setBounds(rect);
+  Future<void> _setNativePanelStage(DesktopDropPanelStage stage) async {
+    final generation = ++_geometryGeneration;
+    await windowManager.setBounds(
+      anchoredRect(_anchor, panelSizeForStage(stage)),
+    );
+    if (generation == _geometryGeneration) {
+      await windowManager.setAlwaysOnTop(true);
+    }
   }
 
   bool get _isTransferActive {
@@ -322,11 +301,9 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   void _onDragEntered() {
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
-    if (_visibility.value < 1) {
-      _visibility.forward();
-    }
-    _collapseTimer?.cancel();
-    _preview.forward();
+    unawaited(windowManager.setOpacity(1.0));
+    unawaited(_setNativePanelStage(DesktopDropPanelStage.dragging));
+    _visual.animateTo(0.5, curve: Curves.easeOutCubic);
   }
 
   void _onDragExited() {
@@ -341,15 +318,11 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   Future<void> _collapse() async {
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
-    if (_expansion.value > 0) {
-      await _expansion.reverse();
-    }
-    if (_preview.value > 0) {
-      await _preview.reverse();
-    }
+    await _visual.animateTo(0, curve: Curves.easeOutCubic);
     _hasStagedDrop = false;
     if (!mounted) return;
-    await _visibility.reverse();
+    await _setNativePanelStage(DesktopDropPanelStage.idle);
+    await windowManager.setOpacity(panelInvisibleOpacity);
   }
 
   void _scheduleAutoCollapse(Duration delay) {
@@ -384,8 +357,8 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     _terminalFailureShown = false;
     if (!mounted) return;
     setState(() => _hasStagedDrop = true);
-    _preview.forward();
-    _expansion.forward();
+    unawaited(_setNativePanelStage(DesktopDropPanelStage.staged));
+    _visual.animateTo(1, curve: Curves.easeOutCubic);
   }
 
   Future<void> _sendStagedFilesTo(DeviceModel device) async {
@@ -484,9 +457,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   void dispose() {
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
-    _visibility.dispose();
-    _preview.dispose();
-    _expansion.dispose();
+    _visual.dispose();
     _stagingController.dispose();
     super.dispose();
   }
@@ -511,12 +482,10 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
             onDragStateChanged: _handleDragStateChanged,
             onDropped: _handleDroppedPaths,
             child: AnimatedBuilder(
-              animation: Listenable.merge([_preview, _expansion]),
+              animation: _visual,
               builder: (context, _) {
-                final previewT = Curves.easeOutCubic.transform(_preview.value);
-                final expansionT = Curves.easeOutCubic.transform(
-                  _expansion.value,
-                );
+                final previewT = (_visual.value * 2).clamp(0.0, 1.0);
+                final expansionT = ((_visual.value - 0.5) * 2).clamp(0.0, 1.0);
                 return Stack(
                   fit: StackFit.expand,
                   children: [

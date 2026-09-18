@@ -18,6 +18,29 @@ void main() {
     expect(panelShouldExpand(isDragging: false, hasStagedFiles: true), isTrue);
   });
 
+  test('stage policy keeps hover compact and terminal states idle', () {
+    expect(
+      panelStageForState(isDragging: true, hasStagedFiles: false),
+      DesktopDropPanelStage.dragging,
+    );
+    expect(
+      panelStageForState(isDragging: true, hasStagedFiles: false),
+      isNot(DesktopDropPanelStage.staged),
+    );
+    expect(
+      panelStageForState(isDragging: false, hasStagedFiles: false),
+      DesktopDropPanelStage.idle,
+    );
+    expect(
+      panelStageForState(
+        isDragging: false,
+        hasStagedFiles: true,
+        terminal: true,
+      ),
+      DesktopDropPanelStage.idle,
+    );
+  });
+
   test('panel width grows with phones but stays within bounds', () {
     expect(panelWidthForDeviceCount(0), 560);
     expect(panelWidthForDeviceCount(2), greaterThan(560));
