@@ -14,6 +14,14 @@ void main() {
     expect(
       estimateRemaining(
         sentBytes: 50,
+        totalBytes: 0,
+        speedBytesPerSec: 10,
+      ),
+      isNull,
+    );
+    expect(
+      estimateRemaining(
+        sentBytes: 50,
         totalBytes: 100,
         speedBytesPerSec: 0.833333,
       ),
