@@ -7,22 +7,15 @@ import 'package:catshare_gui/services/desktop_drop_panel_service.dart';
 void main() {
   test('only staged files expand the panel', () {
     expect(panelDropTargetSize, const Size(360, 150));
-    expect(panelExpandedSize.width, lessThan(560));
-    expect(panelExpandedSize.height, lessThan(340));
+    expect(panelExpandedSize, const Size(390, 300));
+    expect(panelSizeForStage(DesktopDropPanelStage.idle), panelDropTargetSize);
     expect(
-      panelShouldExpand(
-        isDragging: true,
-        hasStagedFiles: false,
-      ),
-      isFalse,
+      panelSizeForStage(DesktopDropPanelStage.dragging),
+      panelDropTargetSize,
     );
-    expect(
-      panelShouldExpand(
-        isDragging: false,
-        hasStagedFiles: true,
-      ),
-      isTrue,
-    );
+    expect(panelSizeForStage(DesktopDropPanelStage.staged), panelExpandedSize);
+    expect(panelShouldExpand(isDragging: true, hasStagedFiles: false), isFalse);
+    expect(panelShouldExpand(isDragging: false, hasStagedFiles: true), isTrue);
   });
 
   test('panel width grows with phones but stays within bounds', () {
