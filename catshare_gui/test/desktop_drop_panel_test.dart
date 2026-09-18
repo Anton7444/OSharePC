@@ -2,9 +2,39 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
 import 'package:catshare_gui/models/models.dart';
 import 'package:catshare_gui/pages/desktop_drop_panel.dart';
+import 'package:catshare_gui/config/language.dart';
 import 'package:catshare_gui/services/desktop_drop_panel_service.dart';
+import 'package:catshare_gui/services/bridge_client.dart';
+import 'package:catshare_gui/services/outgoing_staging_controller.dart';
+import 'package:catshare_gui/widgets/native_drop_zone.dart';
 
 void main() {
+  testWidgets('failed staged cancel keeps panel open without sending', (
+    tester,
+  ) async {
+    final client = BridgeClient(manageBackend: false);
+    final staging = _FakeStagingController(client);
+    await tester.pumpWidget(MaterialApp(
+      home: DesktopDropPanelPage(
+        client: client,
+        language: AppLanguage.english,
+        stagingController: staging,
+      ),
+    ));
+    final zone = tester.widget<NativeDropZone>(find.byType(NativeDropZone));
+    staging.activate();
+    zone.onDropped?.call(<String>[]);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const ValueKey('desktop-drop-cancel-staged')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('desktop-drop-cancel-staged')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('desktop-drop-cancel-staged')), findsOneWidget);
+    expect(staging.clearCalls, 1);
+    expect(staging.sendCalls, 0);
+    client.dispose();
+  });
+
   test('only staged files expand the panel', () {
     expect(panelDropTargetSize, const Size(360, 150));
     expect(panelExpandedSize, const Size(390, 300));
@@ -106,4 +136,18 @@ void main() {
       );
     },
   );
+}
+
+class _FakeStagingController extends OutgoingStagingController {
+  _FakeStagingController(BridgeClient client) : super(bridgeClient: client);
+  bool active = false;
+  int clearCalls = 0;
+  int sendCalls = 0;
+  void activate() { active = true; notifyListeners(); }
+  @override List<String> get selectedFiles => const ['C:/photo.jpg'];
+  @override int get totalCount => 1;
+  @override int get totalBytes => 12;
+  @override bool get hasValidStagedSelection => active;
+  @override Future<bool> addPaths(List<String> paths, {AppLanguage language = AppLanguage.english}) async { active = true; notifyListeners(); return true; }
+  @override Future<bool> clear({AppLanguage language = AppLanguage.english}) async { clearCalls++; return false; }
 }
