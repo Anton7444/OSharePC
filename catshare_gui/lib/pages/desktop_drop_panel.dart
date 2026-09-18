@@ -270,6 +270,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   bool _clearAfterTransfer = false;
   bool _clearInFlight = false;
   bool _terminalFailureShown = false;
+  bool _terminalStatusShown = false;
   bool _terminalCleanupAttempted = false;
   bool _selectionSyncPending = false;
 
@@ -408,6 +409,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     }
 
     _terminalFailureShown = false;
+    _terminalStatusShown = false;
     _terminalCleanupAttempted = false;
     if (!mounted) return;
     _collapseGeneration++;
@@ -508,6 +510,15 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               ? error
               : appText(widget.language, 'desktopDropSendFailed'),
         );
+      });
+    }
+    if (transfer.phase != 'failed' && !_terminalStatusShown) {
+      _terminalStatusShown = true;
+      final message = transfer.phase == 'completed'
+          ? appText(widget.language, 'desktopDropTransferCompleted')
+          : appText(widget.language, 'desktopDropTransferCancelled');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showMessage(message);
       });
     }
 
