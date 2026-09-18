@@ -75,6 +75,13 @@ void main() {
     expect(fileNameForPath('/tmp/archive.zip'), 'archive.zip');
   });
 
+  test('cancel policy never arms transfer cleanup', () {
+    // Manual cancellation must remain a local staging operation. In
+    // particular, a failed clear must not trigger another clear/collapse from
+    // terminal transfer-state handling, and it must never send a device.
+    expect(manualCancelArmsTransferCleanup, isFalse);
+  });
+
   test(
     'panel mode is detected from the environment when Dart loses runner args',
     () {

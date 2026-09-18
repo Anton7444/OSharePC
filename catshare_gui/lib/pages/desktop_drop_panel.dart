@@ -27,6 +27,11 @@ const _cornerMargin = 16.0;
 
 enum DesktopDropPanelStage { idle, dragging, staged }
 
+// Manual cancellation is independent from post-transfer cleanup. Keeping this
+// policy explicit prevents a failed clear from being retried by terminal-state
+// handling during the next build.
+const manualCancelArmsTransferCleanup = false;
+
 String fileNameForPath(String path) {
   final normalized = path.replaceAll('\\', '/');
   final parts = normalized.split('/');
@@ -414,13 +419,18 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
 
   Future<void> _cancelStagedDrop() async {
     if (_isTransferActive || !_hasStagedDrop || _clearInFlight) return;
-    final cleared = await _clearStagedFiles();
+    final cleared = await _clearStagedFiles(
+      armTransferCleanup: manualCancelArmsTransferCleanup,
+    );
     if (!mounted || !cleared) return;
     setState(() => _selectedAddress = null);
     await _collapse();
   }
 
-  Future<bool> _clearStagedFiles({bool reportFailure = true}) async {
+  Future<bool> _clearStagedFiles({
+    bool reportFailure = true,
+    bool armTransferCleanup = true,
+  }) async {
     if (_clearInFlight) return false;
     _clearInFlight = true;
     var cleared = false;
@@ -428,7 +438,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       cleared = await _stagingController.clear(language: widget.language);
       if (mounted) {
         setState(() {
-          _clearAfterTransfer = !cleared;
+          if (armTransferCleanup) _clearAfterTransfer = !cleared;
           if (cleared) {
             _terminalFailureShown = false;
           }
