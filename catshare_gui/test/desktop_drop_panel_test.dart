@@ -81,11 +81,7 @@ void main() {
     // terminal transfer-state handling, and it must never send a device.
     expect(manualCancelArmsTransferCleanup, isFalse);
     expect(
-      transferCleanupArmedAfterClear(
-        armTransferCleanup: false,
-        cleared: false,
-        wasArmed: true,
-      ),
+      manualCancelCleanupState(wasArmed: true, cleared: false),
       isFalse,
     );
   });

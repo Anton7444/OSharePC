@@ -32,11 +32,10 @@ enum DesktopDropPanelStage { idle, dragging, staged }
 // handling during the next build.
 const manualCancelArmsTransferCleanup = false;
 
-bool transferCleanupArmedAfterClear({
-  required bool armTransferCleanup,
-  required bool cleared,
-  required bool wasArmed,
-}) => armTransferCleanup ? !cleared : false;
+// Runtime transition used by the manual-cancel path. It deliberately clears
+// an already-armed flag even when the bridge clear fails.
+bool manualCancelCleanupState({required bool wasArmed, required bool cleared}) =>
+    false;
 
 String fileNameForPath(String path) {
   final normalized = path.replaceAll('\\', '/');
@@ -444,11 +443,12 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       cleared = await _stagingController.clear(language: widget.language);
       if (mounted) {
         setState(() {
-          _clearAfterTransfer = transferCleanupArmedAfterClear(
-            armTransferCleanup: armTransferCleanup,
-            cleared: cleared,
-            wasArmed: _clearAfterTransfer,
-          );
+          _clearAfterTransfer = armTransferCleanup
+              ? !cleared
+              : manualCancelCleanupState(
+                  wasArmed: _clearAfterTransfer,
+                  cleared: cleared,
+                );
           if (cleared) {
             _terminalFailureShown = false;
           }
