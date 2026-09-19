@@ -1,9 +1,10 @@
+using System.Collections.Concurrent;
 using CatShareSender.Ui;
 
 namespace CatShareSender;
 
 /// <summary>Glues scanner, advertiser, GATT link, transfer server, and receive engine together.</summary>
-public sealed class SenderEngine : IDisposable
+public sealed class SenderEngine : IDisposable, IAsyncDisposable
 {
     public const int DefaultPort = 8959;
 
@@ -29,6 +30,9 @@ public sealed class SenderEngine : IDisposable
     private CancellationTokenSource? _sendCts;
     private CancellationTokenSource? _catShareReceiveCts;
     private CancellationTokenSource? _devicePruneCts;
+    private readonly ConcurrentDictionary<string, string> _lanPeerIps = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private int _disposed;
     public bool ReceiveEnabled { get; private set; } = true;
 
     public event Action<string, string>? TransferStateChanged;   // (taskId, state)
@@ -60,13 +64,17 @@ public sealed class SenderEngine : IDisposable
         Server.DownloadStarted += taskId => TransferStateChanged?.Invoke(taskId, "phone is downloading");
         Server.DownloadProgress += (sent, total) =>
             TransferStateChanged?.Invoke(_staged?.TaskId ?? "?", $"{sent}/{total}");
+        // HTTP body completion only means Windows finished writing bytes.
+        // Receiver success is authoritative only after the phone sends status type=1.
         Server.DownloadFinished += taskId =>
-        {
-            TransferStateChanged?.Invoke(taskId, "download complete");
-            if (_staged?.TaskId == taskId) _staged.Complete = true;
-        };
+            TransferStateChanged?.Invoke(taskId, "upload stream complete — waiting for phone confirmation");
         Server.StatusReceived += (taskId, type, reason) =>
+        {
+            if (type == 1 && _staged?.TaskId == taskId) _staged.Complete = true;
             TransferStateChanged?.Invoke(taskId, $"status {type}: {reason}");
+        };
+        Server.TransferFailed += (taskId, reason) =>
+            TransferStateChanged?.Invoke(taskId, $"send failed: {reason}");
 
         // Stock OEM 互传 Receiver wiring
         Receiver.StateChanged += state => TransferStateChanged?.Invoke("", $"receive: {state}");
@@ -111,6 +119,7 @@ public sealed class SenderEngine : IDisposable
 
     public async Task StartAsync(int port)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         Lan = LanInfo.Detect() ?? throw new InvalidOperationException(
             "No LAN adapter with a default gateway found — connect this PC to the same Wi-Fi router as the phone.");
         Port = port;
@@ -164,6 +173,11 @@ public sealed class SenderEngine : IDisposable
         try
         {
             LanDisc = new LanDiscovery(Lan.MacHex12) { LanIp = Lan.IpString, DeviceName = Advertiser.DeviceName };
+            LanDisc.DeviceAnnounced += (ip, _, pdid, _, _) =>
+            {
+                if (!string.IsNullOrWhiteSpace(pdid))
+                    _lanPeerIps[pdid.Replace(":", "").ToUpperInvariant()] = ip;
+            };
             LanDisc.Start();
         }
         catch (Exception ex)
@@ -260,7 +274,7 @@ public sealed class SenderEngine : IDisposable
         Advertiser.Stop();
         Receiver.Stop();
         LanDisc?.Dispose();
-        CatShareReceiveGatt.Dispose();
+        CatShareReceiveGatt.Stop();
         FallbackAdvertiser.Stop();
         await Hotspot.StopAsync();
         await Server.StopAsync();
@@ -286,6 +300,7 @@ public sealed class SenderEngine : IDisposable
         task.ComputeSize();
         _staged = task;
         Server.SetTask(task);
+        PreparedCrcCache.Begin(task.Files);
         Log.Info($"staged {task.FileCount} file(s), {task.TotalSize} bytes, taskId={task.TaskId}");
         foreach (var f in task.Files)
             Log.Info($"  {f}");
@@ -301,6 +316,11 @@ public sealed class SenderEngine : IDisposable
 
     public async Task SendToAsync(PhoneDevice device, SendFlow flow = SendFlow.Auto)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (!await _sendGate.WaitAsync(0))
+            throw new InvalidOperationException("A transfer is already running.");
+        try
+        {
         if (_staged is null)
             throw new InvalidOperationException("No files staged to send.");
 
@@ -310,13 +330,118 @@ public sealed class SenderEngine : IDisposable
         using var transferCts = new CancellationTokenSource();
         _sendCts = transferCts;
         var ct = transferCts.Token;
-        try
+        // OnePlus Share only promotes a peer after its common BLE parser has a
+        // complete ScanRecord. Windows splits ADV + SCAN_RSP, so wait for our
+        // reconstructed complete record and never retry a stale BLE address blindly.
+        Task? hotspotPrewarmTask = null;
+        if (flow == SendFlow.CatShareHotspot || device.Kind == PhoneKind.CatShare)
         {
-        TransferStateChanged?.Invoke(_staged.TaskId, $"connecting to {device.Name} ({device.AddressStr})…");
+            Log.Info("Hotspot: pre-warming mobile hotspot concurrently with BLE connection...");
+            hotspotPrewarmTask = Hotspot.EnsureStartedAsync();
+        }
 
-        // GattLink treats Auto as "enumerate BOTH services (9999 + 9955)"; the
-        // capability-based resolution below then picks the flow.
-        using var link = await GattLink.ConnectAsync(device.Address, flow, 3, s => TransferStateChanged?.Invoke(_staged.TaskId, s), ct);
+        GattLink? connectedLink = null;
+        Exception? lastConnectError = null;
+        DateTimeOffset? requireAdvertisementNewerThan = null;
+
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            var wait = attempt == 1 ? TimeSpan.FromSeconds(6) : TimeSpan.FromSeconds(8);
+            TransferStateChanged?.Invoke(
+                _staged.TaskId,
+                attempt == 1
+                    ? $"waiting for {device.Name} complete BLE advertisement…"
+                    : $"waiting for {device.Name} to advertise a fresh ready session…");
+
+            var candidate = await Scanner.WaitForConnectableAsync(
+                device,
+                wait,
+                requireAdvertisementNewerThan,
+                ct);
+            device = candidate;
+
+            TransferStateChanged?.Invoke(
+                _staged.TaskId,
+                $"connecting to {candidate.Name} ({candidate.AddressStr}), advertisement generation {attempt}/3…");
+
+            try
+            {
+                if (flow == SendFlow.Auto)
+                {
+                    try
+                    {
+                        // Phones that support the iOS/OConnect path stay on the fast
+                        // pure-LAN 9999 flow used by existing working devices.
+                        connectedLink = await GattLink.ConnectAsync(
+                            candidate.Address,
+                            SendFlow.OConnectLan,
+                            1,
+                            s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                            ct,
+                            candidate.AddressType);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception oconnectEx)
+                    {
+                        // Some OnePlus tablets advertise the normal alliance record and
+                        // accept the BLE link, but tear down the iOS/common 9999 probe
+                        // before Windows can discover it. The stock Android path is the
+                        // separate 9955 service, which the tablet also creates. Reconnect
+                        // explicitly through 9955 instead of treating 9999 Unreachable as
+                        // proof that the whole GATT peer is unusable.
+                        lastConnectError = oconnectEx;
+                        Log.Warn($"BLE: OConnect 9999 unavailable on {candidate.AddressStr} ({oconnectEx.Message}); " +
+                                 "trying stock alliance 9955 fallback");
+                        TransferStateChanged?.Invoke(
+                            _staged.TaskId,
+                            $"OConnect unavailable on {candidate.Name}; trying stock 互传 BLE service…");
+
+                        // Let Android finish the first GATT disconnect before Windows
+                        // creates a fresh client for the stock service.
+                        await Task.Delay(250, ct);
+                        connectedLink = await GattLink.ConnectAsync(
+                            candidate.Address,
+                            SendFlow.CatShareHotspot,
+                            1,
+                            s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                            ct,
+                            candidate.AddressType);
+                        Log.Info($"BLE: stock alliance 9955 fallback connected to {candidate.AddressStr}");
+                    }
+                }
+                else
+                {
+                    connectedLink = await GattLink.ConnectAsync(
+                        candidate.Address,
+                        flow,
+                        1,
+                        s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                        ct,
+                        candidate.AddressType);
+                }
+                break;
+            }
+            catch (Exception ex) when (attempt < 3)
+            {
+                lastConnectError = ex;
+                requireAdvertisementNewerThan = candidate.LastCompleteAdvertisement;
+                Log.Warn($"BLE: GATT for {candidate.AddressStr} was not ready ({ex.Message}); " +
+                         "waiting for a fresh complete OnePlus advertisement before retrying");
+            }
+            catch (Exception ex)
+            {
+                lastConnectError = ex;
+            }
+        }
+
+        if (connectedLink is null)
+            throw new InvalidOperationException(
+                $"BLE: phone never exposed a connectable GATT session after fresh advertisements — {lastConnectError?.Message}");
+
+        using var link = connectedLink;
         _crypto ??= new OShareCrypto();
 
         var resolvedFlow = flow switch
@@ -335,6 +460,16 @@ public sealed class SenderEngine : IDisposable
 
             TransferStateChanged?.Invoke(_staged.TaskId, "OConnect transfer starting…");
             Server.PeerLooksStock = true;   // OConnect peers are stock 互传 receivers
+            string? expectedPeerIp = null;
+            if (device.DeviceId.Length >= 12)
+                _lanPeerIps.TryGetValue(device.DeviceId[..12].ToUpperInvariant(), out expectedPeerIp);
+
+            // Arm only after a real GATT session has been established and the stock
+            // OConnect path was selected, but before state1/state3 can make the phone
+            // open the WebSocket. This removes the race where the phone could reach
+            // /websocket before the old lazy phoneConnected callback armed the task.
+            Server.ArmTransfer(_staged, Lan.IpString, expectedPeerIp);
+
             await link.OConnectLanSendAsync(
                 Lan,
                 Port,
@@ -343,6 +478,7 @@ public sealed class SenderEngine : IDisposable
                 _staged.FileCount,
                 s => TransferStateChanged?.Invoke(_staged.TaskId, s),
                 phoneConnected: () => Server.WsConnected || _staged.Complete,
+                waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
                 ct: ct);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
             return;
@@ -356,12 +492,24 @@ public sealed class SenderEngine : IDisposable
         // The CatShare app parses every WebSocket frame strictly and dies on the raw
         // 'files' trigger — only stock peers may receive it.
         Server.PeerLooksStock = !endpoint.IsCatShare;
-        await Hotspot.EnsureStartedAsync();
+        if (hotspotPrewarmTask != null)
+        {
+            await hotspotPrewarmTask;
+        }
+        else
+        {
+            await Hotspot.EnsureStartedAsync();
+        }
         TransferStateChanged?.Invoke(_staged.TaskId,
             $"hotspot '{Hotspot.Ssid}' up — the phone will switch Wi-Fi to it");
 
+        Server.ArmTransfer(_staged, string.IsNullOrWhiteSpace(Hotspot.GatewayIp) ? null : Hotspot.GatewayIp);
+        var credentialMode = endpoint.IsCatShare
+            ? CredentialMode.CatShareLan
+            : CredentialMode.StockAlliance;
+        Log.Info($"BLE: using {(endpoint.IsCatShare ? "CatShare" : "stock alliance")} 9955 credentials");
         await link.SendCredentialsAsync(
-            endpoint, CredentialMode.CatShareLan, endpoint.Status, Lan, Port, _crypto, SenderId,
+            endpoint, credentialMode, endpoint.Status, Lan, Port, _crypto, SenderId,
             freq: 0,
             ssidOverride: Hotspot.Ssid,
             pskOverride: Hotspot.Psk,
@@ -371,12 +519,16 @@ public sealed class SenderEngine : IDisposable
         finally
         {
             _sendCts = null;
+            _sendGate.Release();
         }
         TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} — waiting for the phone to connect");
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        CancelTransfer();
+        await StopAsync();
         _devicePruneCts?.Cancel();
         _devicePruneCts?.Dispose();
         _devicePruneCts = null;
@@ -388,6 +540,8 @@ public sealed class SenderEngine : IDisposable
         FallbackAdvertiser.Dispose();
         await Hotspot.StopAsync();
         await Server.DisposeAsync();
+        _crypto?.Dispose();
+        _sendGate.Dispose();
     }
 
     private async Task PullIncomingCatShareAsync(CatShareP2pOffer offer)
@@ -425,12 +579,9 @@ public sealed class SenderEngine : IDisposable
         finally { _catShareReceiveCts = null; }
     }
 
-    public void Dispose()
-    {
-        _ = Task.Run(async () =>
-        {
-            try { await DisposeAsync(); }
-            catch (Exception ex) { Log.Warn($"DisposeAsync faulted: {ex.Message}"); }
-        });
-    }
+    /// <summary>Blocks until async cleanup (sockets/GATT sessions/hotspot/firewall
+    /// processes) actually completes, so a synchronous `using` caller can't proceed
+    /// while those resources are still torn down in the background. Prefer
+    /// `await using`/`DisposeAsync()` directly where an async context is available.</summary>
+    public void Dispose() => DisposeAsync().GetAwaiter().GetResult();
 }

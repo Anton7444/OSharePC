@@ -67,7 +67,8 @@ class OutgoingStagingController extends ChangeNotifier {
     AppLanguage language = AppLanguage.english,
   }) async {
     final transfer = bridgeClient.transferState;
-    final isTransferActive = transfer.active &&
+    final isTransferActive =
+        transfer.active &&
         !const ['completed', 'failed', 'cancelled'].contains(transfer.phase);
     if (isTransferActive) {
       _stagingError = appText(language, 'dragDropUnavailable');
@@ -79,7 +80,10 @@ class OutgoingStagingController extends ChangeNotifier {
     for (final raw in rawPaths) {
       if (raw.isEmpty) continue;
       try {
-        final type = FileSystemEntity.typeSync(raw);
+        // Async type()/list() hand the syscalls off instead of blocking this
+        // isolate's event loop — typeSync()/listSync() on a large dropped
+        // folder used to freeze the whole window until the scan finished.
+        final type = await FileSystemEntity.type(raw);
         if (type == FileSystemEntityType.file) {
           final normalized = p.normalize(raw);
           if (!containsCanonical(proposed, normalized)) {
@@ -87,7 +91,10 @@ class OutgoingStagingController extends ChangeNotifier {
           }
         } else if (type == FileSystemEntityType.directory) {
           final dir = Directory(raw);
-          for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+          await for (final entity in dir.list(
+            recursive: true,
+            followLinks: false,
+          )) {
             if (entity is File) {
               final normalized = p.normalize(entity.path);
               if (!containsCanonical(proposed, normalized)) {
@@ -193,11 +200,9 @@ class OutgoingStagingController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> clear({
-    AppLanguage language = AppLanguage.english,
-  }) async {
+  Future<bool> clear({AppLanguage language = AppLanguage.english}) async {
     if (_selectedFiles.isEmpty && _stagedResult == null) {
-      return;
+      return true;
     }
 
     final currentSeq = ++_requestSeq;
@@ -207,20 +212,23 @@ class OutgoingStagingController extends ChangeNotifier {
 
     try {
       final result = await bridgeClient.stageFiles([]);
-      if (currentSeq != _requestSeq) return;
+      if (currentSeq != _requestSeq) return false;
       _isStaging = false;
       if (result != null) {
         _selectedFiles.clear();
         _stagedResult = null;
         _stagingError = null;
+        notifyListeners();
+        return true;
       } else {
         _stagingError = appText(language, 'stagingFailed');
       }
     } catch (e) {
-      if (currentSeq != _requestSeq) return;
+      if (currentSeq != _requestSeq) return false;
       _isStaging = false;
       _stagingError = appText(language, 'stagingFailed');
     }
     notifyListeners();
+    return false;
   }
 }

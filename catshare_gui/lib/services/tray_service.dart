@@ -8,8 +8,9 @@ import 'notification_service.dart';
 
 class TrayService with TrayListener, WindowListener {
   final BridgeClient bridgeClient;
+  final Future<void> Function()? onExitCleanup;
 
-  TrayService({required this.bridgeClient});
+  TrayService({required this.bridgeClient, this.onExitCleanup});
 
   Future<void> setStartHidden(bool hidden) async {
     if (hidden) await windowManager.hide();
@@ -85,6 +86,9 @@ class TrayService with TrayListener, WindowListener {
   }
 
   Future<void> _exitApplication() async {
+    if (onExitCleanup != null) {
+      await onExitCleanup!();
+    }
     try {
       await bridgeClient.shutdownBackend();
     } catch (_) {}

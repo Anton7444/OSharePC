@@ -39,6 +39,11 @@ public sealed class TransferTask
                 Log.Warn($"staging: could not read size for '{f}': {ex.Message}");
             }
         }
+
+        // STORED ZIP requires CRC/size in the local header before the first payload
+        // byte. Start that work immediately after file selection so it overlaps BLE
+        // discovery, GATT negotiation and the user's Accept interaction.
+        PreparedCrcCache.Begin(Files);
     }
 
     /// <summary>sendRequest body per pa/d.java (TaskInfo) + CatShare receiver expectations.</summary>

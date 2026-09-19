@@ -13,16 +13,24 @@ class SettingsTab extends StatefulWidget {
   final BridgeClient client;
   final ThemeMode currentThemeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
+  final AccentPreset currentAccent;
+  final ValueChanged<AccentPreset> onAccentChanged;
   final AppLanguage currentLanguage;
   final ValueChanged<AppLanguage> onLanguageChanged;
+  final bool desktopDropTargetEnabled;
+  final ValueChanged<bool> onDesktopDropTargetChanged;
 
   const SettingsTab({
     super.key,
     required this.client,
     required this.currentThemeMode,
     required this.onThemeChanged,
+    required this.currentAccent,
+    required this.onAccentChanged,
     required this.currentLanguage,
     required this.onLanguageChanged,
+    required this.desktopDropTargetEnabled,
+    required this.onDesktopDropTargetChanged,
   });
 
   @override
@@ -30,7 +38,7 @@ class SettingsTab extends StatefulWidget {
 }
 
 class _SettingsTabState extends State<SettingsTab> {
-  static const _guiVersion = '2026.09.06-2300';
+  static const _guiVersion = '1.0';
   bool _minimizeToTray = true;
   bool _closeToTray = true;
   bool _launchAtStartup = false;
@@ -70,6 +78,7 @@ class _SettingsTabState extends State<SettingsTab> {
   Future<void> _loadTrayPrefs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
       setState(() {
         _minimizeToTray = prefs.getBool('minimize_to_tray') ?? true;
         _closeToTray = prefs.getBool('close_to_tray') ?? true;
@@ -409,6 +418,34 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
             SwitchListTile(
               title: Text(
+                appText(widget.currentLanguage, 'desktopDropTarget'),
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+              subtitle: Text(
+                appText(widget.currentLanguage, 'desktopDropTargetHint'),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isDark
+                      ? AppColors.darkTextMuted
+                      : AppColors.lightTextMuted,
+                ),
+              ),
+              value: widget.desktopDropTargetEnabled,
+              activeThumbColor: isDark
+                  ? AppColors.darkAccent
+                  : AppColors.lightAccent,
+              onChanged: widget.onDesktopDropTargetChanged,
+            ),
+            Divider(
+              height: 1,
+              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+            ),
+            SwitchListTile(
+              title: Text(
                 appText(widget.currentLanguage, 'receiveSuccessNotification'),
                 style: TextStyle(
                   fontSize: 14,
@@ -492,6 +529,54 @@ class _SettingsTabState extends State<SettingsTab> {
                     ],
                     selected: widget.currentThemeMode,
                     onSelected: widget.onThemeChanged,
+                  ),
+                ],
+              ),
+            ),
+            Divider(
+              height: 1,
+              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          appText(widget.currentLanguage, 'accentColor'),
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: isDark
+                                ? AppColors.darkText
+                                : AppColors.lightText,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          appText(widget.currentLanguage, 'accentColorHint'),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      for (final preset in AppColors.accentPresets)
+                        _buildAccentSwatch(preset, isDark),
+                    ],
                   ),
                 ],
               ),
@@ -627,6 +712,45 @@ class _SettingsTabState extends State<SettingsTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: children,
+      ),
+    );
+  }
+
+  Widget _buildAccentSwatch(AccentPreset preset, bool isDark) {
+    final color = isDark ? preset.dark : preset.light;
+    final isSelected = preset.name == widget.currentAccent.name;
+
+    return Tooltip(
+      message: appText(widget.currentLanguage, 'accent${preset.name}'),
+      child: GestureDetector(
+        onTap: () => widget.onAccentChanged(preset),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isSelected
+                  ? (isDark ? AppColors.darkText : AppColors.lightText)
+                  : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          alignment: Alignment.center,
+          child: isSelected
+              ? Icon(
+                  Icons.check,
+                  size: 15,
+                  color:
+                      ThemeData.estimateBrightnessForColor(color) ==
+                          Brightness.dark
+                      ? Colors.white
+                      : Colors.black87,
+                )
+              : null,
+        ),
       ),
     );
   }

@@ -14,26 +14,36 @@ void main() {
   ) async {
     final client = BridgeClient(manageBackend: false);
     final staging = _FakeStagingController(client);
-    await tester.pumpWidget(MaterialApp(
-      home: DesktopDropPanelPage(
-        client: client,
-        language: AppLanguage.english,
-        stagingController: staging,
-        sendToDeviceOverride: (_) async {
-          staging.sendCalls++;
-          return true;
-        },
+    await tester.pumpWidget(
+      MaterialApp(
+        home: DesktopDropPanelPage(
+          client: client,
+          language: AppLanguage.english,
+          stagingController: staging,
+          manageNativeWindowGeometry: false,
+          sendToDeviceOverride: (_) async {
+            staging.sendCalls++;
+            return true;
+          },
+        ),
       ),
-    ));
+    );
     final zone = tester.widget<NativeDropZone>(find.byType(NativeDropZone));
     staging.activate();
     zone.onDropped?.call(<String>[]);
     await tester.pump();
+    await tester.pumpAndSettle();
     await tester.pump(const Duration(milliseconds: 250));
-    expect(find.byKey(const ValueKey('desktop-drop-cancel-staged')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('desktop-drop-cancel-staged')),
+      findsOneWidget,
+    );
     await tester.tap(find.byKey(const ValueKey('desktop-drop-cancel-staged')));
     await tester.pump();
-    expect(find.byKey(const ValueKey('desktop-drop-cancel-staged')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('desktop-drop-cancel-staged')),
+      findsOneWidget,
+    );
     expect(staging.clearCalls, 1);
     expect(staging.sendCalls, 0);
     client.dispose();
@@ -41,13 +51,17 @@ void main() {
 
   test('only staged files expand the panel', () {
     expect(panelDropTargetSize, const Size(360, 150));
-    expect(panelExpandedSize, const Size(390, 300));
+    expect(panelExpandedSize, const Size(400, 280));
     expect(panelSizeForStage(DesktopDropPanelStage.idle), panelDropTargetSize);
     expect(
       panelSizeForStage(DesktopDropPanelStage.dragging),
       panelDropTargetSize,
     );
     expect(panelSizeForStage(DesktopDropPanelStage.staged), panelExpandedSize);
+    expect(
+      panelSizeForStage(DesktopDropPanelStage.staged, deviceCount: 2),
+      const Size(640, 280),
+    );
     expect(panelShouldExpand(isDragging: true, hasStagedFiles: false), isFalse);
     expect(panelShouldExpand(isDragging: false, hasStagedFiles: true), isTrue);
   });
@@ -76,9 +90,9 @@ void main() {
   });
 
   test('panel width grows with phones but stays within bounds', () {
-    expect(panelWidthForDeviceCount(0), 560);
+    expect(panelWidthForDeviceCount(0), 400);
     expect(panelWidthForDeviceCount(2), greaterThan(560));
-    expect(panelWidthForDeviceCount(20), 960);
+    expect(panelWidthForDeviceCount(20), 720);
   });
 
   test('selected device falls back to the first remaining device', () {
@@ -100,7 +114,8 @@ void main() {
     );
 
     expect(resolveSelectedDevice([first, second], 'b')?.address, 'b');
-    expect(resolveSelectedDevice([first], 'b')?.address, 'a');
+    expect(resolveSelectedDevice([first], 'b'), isNull);
+    expect(resolveSelectedDevice([first], null), isNull);
     expect(resolveSelectedDevice([], 'b'), isNull);
   });
 
@@ -114,10 +129,7 @@ void main() {
     // particular, a failed clear must not trigger another clear/collapse from
     // terminal transfer-state handling, and it must never send a device.
     expect(manualCancelArmsTransferCleanup, isFalse);
-    expect(
-      manualCancelCleanupState(wasArmed: true, cleared: false),
-      isFalse,
-    );
+    expect(manualCancelCleanupState(wasArmed: true, cleared: false), isFalse);
   });
 
   test(
@@ -140,6 +152,45 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'drag visual feedback uses square animation style without circle ball',
+    (tester) async {
+      final client = BridgeClient(manageBackend: false);
+      final staging = _FakeStagingController(client);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DesktopDropPanelPage(
+            client: client,
+            language: AppLanguage.english,
+            stagingController: staging,
+          ),
+        ),
+      );
+
+      final squareTargetFinder = find.byKey(
+        const ValueKey('desktop-drop-square-target'),
+      );
+      expect(squareTargetFinder, findsOneWidget);
+
+      final container = tester.widget<Container>(squareTargetFinder);
+      final decoration = container.decoration as BoxDecoration?;
+      expect(decoration, isNotNull);
+      expect(decoration!.shape, isNot(BoxShape.circle));
+      expect(decoration.shape, BoxShape.rectangle);
+      expect(decoration.borderRadius, isNotNull);
+
+      final renderBox = tester.renderObject<RenderBox>(squareTargetFinder);
+      expect(renderBox.size.width, renderBox.size.height);
+      expect(renderBox.size.width, 134.0);
+
+      client.dispose();
+    },
+  );
+
+  test('drop instructions allow a third wrapped line in the compact panel', () {
+    expect(desktopDropInstructionMaxLines, 3);
+  });
 }
 
 class _FakeStagingController extends OutgoingStagingController {
@@ -147,11 +198,32 @@ class _FakeStagingController extends OutgoingStagingController {
   bool active = false;
   int clearCalls = 0;
   int sendCalls = 0;
-  void activate() { active = true; notifyListeners(); }
-  @override List<String> get selectedFiles => const ['C:/photo.jpg'];
-  @override int get totalCount => 1;
-  @override int get totalBytes => 12;
-  @override bool get hasValidStagedSelection => active;
-  @override Future<bool> addPaths(List<String> paths, {AppLanguage language = AppLanguage.english}) async { active = true; notifyListeners(); return true; }
-  @override Future<bool> clear({AppLanguage language = AppLanguage.english}) async { clearCalls++; return false; }
+  void activate() {
+    active = true;
+    notifyListeners();
+  }
+
+  @override
+  List<String> get selectedFiles => const ['C:/photo.jpg'];
+  @override
+  int get totalCount => 1;
+  @override
+  int get totalBytes => 12;
+  @override
+  bool get hasValidStagedSelection => active;
+  @override
+  Future<bool> addPaths(
+    List<String> paths, {
+    AppLanguage language = AppLanguage.english,
+  }) async {
+    active = true;
+    notifyListeners();
+    return true;
+  }
+
+  @override
+  Future<bool> clear({AppLanguage language = AppLanguage.english}) async {
+    clearCalls++;
+    return false;
+  }
 }

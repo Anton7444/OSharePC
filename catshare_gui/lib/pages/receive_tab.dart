@@ -122,8 +122,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         decoration: BoxDecoration(
                           color: isEnabled
                               ? (isDark
-                                    ? const Color(0xFF1E3F35)
-                                    : const Color(0xFFD4EDE5))
+                                    ? AppColors.darkAccentSoft
+                                    : AppColors.lightAccentSoft)
                               : (isDark
                                     ? const Color(0xFF26332E)
                                     : const Color(0xFFE2EBE6)),
@@ -302,8 +302,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                     ),
                     decoration: BoxDecoration(
                       color: isDark
-                          ? const Color(0xFF1B382F)
-                          : const Color(0xFFE2F3EC),
+                          ? AppColors.darkAccentSoft
+                          : AppColors.lightAccentSoft,
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(
                         color: isDark
@@ -468,8 +468,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       : (transfer.phase == 'completed' ? 1 : null),
                   minHeight: 8,
                   backgroundColor: isDark
-                      ? const Color(0xFF243932)
-                      : const Color(0xFFE2EBE6),
+                      ? AppColors.darkAccentSoft
+                      : AppColors.lightAccentSoft,
                   color: transfer.phase == 'failed'
                       ? Colors.redAccent
                       : (isDark ? AppColors.darkAccent : AppColors.lightAccent),
@@ -560,9 +560,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         backgroundColor: isDark
                             ? AppColors.darkAccent
                             : AppColors.lightAccent,
-                        foregroundColor: isDark
-                            ? const Color(0xFF0F1E19)
-                            : Colors.white,
+                        foregroundColor: AppColors.onAccent(isDark),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
                         ),
@@ -627,8 +625,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                     height: 46,
                     decoration: BoxDecoration(
                       color: isDark
-                          ? const Color(0xFF1E3F35)
-                          : const Color(0xFFD4EDE5),
+                          ? AppColors.darkAccentSoft
+                          : AppColors.lightAccentSoft,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
@@ -675,8 +673,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: isDark
-                      ? const Color(0xFF182923)
-                      : const Color(0xFFEFF5F2),
+                      ? AppColors.darkAccentSubtle
+                      : AppColors.lightAccentSubtle,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
                     color: isDark
@@ -763,9 +761,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         backgroundColor: isDark
                             ? AppColors.darkAccent
                             : AppColors.lightAccent,
-                        foregroundColor: isDark
-                            ? const Color(0xFF0F1E19)
-                            : Colors.white,
+                        foregroundColor: AppColors.onAccent(isDark),
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),

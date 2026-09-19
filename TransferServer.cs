@@ -42,17 +42,98 @@ public sealed class TransferServer : IAsyncDisposable
     private volatile TransferTask? _activeTask;
     private CancellationTokenSource _cancelCts = new();
     private readonly object _cancelGate = new();
+    private string? _successfulTaskId;
+    private string? _reportedFailureTaskId;
+    private string? _locallyCancelledTaskId;
+
+    // A staged task is NOT remotely readable until the BLE credential flow arms it.
+    // Once a WebSocket peer claims the armed task, every /download request must come
+    // from the same IP. OConnect can additionally pin the expected LAN peer IP.
+    private readonly object _peerGate = new();
+    private string? _armedTaskId;
+    private IPAddress? _allowedLocalIp;
+    private IPAddress? _expectedPeerIp;
+    private IPAddress? _authorizedPeerIp;
 
     /// <summary>Raised when the phone accepts and the ZIP download begins.</summary>
     public event Action<string>? DownloadStarted;
     public event Action<long, long>? DownloadProgress;      // (sent, total)
-    public event Action<string>? DownloadFinished;          // taskId
+    public event Action<string>? DownloadFinished;          // taskId; HTTP body finished, not receiver success
     public event Action<string, int, string>? StatusReceived; // (taskId, type, reason)
+    public event Action<string, string>? TransferFailed;      // (taskId, reason)
 
-    public void SetTask(TransferTask? task) => _activeTask = task;
+    public void SetTask(TransferTask? task)
+    {
+        _activeTask = task;
+        DisarmTransfer(task is null ? "task cleared" : "new task staged");
+    }
+
+    private TaskCompletionSource<bool> _wsConnectedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async Task<bool> WaitForPeerConnectedAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        if (WsConnected) return true;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try
+        {
+            return await _wsConnectedTcs.Task.WaitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return WsConnected;
+        }
+    }
+
+    public void ArmTransfer(TransferTask task, string? allowedLocalIp = null, string? expectedPeerIp = null)
+    {
+        if (_activeTask?.TaskId != task.TaskId)
+            throw new InvalidOperationException("Cannot arm a transfer that is not the currently staged task.");
+
+        static IPAddress? Parse(string? value) =>
+            IPAddress.TryParse(value, out var ip) ? NormalizeIp(ip) : null;
+
+        lock (_peerGate)
+        {
+            _armedTaskId = task.TaskId;
+            _allowedLocalIp = Parse(allowedLocalIp);
+            _expectedPeerIp = Parse(expectedPeerIp);
+            _authorizedPeerIp = null;
+            _successfulTaskId = null;
+            _reportedFailureTaskId = null;
+            _locallyCancelledTaskId = null;
+            _wsConnectedTcs.TrySetResult(false);
+            _wsConnectedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        Log.Info($"TransferServer: armed task {task.TaskId}; local={_allowedLocalIp?.ToString() ?? "any"}; expectedPeer={_expectedPeerIp?.ToString() ?? "first-valid-peer"}");
+    }
+
+    internal void AuthorizeLoopbackTest(TransferTask task)
+    {
+        ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
+        lock (_peerGate)
+            _authorizedPeerIp = IPAddress.Loopback;
+        Log.Info($"TransferServer: loopback test authorization enabled for task {task.TaskId}");
+    }
+
+    public void DisarmTransfer(string reason = "disarmed")
+    {
+        lock (_peerGate)
+        {
+            _armedTaskId = null;
+            _allowedLocalIp = null;
+            _expectedPeerIp = null;
+            _authorizedPeerIp = null;
+            _wsConnectedTcs.TrySetResult(false);
+        }
+        WsConnected = false;
+        Log.Info($"TransferServer: {reason}");
+    }
 
     public void CancelActiveTransfer()
     {
+        lock (_peerGate)
+            _locallyCancelledTaskId = _activeTask?.TaskId;
         CancellationTokenSource old;
         lock (_cancelGate)
         {
@@ -60,10 +141,97 @@ public sealed class TransferServer : IAsyncDisposable
             _cancelCts = new CancellationTokenSource();
         }
         try { old.Cancel(); } finally { old.Dispose(); }
+        DisarmTransfer("active transfer cancelled");
         Log.Info("TransferServer: active transfer cancellation requested");
     }
 
-    public async Task StartAsync(int port)
+    private static IPAddress? NormalizeIp(IPAddress? ip) =>
+        ip?.IsIPv4MappedToIPv6 == true ? ip.MapToIPv4() : ip;
+
+    private bool IsSuccessful(string taskId)
+    {
+        lock (_peerGate) return _successfulTaskId == taskId;
+    }
+
+    private bool IsLocalCancellation(string taskId)
+    {
+        lock (_peerGate) return _locallyCancelledTaskId == taskId;
+    }
+
+    private void MarkSuccessful(string taskId)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? "";
+        if (string.IsNullOrWhiteSpace(taskId)) return;
+        lock (_peerGate)
+        {
+            _successfulTaskId = taskId;
+            _reportedFailureTaskId = null;
+        }
+    }
+
+    private void ReportTransferFailure(string taskId, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? "";
+        if (string.IsNullOrWhiteSpace(taskId)) return;
+        lock (_peerGate)
+        {
+            if (_successfulTaskId == taskId || _locallyCancelledTaskId == taskId || _reportedFailureTaskId == taskId)
+                return;
+            _reportedFailureTaskId = taskId;
+        }
+        Log.Warn($"TransferServer: remote transfer failed task={taskId}: {reason}");
+        try { TransferFailed?.Invoke(taskId, reason); } catch { }
+    }
+
+    private bool TryClaimWebSocketPeer(HttpContext ctx, TransferTask task)
+    {
+        var remote = NormalizeIp(ctx.Connection.RemoteIpAddress);
+        var local = NormalizeIp(ctx.Connection.LocalIpAddress);
+        if (remote is null || local is null) return false;
+
+        lock (_peerGate)
+        {
+            if (_armedTaskId != task.TaskId) return false;
+            if (_allowedLocalIp is not null && !_allowedLocalIp.Equals(local)) return false;
+            if (_expectedPeerIp is not null && !_expectedPeerIp.Equals(remote)) return false;
+
+            if (_authorizedPeerIp is null)
+            {
+                _authorizedPeerIp = remote;
+                Log.Info($"TransferServer: task {task.TaskId} claimed by peer {remote} via local {local}");
+                return true;
+            }
+            return _authorizedPeerIp.Equals(remote);
+        }
+    }
+
+    private bool IsAuthorizedDownloadPeer(HttpContext ctx, TransferTask task)
+    {
+        var remote = NormalizeIp(ctx.Connection.RemoteIpAddress);
+        var local = NormalizeIp(ctx.Connection.LocalIpAddress);
+        if (remote is null || local is null) return false;
+
+        lock (_peerGate)
+        {
+            return _armedTaskId == task.TaskId &&
+                   _authorizedPeerIp is not null && _authorizedPeerIp.Equals(remote) &&
+                   (_allowedLocalIp is null || _allowedLocalIp.Equals(local)) &&
+                   (_expectedPeerIp is null || _expectedPeerIp.Equals(remote));
+        }
+    }
+
+    private void ReleaseUncommittedPeer(IPAddress? peer)
+    {
+        peer = NormalizeIp(peer);
+        if (peer is null) return;
+        lock (_peerGate)
+        {
+            if (_authorizedPeerIp is not null && _authorizedPeerIp.Equals(peer))
+                _authorizedPeerIp = null;
+        }
+    }
+
+    public async Task StartAsync(int port, bool configureFirewall = true)
     {
         await _startStop.WaitAsync();
         try
@@ -105,7 +273,10 @@ public sealed class TransferServer : IAsyncDisposable
             _app = app;
             await app.StartAsync();
             IsRunning = true;
-            TryAddFirewallRule(port);
+            if (configureFirewall)
+                TryAddFirewallRule(port);
+            else
+                Log.Info("TransferServer: firewall setup skipped for isolated test server");
             Log.Info($"TransferServer listening on http://0.0.0.0:{port} (ws /websocket, /download)");
         }
         finally
@@ -143,43 +314,38 @@ public sealed class TransferServer : IAsyncDisposable
 
     // ---------------------------------------------------------------- websocket
 
-    /// <summary>Best-effort inbound rule for the transfer port. Without it Windows
-    /// Firewall silently drops every inbound connection (the phone can never reach the
-    /// WSS server). Tries directly first (works when elevated); on failure relaunches
-    /// netsh via UAC so a normal user session still gets the rule with one prompt.</summary>
+    /// <summary>Keep transfer traffic on the local subnet only. Existing broad rules
+    /// from older builds are tightened in-place instead of silently re-used.</summary>
     private static void TryAddFirewallRule(int port)
     {
-        AddFirewallRule("CatShareSender",
-            $"advfirewall firewall add rule name=\"CatShareSender\" dir=in action=allow protocol=TCP localport={port}",
-            $"the phone will NOT be able to connect — allow TCP {port} in Windows Firewall (run once as administrator)");
+        EnsureFirewallRule(
+            "CatShareSender",
+            $"advfirewall firewall add rule name=\"CatShareSender\" dir=in action=allow protocol=TCP localport={port} remoteip=localsubnet",
+            $"advfirewall firewall set rule name=\"CatShareSender\" new protocol=TCP localport={port} remoteip=localsubnet",
+            $"the phone will NOT be able to connect — allow TCP {port} from LocalSubnet in Windows Firewall");
 
-        // The phone's LAN band check floods UDP at a per-task port it picks
-        // at random (its own task port + 1), so the allow rule must be
-        // program-scoped instead of port-scoped. If the probe is dropped the
-        // phone times out and falls back to its own hotspot.
         var exe = Environment.ProcessPath;
         if (!string.IsNullOrEmpty(exe))
-            AddFirewallRule("CatShareSenderBandEcho",
+            EnsureFirewallRule(
+                "CatShareSenderBandEcho",
                 $"advfirewall firewall add rule name=\"CatShareSenderBandEcho\" dir=in action=allow program=\"{exe}\" protocol=UDP remoteip=localsubnet",
+                $"advfirewall firewall set rule name=\"CatShareSenderBandEcho\" new program=\"{exe}\" protocol=UDP remoteip=localsubnet",
                 "the phone's LAN check times out and it falls back to hotspot mode");
     }
 
-    private static void AddFirewallRule(string ruleName, string args, string failureHint)
+    private static void EnsureFirewallRule(string ruleName, string addArgs, string updateArgs, string failureHint)
     {
         var (_, existing) = RunNetsh($"advfirewall firewall show rule name=\"{ruleName}\"", elevate: false);
-        if (existing.Contains(ruleName, StringComparison.OrdinalIgnoreCase))
-        {
-            Log.Info($"firewall rule '{ruleName}': reused existing rule");
-            return;
-        }
+        var exists = existing.Contains(ruleName, StringComparison.OrdinalIgnoreCase);
+        var args = exists ? updateArgs : addArgs;
 
         var (ok, output) = RunNetsh(args, elevate: false, ruleName);
         if (!ok)
             (ok, output) = RunNetsh(args, elevate: true, ruleName);
         if (ok)
-            Log.Info($"firewall rule '{ruleName}': created");
+            Log.Info($"firewall rule '{ruleName}': {(exists ? "tightened" : "created")} (LocalSubnet only)");
         else
-            Log.Warn($"firewall rule '{ruleName}' missing — {failureHint} ({output.Trim()})");
+            Log.Warn($"firewall rule '{ruleName}' could not be secured — {failureHint} ({output.Trim()})");
     }
 
     private static (bool ok, string output) RunNetsh(string args, bool elevate, string? verifyRuleName = null)
@@ -193,24 +359,28 @@ public sealed class TransferServer : IAsyncDisposable
                 UseShellExecute = elevate,
                 CreateNoWindow = true,
             };
-            if (!elevate)
+            if (elevate)
+                psi.Verb = "runas";
+            else
             {
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
             }
+
             using var p = System.Diagnostics.Process.Start(psi)!;
             string output = "";
             if (!elevate)
             {
                 output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-                p.WaitForExit(5000);
-                return (output.Contains("Ok") || output.Contains("确定") || output.Contains("OK"), output);
+                if (!p.WaitForExit(5000)) return (false, "netsh timed out");
+                return (p.ExitCode == 0, output);
             }
-            // UAC path: no stdout capture; verify by querying the rule afterwards.
-            p.WaitForExit(30000);
+
+            if (!p.WaitForExit(30000)) return (false, "elevated netsh timed out");
+            if (p.ExitCode != 0) return (false, $"elevated netsh exited {p.ExitCode}");
             var name = verifyRuleName ?? "CatShareSender";
-            var (chk, chkOut) = RunNetsh($"advfirewall firewall show rule name=\"{name}\"", elevate: false);
-            return (chk && chkOut.Contains(name), "added via UAC prompt");
+            var (_, chkOut) = RunNetsh($"advfirewall firewall show rule name=\"{name}\"", elevate: false);
+            return (chkOut.Contains(name, StringComparison.OrdinalIgnoreCase), "updated via UAC prompt");
         }
         catch (Exception ex)
         {
@@ -220,8 +390,9 @@ public sealed class TransferServer : IAsyncDisposable
 
     private async Task HandleWebSocket(HttpContext ctx)
     {
-        var peer = ctx.Connection.RemoteIpAddress?.ToString() ?? "?";
-        Log.Info($"WS: phone connected from {peer}");
+        var peerIp = NormalizeIp(ctx.Connection.RemoteIpAddress);
+        var peer = peerIp?.ToString() ?? "?";
+        Log.Info($"WS: connection attempt from {peer} via local {ctx.Connection.LocalIpAddress}");
 
         if (!ctx.WebSockets.IsWebSocketRequest)
         {
@@ -229,13 +400,22 @@ public sealed class TransferServer : IAsyncDisposable
             return;
         }
 
+        var task = _activeTask;
+        if (task is null || !TryClaimWebSocketPeer(ctx, task))
+        {
+            Log.Warn($"WS: rejected unauthorized/unarmed peer {peer}");
+            ctx.Response.StatusCode = (int)HttpStatusCode.Forbidden;
+            await ctx.Response.WriteAsync("transfer is not armed for this peer");
+            return;
+        }
+
         using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-        WsConnected = true;
         var session = new WsSession(this, ws)
         {
             PeerLooksStock = PeerLooksStock
         };
         int seq = 1;
+        var committed = false;
 
         try
         {
@@ -246,10 +426,10 @@ public sealed class TransferServer : IAsyncDisposable
             if (vnAck is null) { Log.Warn("WS: no versionNegotiation ack within 10s"); return; }
             Log.Info($"WS: version ack: {vnAck}");
 
-            var task = _activeTask;
-            if (task is null)
+            // Use the exact task that was armed when this peer claimed the session.
+            if (_activeTask?.TaskId != task.TaskId)
             {
-                Log.Warn("WS: connected but no task staged; closing");
+                Log.Warn("WS: staged task changed during handshake; closing");
                 return;
             }
 
@@ -259,6 +439,9 @@ public sealed class TransferServer : IAsyncDisposable
             var srAck = await session.ReceiveUntilAsync(e => e.IsAck && e.Method == "sendRequest", TimeSpan.FromSeconds(60));
             if (srAck is null) { Log.Warn("WS: no sendRequest ack within 60s (phone user may not have accepted)"); return; }
             Log.Info($"WS: sendRequest ack: {srAck}");
+            committed = true;
+            WsConnected = true;
+            _wsConnectedTcs.TrySetResult(true);
 
             // The stock receiver starts downloading when it receives the bare
             // string "files" (j9/g.java:898). The CatShare receiver parses every
@@ -276,14 +459,28 @@ public sealed class TransferServer : IAsyncDisposable
             // Wait for the download + final status.
             var done = await session.ReceiveLoopAsync(TimeSpan.FromMinutes(30));
             Log.Info($"WS: session ended ({done})");
+            if (committed && done != "transfer completed" && !IsSuccessful(task.TaskId))
+                ReportTransferFailure(task.TaskId, "Phone cancelled or disconnected before confirming receipt.");
         }
         catch (Exception ex)
         {
-            Log.Error("WS: session error", ex);
+            if (committed && !IsSuccessful(task.TaskId))
+            {
+                ReportTransferFailure(task.TaskId,
+                    ex is System.Net.WebSockets.WebSocketException
+                        ? "Phone cancelled the transfer or disconnected."
+                        : $"Transfer connection failed: {ex.Message}");
+                Log.Warn($"WS: committed session ended before success confirmation: {ex.Message}");
+            }
+            else
+            {
+                Log.Error("WS: session error", ex);
+            }
         }
         finally
         {
             WsConnected = false;
+            if (!committed) ReleaseUncommittedPeer(peerIp);
         }
     }
 
@@ -329,16 +526,35 @@ public sealed class TransferServer : IAsyncDisposable
                 if (closed) return "peer closed";
                 if (e is null) continue;
 
-                if (e.IsAction && e.Method == "status")
+                if (e.IsAction && (e.Method == "status" || e.Method == "stat"))
                 {
-                    var type = e.PayloadInt("type");
+                    // OnePlus phone-side Cancel sends action:*:stat and waits for
+                    // ack:*:stat before closing with mCanceled=true.
+                    var type = e.PayloadInt("type", int.MinValue);
+                    if (type == int.MinValue) type = e.PayloadInt("status", int.MinValue);
                     var reason = e.PayloadString("reason");
+                    if (string.IsNullOrWhiteSpace(reason)) reason = e.PayloadString("message");
                     var taskId = e.PayloadString("taskId");
-                    Log.Info($"WS: status type={type} reason='{reason}'");
+                    if (string.IsNullOrWhiteSpace(taskId)) taskId = e.PayloadString("id");
+                    Log.Info($"WS: {e.Method} type={(type == int.MinValue ? "?" : type)} reason='{reason}'");
+                    await SendText(Envelope.Build("ack", e.Seq, e.Method, new { }));
+
+                    if (e.Method == "stat")
+                    {
+                        if (type == 1)
+                        {
+                            _owner.OnStatus(taskId, 1, reason);
+                            return "transfer completed";
+                        }
+                        var why = string.IsNullOrWhiteSpace(reason) ? "Phone cancelled the transfer." : reason;
+                        _owner.ReportTransferFailure(taskId, why);
+                        return $"phone cancelled: {why}";
+                    }
+
                     _owner.OnStatus(taskId, type, reason);
-                    await SendText(Envelope.Build("ack", e.Seq, "status", new { }));
-                    if (type == 1 && reason == "ok") return "transfer completed";
-                    if (type == 3) return $"refused: {reason}";
+                    if (type == 1) return "transfer completed";
+                    if (type == 2) return string.IsNullOrWhiteSpace(reason) ? "transfer failed on phone" : $"transfer failed: {reason}";
+                    if (type == 3) return string.IsNullOrWhiteSpace(reason) ? "phone refused transfer" : $"refused: {reason}";
                 }
                 else if (e.IsAction)
                 {
@@ -350,6 +566,11 @@ public sealed class TransferServer : IAsyncDisposable
                 }
             }
         }
+
+        /// <summary>Control messages are small JSON envelopes; this caps accumulated
+        /// multi-frame messages so a malicious/buggy peer that never sets EndOfMessage
+        /// can't grow an unbounded MemoryStream and exhaust PC memory.</summary>
+        private const int MaxControlMessageBytes = 1 * 1024 * 1024;
 
         private async Task<(Envelope?, bool)> ReadFrameAsync(CancellationToken ct)
         {
@@ -369,6 +590,9 @@ public sealed class TransferServer : IAsyncDisposable
                         ms.Write(buf, 0, result.Count);
                         while (!result.EndOfMessage)
                         {
+                            if (ms.Length > MaxControlMessageBytes)
+                                throw new InvalidOperationException(
+                                    $"WS control message exceeded {MaxControlMessageBytes} bytes without EndOfMessage");
                             result = await _ws.ReceiveAsync(buf, ct);
                             ms.Write(buf, 0, result.Count);
                         }
@@ -388,7 +612,17 @@ public sealed class TransferServer : IAsyncDisposable
 
     private void OnStatus(string taskId, int type, string reason)
     {
+        if (string.IsNullOrWhiteSpace(taskId)) taskId = _activeTask?.TaskId ?? taskId;
+        if (type == 1)
+            MarkSuccessful(taskId);
+        else if (type == 2)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone cancelled or failed the transfer." : reason);
+        else if (type == 3)
+            ReportTransferFailure(taskId, string.IsNullOrWhiteSpace(reason) ? "Phone refused the transfer." : reason);
+
         try { StatusReceived?.Invoke(taskId, type, reason); } catch { }
+        if (type is 1 or 2 or 3)
+            DisarmTransfer($"terminal status {type}: {reason}");
     }
 
     /// <summary>Routes ASP.NET/Kestrel internal logs (TLS failures etc.) into our log.</summary>
@@ -433,6 +667,13 @@ public sealed class TransferServer : IAsyncDisposable
             await ctx.Response.WriteAsync("unknown task");
             return;
         }
+        if (!IsAuthorizedDownloadPeer(ctx, task))
+        {
+            Log.Warn($"HTTP: rejected /download for task {task.TaskId} from unauthorized peer {ctx.Connection.RemoteIpAddress}");
+            ctx.Response.StatusCode = (int)HttpStatusCode.Forbidden;
+            await ctx.Response.WriteAsync("peer not authorized for this transfer");
+            return;
+        }
 
         try { DownloadStarted?.Invoke(task.TaskId); } catch { }
 
@@ -453,29 +694,100 @@ public sealed class TransferServer : IAsyncDisposable
             // Always answer with a zip whose entries are the transfer files (stock
             // sender does the same for nd_zip != false, aa/b.java -> ga.c).
             var single = new List<string> { task.Files[idx] };
-            ctx.Response.StatusCode = (int)HttpStatusCode.OK;
-            ctx.Response.ContentType = "application/zip";
-            ctx.Response.Headers["nd_zip"] = "true";
-            ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
-            ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(Path.GetFileName(single[0]))}\"";
-            await WriteFolderStreamZip(ctx, single, new FileInfo(single[0]).Length, _cancelCts.Token);
+            try
+            {
+                await WriteDownloadZip(
+                    ctx,
+                    single,
+                    new FileInfo(single[0]).Length,
+                    Path.GetFileName(single[0]),
+                    _cancelCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                if (ctx.RequestAborted.IsCancellationRequested && !IsLocalCancellation(task.TaskId))
+                    ReportTransferFailure(task.TaskId, "Phone cancelled the download.");
+                return;
+            }
+            catch (IOException ex) when (ctx.RequestAborted.IsCancellationRequested)
+            {
+                ReportTransferFailure(task.TaskId, $"Phone disconnected during download: {ex.Message}");
+                return;
+            }
             Log.Info($"HTTP: per-file zip done: {single[0]}");
             try { DownloadFinished?.Invoke(task.TaskId); } catch { }
             return;
         }
 
-        // whole-batch mode — same zip layout
-        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
-        ctx.Response.ContentType = "application/zip";
-        ctx.Response.Headers["nd_zip"] = "true";
-        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
-        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(task.FirstFileName)}\"";
-        await WriteFolderStreamZip(ctx, task.Files, task.TotalSize, _cancelCts.Token);
+        // whole-batch mode — stock OnePlus peers use the official STORED ZIP path;
+        // custom/CatShare peers retain the legacy folder-stream compatibility path.
+        try
+        {
+            await WriteDownloadZip(ctx, task.Files, task.TotalSize, task.FirstFileName, _cancelCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            if (ctx.RequestAborted.IsCancellationRequested && !IsLocalCancellation(task.TaskId))
+                ReportTransferFailure(task.TaskId, "Phone cancelled the download.");
+            return;
+        }
+        catch (IOException ex) when (ctx.RequestAborted.IsCancellationRequested)
+        {
+            ReportTransferFailure(task.TaskId, $"Phone disconnected during download: {ex.Message}");
+            return;
+        }
         try { DownloadFinished?.Invoke(task.TaskId); } catch { }
     }
 
-    /// <summary>Streams the given files as a zip (entries under 0/) — the ONLY body
-    /// shape the pad's receiver parses correctly.</summary>
+    /// <summary>
+    /// Stock OnePlus/OShare peers use the APK's iOSFileResponse/FileChunkedInput
+    /// format: application/zip, chunked HTTP, direct filenames, STORED entries with
+    /// CRC/size known before the local header, and 1 MiB data chunks. The legacy
+    /// folder-stream path remains only for the custom CatShare-compatible peer.
+    /// </summary>
+    private async Task WriteDownloadZip(
+        HttpContext ctx,
+        IReadOnlyList<string> files,
+        long total,
+        string legacyDispositionName,
+        CancellationToken cancelToken)
+    {
+        ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+        ctx.Response.ContentType = "application/zip";
+
+        if (PeerLooksStock)
+        {
+            ctx.Response.Headers.Remove("nd_zip");
+            ctx.Response.Headers.Remove("Oshare-Transfer-Type");
+            ctx.Response.Headers["Content-Disposition"] = "attachment; filename=\"files.zip\"";
+            Log.Info($"HTTP: OnePlus-compatible STORED ZIP response, files={files.Count}, payload={total}");
+
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, cancelToken);
+            // Commit the HTTP 200 + headers immediately. STORED ZIP needs a CRC
+            // before its local header, but the phone must not sit waiting for the
+            // first body byte and mistake preparation time for a dead server.
+            await ctx.Response.StartAsync(linked.Token);
+            Log.Info("HTTP: response headers committed; waiting for prepared CRC if needed");
+            await OfficialStoredZipWriter.WriteAsync(
+                ctx.Response.Body,
+                files,
+                total,
+                (sent, expected) =>
+                {
+                    try { DownloadProgress?.Invoke(sent, expected); } catch { }
+                },
+                linked.Token);
+            return;
+        }
+
+        ctx.Response.Headers["nd_zip"] = "true";
+        ctx.Response.Headers["Oshare-Transfer-Type"] = "folder-stream";
+        ctx.Response.Headers["Content-Disposition"] = $"attachment; filename=\"{Uri.EscapeDataString(legacyDispositionName)}\"";
+        await WriteFolderStreamZip(ctx, files, total, cancelToken);
+    }
+
+    /// <summary>Legacy CatShare compatibility ZIP (entries under 0/). Stock OnePlus
+    /// peers do not use this path.</summary>
     private async Task WriteFolderStreamZip(HttpContext ctx, IReadOnlyList<string> files, long total, CancellationToken cancelToken)
     {
         long sent = 0;
@@ -530,3 +842,4 @@ public sealed class TransferServer : IAsyncDisposable
         return string.IsNullOrWhiteSpace(name) ? "file" : name;
     }
 }
+

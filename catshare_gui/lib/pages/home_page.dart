@@ -11,16 +11,24 @@ class HomePage extends StatefulWidget {
   final BridgeClient client;
   final ThemeMode currentThemeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
+  final AccentPreset currentAccent;
+  final ValueChanged<AccentPreset> onAccentChanged;
   final AppLanguage currentLanguage;
   final ValueChanged<AppLanguage> onLanguageChanged;
+  final bool desktopDropTargetEnabled;
+  final ValueChanged<bool> onDesktopDropTargetChanged;
 
   const HomePage({
     super.key,
     required this.client,
     required this.currentThemeMode,
     required this.onThemeChanged,
+    required this.currentAccent,
+    required this.onAccentChanged,
     required this.currentLanguage,
     required this.onLanguageChanged,
+    required this.desktopDropTargetEnabled,
+    required this.onDesktopDropTargetChanged,
   });
 
   @override
@@ -165,9 +173,12 @@ class _HomePageState extends State<HomePage> {
                                 ),
                               ),
                               Text(
-                                status.lanIp.isEmpty
-                                    ? 'Mutual Transmission'
-                                    : status.lanIp,
+                                widget.client.isConnecting &&
+                                        widget.client.connectionIssue != null
+                                    ? widget.client.connectionIssue!
+                                    : (status.lanIp.isEmpty
+                                          ? 'Mutual Transmission'
+                                          : status.lanIp),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -210,8 +221,12 @@ class _HomePageState extends State<HomePage> {
                   client: widget.client,
                   currentThemeMode: widget.currentThemeMode,
                   onThemeChanged: widget.onThemeChanged,
+                  currentAccent: widget.currentAccent,
+                  onAccentChanged: widget.onAccentChanged,
                   currentLanguage: widget.currentLanguage,
                   onLanguageChanged: widget.onLanguageChanged,
+                  desktopDropTargetEnabled: widget.desktopDropTargetEnabled,
+                  onDesktopDropTargetChanged: widget.onDesktopDropTargetChanged,
                 ),
               ],
             ),
@@ -228,7 +243,9 @@ class _HomePageState extends State<HomePage> {
     required bool isDark,
   }) {
     final isSelected = _currentIndex == index;
-    final activeBg = isDark ? const Color(0xFF1E3F35) : const Color(0xFFD4EDE5);
+    final activeBg = isDark
+        ? AppColors.darkAccentSoft
+        : AppColors.lightAccentSoft;
     final activeFg = isDark ? AppColors.darkAccent : AppColors.lightAccent;
     final inactiveFg = isDark
         ? AppColors.darkTextMuted

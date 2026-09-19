@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'dart:async';
 
 class DragDropService {
   static final DragDropService instance = DragDropService._();
@@ -11,6 +12,7 @@ class DragDropService {
   final List<void Function(List<String> paths)> _dropListeners = [];
   bool _initialized = false;
   bool _isDragging = false;
+  int _enabledZoneCount = 0;
 
   bool get isDragging => _isDragging;
 
@@ -60,6 +62,39 @@ class DragDropService {
       _dropListeners.add(listener);
   void removeDropListener(void Function(List<String>) listener) =>
       _dropListeners.remove(listener);
+
+  void attachZone(
+    void Function(bool isDragging) dragStateListener,
+    void Function(List<String> paths) dropListener,
+  ) {
+    _dragStateListeners.add(dragStateListener);
+    _dropListeners.add(dropListener);
+    _enabledZoneCount++;
+    if (_enabledZoneCount == 1) {
+      unawaited(_setNativeEnabled(true));
+    }
+  }
+
+  void detachZone(
+    void Function(bool isDragging) dragStateListener,
+    void Function(List<String> paths) dropListener,
+  ) {
+    _dragStateListeners.remove(dragStateListener);
+    _dropListeners.remove(dropListener);
+    if (_enabledZoneCount == 0) return;
+    _enabledZoneCount--;
+    if (_enabledZoneCount == 0) {
+      unawaited(_setNativeEnabled(false));
+    }
+  }
+
+  Future<void> _setNativeEnabled(bool enabled) async {
+    try {
+      await _channel.invokeMethod<void>('setEnabled', enabled);
+    } catch (error) {
+      debugPrint('[DragDropService] Failed to set native drop state: $error');
+    }
+  }
 }
 
 class NativeDropZone extends StatefulWidget {
@@ -81,6 +116,8 @@ class NativeDropZone extends StatefulWidget {
 }
 
 class _NativeDropZoneState extends State<NativeDropZone> {
+  bool _attached = false;
+
   @override
   void initState() {
     super.initState();
@@ -102,13 +139,15 @@ class _NativeDropZoneState extends State<NativeDropZone> {
   }
 
   void _attach() {
-    DragDropService.instance.addDragStateListener(_onDragState);
-    DragDropService.instance.addDropListener(_onDrop);
+    if (_attached) return;
+    _attached = true;
+    DragDropService.instance.attachZone(_onDragState, _onDrop);
   }
 
   void _detach() {
-    DragDropService.instance.removeDragStateListener(_onDragState);
-    DragDropService.instance.removeDropListener(_onDrop);
+    if (!_attached) return;
+    _attached = false;
+    DragDropService.instance.detachZone(_onDragState, _onDrop);
   }
 
   void _onDragState(bool isDragging) {
@@ -123,9 +162,7 @@ class _NativeDropZoneState extends State<NativeDropZone> {
 
   @override
   void dispose() {
-    if (widget.enabled) {
-      _detach();
-    }
+    _detach();
     super.dispose();
   }
 

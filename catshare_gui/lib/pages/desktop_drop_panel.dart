@@ -20,7 +20,11 @@ import '../widgets/native_drop_zone.dart';
 // grows to [panelPreviewSize] while a file is hovering, and only grows to the
 // device picker after a file has actually been dropped.
 const panelDropTargetSize = Size(360, 150);
-const panelExpandedSize = Size(390, 300);
+const panelExpandedMinWidth = 400.0;
+const panelExpandedHeight = 280.0;
+const panelExpandedSize = Size(panelExpandedMinWidth, panelExpandedHeight);
+const panelWindowSize = Size(720, 360);
+const desktopDropInstructionMaxLines = 3;
 // Kept as aliases while the state-transition animation is migrated.
 const panelIdleSize = panelDropTargetSize;
 const panelPreviewSize = panelDropTargetSize;
@@ -61,7 +65,8 @@ Size panelSizeForStage(DesktopDropPanelStage stage, {int deviceCount = 0}) {
     case DesktopDropPanelStage.dragging:
       return panelDropTargetSize;
     case DesktopDropPanelStage.staged:
-      return panelExpandedSize;
+      final width = panelWidthForDeviceCount(deviceCount);
+      return Size(width, panelExpandedHeight);
   }
 }
 
@@ -91,18 +96,18 @@ const panelInvisibleOpacity = 0.01;
 
 double panelWidthForDeviceCount(int count) {
   final safeCount = count.clamp(0, 20);
-  return (560 + safeCount * 120).clamp(560, 960).toDouble();
+  return (400 + safeCount * 120).clamp(400, 720).toDouble();
 }
 
 DeviceModel? resolveSelectedDevice(
   List<DeviceModel> devices,
   String? selectedAddress,
 ) {
-  if (devices.isEmpty || selectedAddress == null) return null;
+  if (selectedAddress == null) return null;
   for (final device in devices) {
     if (device.address == selectedAddress) return device;
   }
-  return devices.first;
+  return null;
 }
 
 /// The bottom-right corner of the primary display's work area (i.e.
@@ -122,6 +127,9 @@ Future<Offset> resolveCornerAnchor({double margin = _cornerMargin}) async {
     return const Offset(1904, 1064);
   }
 }
+
+Rect panelWindowRect(Offset bottomRight) =>
+    anchoredRect(bottomRight, panelWindowSize);
 
 Rect anchoredRect(Offset bottomRight, Size size) => Rect.fromLTWH(
   bottomRight.dx - size.width,
@@ -236,6 +244,7 @@ class DesktopDropPanelPage extends StatefulWidget {
   final AppLanguage language;
   final OutgoingStagingController? stagingController;
   final Future<bool> Function(DeviceModel)? sendToDeviceOverride;
+  final bool manageNativeWindowGeometry;
 
   const DesktopDropPanelPage({
     super.key,
@@ -243,6 +252,7 @@ class DesktopDropPanelPage extends StatefulWidget {
     required this.language,
     this.stagingController,
     this.sendToDeviceOverride,
+    this.manageNativeWindowGeometry = true,
   });
 
   @override
@@ -254,7 +264,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   late final OutgoingStagingController _stagingController;
 
   // The native window changes size only at stage transitions. This controller
-  // is purely Flutter-side: 0 is the idle pill, 0.5 is the compact drag panel,
+  // is purely Flutter-side: 0 is the idle square target, 0.5 is the compact drag panel,
   // and 1 is the expanded device picker.
   late final AnimationController _visual;
 
@@ -273,6 +283,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   bool _terminalStatusShown = false;
   bool _terminalCleanupAttempted = false;
   bool _selectionSyncPending = false;
+  int _stagedDeviceCount = -1;
 
   @override
   void initState() {
@@ -295,15 +306,19 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     await windowManager.setAlwaysOnTop(true);
   }
 
-  Future<void> _setNativePanelStage(DesktopDropPanelStage stage) async {
+  Future<void> _setNativePanelStage(
+    DesktopDropPanelStage stage, {
+    int? deviceCount,
+  }) async {
     final generation = ++_geometryGeneration;
     // A newer transition may have superseded this request while the caller
     // was yielding (for example, a new drop arriving during collapse).
     await Future<void>.value();
     if (generation != _geometryGeneration) return;
-    await windowManager.setBounds(
-      anchoredRect(_anchor, panelSizeForStage(stage)),
-    );
+    // Keep the HWND and Flutter surface at one stable size. Resizing a
+    // Flutter Windows surface between stages causes the compositor to scale
+    // the old surface, producing the distorted text seen in packaged builds.
+    // Stage-specific sizing is handled inside the fixed surface instead.
     if (generation == _geometryGeneration) {
       await windowManager.setAlwaysOnTop(true);
     }
@@ -373,6 +388,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       return;
     }
     _hasStagedDrop = false;
+    _stagedDeviceCount = -1;
     if (collapseGeneration != _collapseGeneration) return;
     await _setNativePanelStage(DesktopDropPanelStage.idle);
     if (!mounted || collapseGeneration != _collapseGeneration) return;
@@ -392,7 +408,6 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     _collapseTimer?.cancel();
     setState(() {
       _isDragging = false;
-      _selectedAddress = null;
     });
     final staged = await _stagingController.addPaths(
       paths,
@@ -414,8 +429,27 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     if (!mounted) return;
     _collapseGeneration++;
     setState(() => _hasStagedDrop = true);
-    unawaited(_setNativePanelStage(DesktopDropPanelStage.staged));
+    // Resize the native hit-test window before revealing the expanded picker.
+    // Otherwise Flutter paints the expanded layout into the old compact
+    // window for a few frames, which produces the transient wrong aspect ratio.
+    try {
+      if (widget.manageNativeWindowGeometry) {
+        await _setNativePanelStage(
+          DesktopDropPanelStage.staged,
+          deviceCount: widget.client.devices.length,
+        );
+      }
+    } catch (error) {
+      // The Flutter test host has no native window plugin. The desktop build
+      // still gets the ordered resize above; keep the logical UI usable if a
+      // platform resize is unavailable.
+      debugPrint('[DesktopDropPanel] Failed to resize staged panel: $error');
+    }
+    if (!mounted) return;
     _visual.animateTo(1, curve: Curves.easeOutCubic);
+
+    // Dropping only stages the files. Sending is intentionally started by the
+    // user's explicit phone selection in _buildDeviceStrip.
   }
 
   Future<void> _sendStagedFilesTo(DeviceModel device) async {
@@ -564,6 +598,20 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
         final transfer = widget.client.transferState;
         _maybeClearAfterTransfer(transfer);
 
+        if (_hasStagedDrop && devices.length != _stagedDeviceCount) {
+          _stagedDeviceCount = devices.length;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _hasStagedDrop) {
+              unawaited(
+                _setNativePanelStage(
+                  DesktopDropPanelStage.staged,
+                  deviceCount: devices.length,
+                ),
+              );
+            }
+          });
+        }
+
         return Scaffold(
           backgroundColor: Colors.transparent,
           body: NativeDropZone(
@@ -582,7 +630,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
                       visible: previewT < 0.86 && expansionT < 0.01,
                       opacity: (1 - previewT * 1.3).clamp(0.0, 1.0),
                       interactive: false,
-                      child: _buildPill(isDark),
+                      child: _buildSquareTarget(isDark, previewT),
                     ),
                     _fadeLayer(
                       visible:
@@ -627,44 +675,59 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     );
   }
 
-  Widget _buildPill(bool isDark) {
+  Widget _buildSquareTarget(bool isDark, [double previewT = 0.0]) {
     final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
+    const baseSquareSize = 134.0;
+    final scale = 1.0 + (0.08 * previewT);
     return Center(
-      child: Container(
-        width: panelIdleSize.width,
-        height: panelIdleSize.height,
-        decoration: BoxDecoration(
-          color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
-          shape: BoxShape.circle,
-          border: Border.all(color: accent, width: 2),
-          boxShadow: const [
-            BoxShadow(
-              color: Colors.black38,
-              blurRadius: 14,
-              offset: Offset(0, 4),
-            ),
-          ],
+      child: Transform.scale(
+        scale: scale,
+        child: Container(
+          key: const ValueKey('desktop-drop-square-target'),
+          width: baseSquareSize,
+          height: baseSquareSize,
+          decoration: BoxDecoration(
+            color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: accent, width: 2),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black38,
+                blurRadius: 14,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Icon(Icons.file_upload_rounded, color: accent, size: 36),
         ),
-        child: Icon(Icons.file_upload_rounded, color: accent, size: 30),
       ),
     );
   }
 
   Widget _buildCompactPanel(bool isDark, TransferStateModel transfer) {
-    return SafeArea(
-      minimum: const EdgeInsets.all(8),
-      child: Material(
-        color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
-        borderRadius: BorderRadius.circular(12),
-        elevation: 10,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-          child: Column(
-            children: [
-              _buildHeader(null, isDark),
-              const SizedBox(height: 8),
-              Expanded(child: _buildDropArea(null, isDark, transfer)),
-            ],
+    return Align(
+      alignment: Alignment.bottomRight,
+      child: SizedBox(
+        width: panelDropTargetSize.width,
+        height: panelDropTargetSize.height,
+        child: SafeArea(
+          minimum: const EdgeInsets.all(8),
+          child: ClipRect(
+            child: Material(
+              color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
+              borderRadius: BorderRadius.circular(12),
+              elevation: 10,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+                child: Column(
+                  children: [
+                    _buildHeader(null, isDark),
+                    const SizedBox(height: 8),
+                    Expanded(child: _buildDropArea(null, isDark, transfer)),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -677,29 +740,43 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     bool isDark,
     TransferStateModel transfer,
   ) {
-    return SafeArea(
-      minimum: const EdgeInsets.all(8),
-      child: Material(
-        color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
-        borderRadius: BorderRadius.circular(18),
-        elevation: 10,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-          child: Column(
-            children: [
-              _buildHeader(selected, isDark),
-              const SizedBox(height: 10),
-              if (_isTransferActive) ...[
-                _buildTransferDetails(isDark, transfer),
-                const SizedBox(height: 10),
-              ] else if (_hasStagedDrop && !_isDragging) ...[
-                _buildStagedSummary(isDark),
-                const SizedBox(height: 10),
-              ] else
-                Expanded(child: _buildDropArea(selected, isDark, transfer)),
-              const SizedBox(height: 10),
-              _buildDeviceStrip(devices, selected, isDark),
-            ],
+    final width = panelWidthForDeviceCount(devices.length);
+    return Align(
+      alignment: Alignment.bottomRight,
+      child: SizedBox(
+        width: width,
+        height: panelExpandedHeight,
+        child: SafeArea(
+          minimum: const EdgeInsets.all(8),
+          child: ClipRect(
+            child: Material(
+              color: isDark ? AppColors.darkSurface : AppColors.lightSurface,
+              borderRadius: BorderRadius.circular(18),
+              elevation: 10,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                child: Column(
+                  children: [
+                    _buildHeader(selected, isDark),
+                    const SizedBox(height: 10),
+                    if (_isTransferActive) ...[
+                      _buildTransferDetails(isDark, transfer),
+                      const SizedBox(height: 10),
+                    ] else ...[
+                      Expanded(
+                        child: _buildDropArea(selected, isDark, transfer),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                    if (_hasStagedDrop && !_isTransferActive) ...[
+                      _buildStagedSummary(isDark),
+                      const SizedBox(height: 10),
+                    ],
+                    _buildDeviceStrip(devices, selected, isDark),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -899,14 +976,18 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
           ),
           const SizedBox(width: 9),
           Expanded(
-            child: Text(
-              selected == null ? title : '$title "${selected.name}"',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
-                color: isDark ? AppColors.darkText : AppColors.lightText,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                selected == null ? title : '$title "${selected.name}"',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
               ),
             ),
           ),
@@ -963,13 +1044,26 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
                           : AppColors.lightTextMuted),
               ),
               const SizedBox(height: 8),
-              Text(
-                text,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkText : AppColors.lightText,
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: LayoutBuilder(
+                  builder: (context, constraints) => ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+                    child: Text(
+                      text,
+                      textAlign: TextAlign.center,
+                      maxLines: desktopDropInstructionMaxLines,
+                      softWrap: true,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: isDark
+                            ? AppColors.darkText
+                            : AppColors.lightText,
+                      ),
+                    ),
+                  ),
                 ),
               ),
               if (_isTransferActive && transfer.statusText.isNotEmpty) ...[

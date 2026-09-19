@@ -98,12 +98,12 @@ Future<void> _runDesktopDropPanel() async {
 
   await windowManager.ensureInitialized();
   final anchor = await resolveCornerAnchor();
-  final idleRect = anchoredRect(anchor, panelDropTargetSize);
+  final idleRect = panelWindowRect(anchor);
   windowManager.waitUntilReadyToShow(
     WindowOptions(
-      size: idleRect.size,
-      minimumSize: panelDropTargetSize,
-      maximumSize: const Size(960, 420),
+      size: panelWindowSize,
+      minimumSize: panelWindowSize,
+      maximumSize: panelWindowSize,
       title: 'OsharePC Drop Target',
       titleBarStyle: TitleBarStyle.hidden,
       backgroundColor: Colors.transparent,

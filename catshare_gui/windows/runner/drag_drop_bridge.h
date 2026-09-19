@@ -39,6 +39,7 @@ class DragDropBridge : public IDropTarget {
   HWND window_handle_;
   LONG ref_count_ = 1;
   bool registered_ = false;
+  bool enabled_ = false;
   bool has_files_ = false;
 
   void HandleDragPosition(const char* method, POINTL pt);

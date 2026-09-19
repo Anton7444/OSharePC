@@ -1,5 +1,5 @@
 name: catshare_gui
-description: "A new Flutter project."
+description: "Unofficial Windows client compatible with OPPO/OnePlus OShare."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -41,6 +41,7 @@ dependencies:
   shared_preferences: ^2.5.5
   tray_manager: ^0.5.3
   window_manager: ^0.5.2
+  screen_retriever: ^0.2.2
   ffi: ^2.1.4
   win32: ^6.4.0
 

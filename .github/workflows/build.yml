@@ -1,24 +1,28 @@
 name: Build
 
-# CI packages use one shared assembled runtime.
+# Every successful CI run publishes both Windows packages from one shared assembled runtime.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: '10.0.x'
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: stable
           flutter-version: '3.44.3'
@@ -40,6 +44,38 @@ jobs:
           $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--selftest' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "SELFTEST process exited with $($process.ExitCode)" }
           if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'SELFTEST PASSED' -Quiet)) { throw 'SELFTEST PASSED not found in sender.log' }
+      - name: Run backend mock phone
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--mockphone' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            Write-Host '===== sender.log ====='
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw "MOCKPHONE process exited with $($process.ExitCode)"
+          }
+          if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKPHONE PASSED' -Quiet)) {
+            Write-Host '===== sender.log ====='
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw 'MOCKPHONE PASSED not found in sender.log'
+          }
+      - name: Run phone cancellation regression
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:LOCALAPPDATA 'CatShareSender/sender.log'
+          Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath 'artifacts/backend/CatShareSender.exe' -ArgumentList '--mockphone-cancel' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            Write-Host '===== sender.log ====='
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw "MOCKPHONE-CANCEL process exited with $($process.ExitCode)"
+          }
+          if (-not (Test-Path -LiteralPath $log) -or -not (Select-String -LiteralPath $log -Pattern 'MOCKCANCEL PASSED' -Quiet)) {
+            Write-Host '===== sender.log ====='
+            if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log }
+            throw 'MOCKCANCEL PASSED not found in sender.log'
+          }
       - name: Build Flutter Windows release
         working-directory: catshare_gui
         run: flutter build windows --release
@@ -55,9 +91,9 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          & 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' '/DMyAppVersion=1.0.0-dev' 'installer/OSharePC.iss'
+          & 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' '/DMyAppVersion=1.0' 'installer/OSharePC.iss'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $builtInstaller = 'installer-output/OSharePC-Setup-1.0.0-dev.exe'
+          $builtInstaller = 'installer-output/OSharePC-Setup-1.0.exe'
           if (-not (Test-Path -LiteralPath $builtInstaller)) { throw "Expected installer output missing: $builtInstaller" }
           Copy-Item -LiteralPath $builtInstaller -Destination 'OSharePC-Setup-win-x64.exe' -Force
       - name: Validate CI packages
@@ -73,14 +109,16 @@ jobs:
           if (-not (Test-Path -LiteralPath $setup)) { throw "Missing $setup" }
           if ((Get-Item -LiteralPath $setup).Length -le 0) { throw "$setup is empty" }
       - name: Upload portable package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: OSharePC-Portable-win-x64
+          name: OSharePC-Portable-win-x64.zip
           path: OSharePC-Portable-win-x64.zip
           if-no-files-found: error
+          retention-days: 3
       - name: Upload setup package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: OSharePC-Setup-win-x64
+          name: OSharePC-Setup-win-x64.exe
           path: OSharePC-Setup-win-x64.exe
           if-no-files-found: error
+          retention-days: 3

@@ -1,6 +1,7 @@
 #include "drag_drop_bridge.h"
 
 #include <iostream>
+#include <variant>
 
 namespace {
 
@@ -28,6 +29,20 @@ DragDropBridge::DragDropBridge(
     std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel,
     HWND window_handle)
     : channel_(std::move(channel)), window_handle_(window_handle), ref_count_(1) {
+  channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "setEnabled") {
+          const auto* enabled = std::get_if<bool>(call.arguments());
+          enabled_ = enabled != nullptr && *enabled;
+          if (!enabled_) {
+            has_files_ = false;
+          }
+          result->Success();
+          return;
+        }
+        result->NotImplemented();
+      });
   EnsureRegistered();
 }
 
@@ -130,6 +145,12 @@ HRESULT __stdcall DragDropBridge::DragEnter(IDataObject* pDataObj, DWORD grfKeyS
     return E_INVALIDARG;
   }
 
+  if (!enabled_) {
+    *pdwEffect = DROPEFFECT_NONE;
+    has_files_ = false;
+    return S_OK;
+  }
+
   FORMATETC fmt = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
   has_files_ = (pDataObj && pDataObj->QueryGetData(&fmt) == S_OK);
 
@@ -146,6 +167,12 @@ HRESULT __stdcall DragDropBridge::DragEnter(IDataObject* pDataObj, DWORD grfKeyS
 HRESULT __stdcall DragDropBridge::DragOver(DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) {
   if (pdwEffect == nullptr) {
     return E_INVALIDARG;
+  }
+
+  if (!enabled_) {
+    *pdwEffect = DROPEFFECT_NONE;
+    has_files_ = false;
+    return S_OK;
   }
 
   if (has_files_ && (*pdwEffect & DROPEFFECT_COPY)) {
@@ -166,6 +193,12 @@ HRESULT __stdcall DragDropBridge::DragLeave() {
 HRESULT __stdcall DragDropBridge::Drop(IDataObject* pDataObj, DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) {
   if (pdwEffect == nullptr) {
     return E_INVALIDARG;
+  }
+
+  if (!enabled_) {
+    *pdwEffect = DROPEFFECT_NONE;
+    has_files_ = false;
+    return S_OK;
   }
 
   if (!has_files_ || !(*pdwEffect & DROPEFFECT_COPY)) {

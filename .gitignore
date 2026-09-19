@@ -41,3 +41,6 @@ pelican-bike.html
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# Local build selections and machine-specific tool paths.
+.build-local.config.json

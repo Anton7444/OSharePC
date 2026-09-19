@@ -94,6 +94,8 @@ public sealed class ReceiveGattServer : IDisposable
                 if (beacon.AdvertisementStatus == GattServiceProviderAdvertisementStatus.Started) return;
             }
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log.Error("RX: 8881 advertisement retry failed", ex); }
         finally { Interlocked.Exchange(ref _beaconRetrying, 0); }
     }
 
@@ -127,48 +129,11 @@ public sealed class ReceiveGattServer : IDisposable
 
         Directory.CreateDirectory(SaveDirectory);
 
-        // 1. Discovery beacon: 00008881 (standard base)
-        var beacon = await GattServiceProvider.CreateAsync(
-            new Guid("00008881-0000-1000-8000-00805f9b34fb"));
-        if (beacon.Error != BluetoothError.Success)
-            throw new InvalidOperationException($"RX: 8881 provider failed: {beacon.Error}");
-
-        await beacon.ServiceProvider.Service.CreateCharacteristicAsync(
-            new Guid("00008882-0000-1000-8000-00805f9b34fb"),
-            new GattLocalCharacteristicParameters { CharacteristicProperties = GattCharacteristicProperties.Read });
-
-        beacon.ServiceProvider.AdvertisementStatusChanged += (_, e) =>
-        {
-            State($"8881 beacon -> {e.Status}");
-            try
-            {
-                if (e.Status == GattServiceProviderAdvertisementStatus.Started)
-                {
-                    BeaconStarted?.Invoke();
-                }
-                else if (e.Status == GattServiceProviderAdvertisementStatus.Aborted)
-                {
-                    // GATT providers never retry on their own and the slot is often held
-                    // by our own fallback advert — the engine pauses that on Aborted, we
-                    // just need to keep trying until we win the slot back.
-                    BeaconAborted?.Invoke();
-                    RetryBeaconAsync(beacon.ServiceProvider);
-                }
-            }
-            catch { }
-        };
-
-        // Mark running before StartAdvertising: Windows can raise Aborted
-        // synchronously, and the retry loop must be allowed to recover it.
-        IsRunning = true;
-        beacon.ServiceProvider.StartAdvertising(new GattServiceProviderAdvertisingParameters
-        {
-            IsDiscoverable = true,
-            IsConnectable = true,
-        });
-        _beacon = beacon.ServiceProvider;
-
-        // 2. Protocol service 9999 (0x9898 handshake read / 0x9896 command write / 0x9895 accept notify)
+        // Build the complete protocol GATT database BEFORE opening the connectable
+        // discovery beacon. Android caches GATT aggressively; exposing 8881 while 9999
+        // is still being added can leave a peer with a transient/incomplete database.
+        // All OShare control characteristics are deliberately Plain: this protocol is
+        // pairless and must never require a Bluetooth bond.
         var svc = await GattServiceProvider.CreateAsync(
             new Guid("00009999-0000-1000-8000-00805f9b34fb"));
         if (svc.Error != BluetoothError.Success)
@@ -180,6 +145,7 @@ public sealed class ReceiveGattServer : IDisposable
             {
                 CharacteristicProperties = GattCharacteristicProperties.Read,
                 ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
             });
         if (hs.Error != BluetoothError.Success)
             throw new InvalidOperationException($"RX: 0x9898 create failed: {hs.Error}");
@@ -191,6 +157,7 @@ public sealed class ReceiveGattServer : IDisposable
             new GattLocalCharacteristicParameters
             {
                 CharacteristicProperties = GattCharacteristicProperties.Write | GattCharacteristicProperties.WriteWithoutResponse,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
                 WriteProtectionLevel = GattProtectionLevel.Plain,
             });
         if (cmd.Error != BluetoothError.Success)
@@ -203,10 +170,14 @@ public sealed class ReceiveGattServer : IDisposable
             new GattLocalCharacteristicParameters
             {
                 CharacteristicProperties = GattCharacteristicProperties.Notify,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
             });
         if (notify.Error != BluetoothError.Success)
             throw new InvalidOperationException($"RX: 0x9895 create failed: {notify.Error}");
         _notify = notify.Characteristic;
+        _notify.SubscribedClientsChanged += (_, _) =>
+            State($"0x9895 subscribers = {_notify?.SubscribedClients.Count ?? 0}");
 
         _service = svc.ServiceProvider;
         _service.AdvertisementStatusChanged += (_, e) => State($"9999 adv -> {e.Status}");
@@ -214,6 +185,50 @@ public sealed class ReceiveGattServer : IDisposable
         {
             IsDiscoverable = false,
             IsConnectable = false,
+        });
+
+        // Open the discoverable/connectable 8881 beacon only after 9999 is ready.
+        var beacon = await GattServiceProvider.CreateAsync(
+            new Guid("00008881-0000-1000-8000-00805f9b34fb"));
+        if (beacon.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 8881 provider failed: {beacon.Error}");
+
+        var beaconChar = await beacon.ServiceProvider.Service.CreateCharacteristicAsync(
+            new Guid("00008882-0000-1000-8000-00805f9b34fb"),
+            new GattLocalCharacteristicParameters
+            {
+                CharacteristicProperties = GattCharacteristicProperties.Read,
+                ReadProtectionLevel = GattProtectionLevel.Plain,
+                WriteProtectionLevel = GattProtectionLevel.Plain,
+            });
+        if (beaconChar.Error != BluetoothError.Success)
+            throw new InvalidOperationException($"RX: 0x8882 create failed: {beaconChar.Error}");
+
+        beacon.ServiceProvider.AdvertisementStatusChanged += (_, e) =>
+        {
+            State($"8881 beacon -> {e.Status}");
+            try
+            {
+                if (e.Status == GattServiceProviderAdvertisementStatus.Started)
+                {
+                    BeaconStarted?.Invoke();
+                }
+                else if (e.Status == GattServiceProviderAdvertisementStatus.Aborted)
+                {
+                    BeaconAborted?.Invoke();
+                    RetryBeaconAsync(beacon.ServiceProvider);
+                }
+            }
+            catch { }
+        };
+
+        IsRunning = true;
+        _beacon = beacon.ServiceProvider;
+        State("Local GATT database ready (8881 + 9999, pairless/plain); starting connectable beacon");
+        beacon.ServiceProvider.StartAdvertising(new GattServiceProviderAdvertisingParameters
+        {
+            IsDiscoverable = true,
+            IsConnectable = true,
         });
 
         State($"Receive server active (beacon 8881 + service 9999), BT Name='{BluetoothName(DeviceName)}'");
@@ -248,6 +263,8 @@ public sealed class ReceiveGattServer : IDisposable
                 Log.Warn($"RX: handshake response skipped: {ex.Message}");
             }
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log.Error("RX: handshake read failed", ex); }
         finally
         {
             deferral.Complete();
@@ -256,11 +273,12 @@ public sealed class ReceiveGattServer : IDisposable
 
     private async void OnCommandWrite(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args)
     {
-        var request = await args.GetRequestAsync();
-        if (request is null) return;
+        GattWriteRequest? request = null;
 
         try
         {
+            request = await args.GetRequestAsync();
+            if (request is null) return;
             var reader = DataReader.FromBuffer(request.Value);
             var bytes = new byte[request.Value.Length];
             reader.ReadBytes(bytes);
@@ -272,6 +290,7 @@ public sealed class ReceiveGattServer : IDisposable
             if (request.Option == GattWriteOption.WriteWithResponse)
                 request.Respond();
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Log.Error($"RX: 0x9896 write failed: {ex.Message}");

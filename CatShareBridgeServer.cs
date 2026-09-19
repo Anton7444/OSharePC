@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -9,18 +11,30 @@ using Microsoft.Extensions.Logging;
 
 namespace CatShareSender;
 
-/// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides REST/SSE/event bridge.</summary>
+/// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides a REST/polling event bridge.</summary>
 public sealed class CatShareBridgeServer : IAsyncDisposable
 {
     public const int Port = 8960;
+    public const string TokenHeader = "X-OSharePC-Bridge-Token";
+
     private readonly SenderEngine _engine = new();
     private readonly ConcurrentQueue<BridgeEvent> _events = new();
     private readonly ConcurrentDictionary<string, PendingTransferInfo> _pendingTransfers = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentlyRejected = new();
+    private readonly byte[] _authTokenBytes;
     private long _seq = 0;
     private WebApplication? _app;
     private string _lastState = "starting";
     private Task? _sendTask;
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private int _shutdownRequested;
+
+    public CatShareBridgeServer(string authToken)
+    {
+        if (string.IsNullOrWhiteSpace(authToken) || authToken.Length < 32)
+            throw new ArgumentException("Bridge authentication token is missing or too short.", nameof(authToken));
+        _authTokenBytes = Encoding.UTF8.GetBytes(authToken);
+    }
 
     public async Task StartAsync()
     {
@@ -59,7 +73,15 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
             Push("receiveFailed", new { sender, error });
         };
         _engine.Server.DownloadProgress += (sent, total) => Push("sendProgress", new { sent, total });
-        _engine.Server.DownloadFinished += taskId => Push("sendCompleted", new { taskId });
+        // Do NOT mark success when the HTTP body merely finished writing. The phone
+        // can still cancel/reject before acknowledging receipt.
+        _engine.Server.StatusReceived += (taskId, type, reason) =>
+        {
+            if (type == 1)
+                Push("sendCompleted", new { taskId });
+        };
+        _engine.Server.TransferFailed += (taskId, error) =>
+            Push("sendFailed", new { taskId, error });
 
         _engine.ConfirmIncomingTransfer = (name, mimeType, count) => ConfirmViaBridge(name, mimeType, count);
 
@@ -73,6 +95,45 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         builder.WebHost.ConfigureKestrel(options => options.Listen(System.Net.IPAddress.Loopback, Port));
         builder.Services.AddRouting();
         var app = builder.Build();
+
+        // The bridge is a native localhost-only control plane, not a browser API.
+        // Every /api request must carry the per-GUI-process token. Browser-originated
+        // requests are rejected outright; the custom header also forces CORS preflight
+        // for ordinary web pages before they can reach any state-changing endpoint.
+        app.Use(async (ctx, next) =>
+        {
+            if (!ctx.Request.Path.StartsWithSegments("/api"))
+            {
+                await next();
+                return;
+            }
+
+            if (HttpMethods.IsOptions(ctx.Request.Method) || ctx.Request.Headers.ContainsKey("Origin"))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
+            if (!ctx.Request.Headers.TryGetValue(TokenHeader, out var suppliedValues))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            var supplied = suppliedValues.ToString();
+            var suppliedBytes = Encoding.UTF8.GetBytes(supplied);
+            var valid = suppliedBytes.Length == _authTokenBytes.Length &&
+                        CryptographicOperations.FixedTimeEquals(suppliedBytes, _authTokenBytes);
+            CryptographicOperations.ZeroMemory(suppliedBytes);
+            if (!valid)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            ctx.Response.Headers.CacheControl = "no-store";
+            await next();
+        });
 
         app.MapGet("/api/status", () =>
         {
@@ -163,11 +224,8 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         app.MapPost("/api/shutdown", () =>
         {
             Log.Info("Shutdown requested via /api/shutdown");
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(100);
-                Environment.Exit(0);
-            });
+            if (Interlocked.Exchange(ref _shutdownRequested, 1) == 0)
+                _ = ShutdownAfterResponseAsync();
             return Results.Ok(new { status = "shutting_down" });
         });
 
@@ -214,14 +272,19 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
             return Results.Ok(new { taskId = task.TaskId, fileCount = task.FileCount, totalSize = task.TotalSize });
         });
 
-        app.MapPost("/api/send", (SendRequest body) =>
+        app.MapPost("/api/send", async (SendRequest body) =>
         {
             if (string.IsNullOrWhiteSpace(body.Address) || !ulong.TryParse(body.Address, out var address))
                 return Results.BadRequest(new { error = "Expected a BLE address string." });
             var device = _engine.Scanner.Devices.FirstOrDefault(d => d.Address == address);
             if (device is null) return Results.NotFound(new { error = "Device is no longer visible." });
-            if (_sendTask is { IsCompleted: false }) return Results.Conflict(new { error = "A transfer is already running." });
-            _sendTask = _engine.SendToAsync(device);
+            if (!await _sendGate.WaitAsync(0)) return Results.Conflict(new { error = "A transfer is already running." });
+            try
+            {
+                if (_sendTask is { IsCompleted: false }) return Results.Conflict(new { error = "A transfer is already running." });
+                _sendTask = _engine.SendToAsync(device);
+            }
+            finally { _sendGate.Release(); }
             _ = _sendTask.ContinueWith(t =>
             {
                 if (t.IsFaulted)
@@ -236,7 +299,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
 
         _app = app;
         await app.StartAsync();
-        Log.Info($"Flutter bridge listening on http://127.0.0.1:{Port}");
+        Log.Info($"Authenticated Flutter bridge listening on http://127.0.0.1:{Port}");
     }
 
     private static string DisplayName(PhoneDevice device, IReadOnlyList<PhoneDevice>? all = null)
@@ -315,6 +378,20 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         ClearPendingTransfers();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
+        _sendGate.Dispose();
+        CryptographicOperations.ZeroMemory(_authTokenBytes);
+    }
+
+    private async Task ShutdownAfterResponseAsync()
+    {
+        await Task.Yield();
+        try
+        {
+            _engine.CancelTransfer();
+            await _engine.StopAsync();
+            if (_app is not null) await _app.StopAsync();
+        }
+        catch (Exception ex) { Log.Error("Graceful bridge shutdown failed", ex); }
     }
 
     private sealed record BridgeEvent(long Seq, string Type, object Data, DateTimeOffset At);

@@ -18,6 +18,7 @@ internal static class SettingsStore
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "CatShareSender");
     private static readonly string FilePath = Path.Combine(DirectoryPath, "settings.json");
+    private static readonly SemaphoreSlim SaveGate = new(1, 1);
 
     public static SavedSettings Load()
     {
@@ -57,6 +58,7 @@ internal static class SettingsStore
         bool? minimizeToTray = null,
         bool? closeToTray = null)
     {
+        SaveGate.Wait();
         try
         {
             Current = new SavedSettings(
@@ -79,12 +81,16 @@ internal static class SettingsStore
                 closeToTray = Current.CloseToTray,
             },
                 new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(FilePath, json);
+            var tempPath = FilePath + ".tmp";
+            File.WriteAllText(tempPath, json);
+            if (File.Exists(FilePath)) File.Replace(tempPath, FilePath, null);
+            else File.Move(tempPath, FilePath);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Log.Warn($"Settings: save failed: {ex.Message}");
         }
+        finally { SaveGate.Release(); }
     }
 
     private static string? ReadString(JsonElement root, string name)

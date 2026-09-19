@@ -1,4 +1,6 @@
+using System.Net;
 using System.Security.Cryptography;
+using System.Reflection;
 using CatShareSender.Ui;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
@@ -9,9 +11,11 @@ namespace CatShareSender;
 
 internal static class Program
 {
-    // bump with every package refresh — the single-file exe has no Assembly.Location,
-    // so this constant is the only reliable way to tell WHICH build is running.
-    internal const string Version = "2026.09.06-2330";
+    internal static string Version => Assembly.GetExecutingAssembly()
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString()
+        ?? "unknown";
+    private const string BridgeTokenEnvironment = "OSHAREPC_BRIDGE_TOKEN";
 
     [STAThread]
     private static int Main(string[] args)
@@ -45,6 +49,12 @@ internal static class Program
                 mutex.ReleaseMutex();
                 return rc;
             }
+            if (args.Contains("--mockphone-cancel"))
+            {
+                var rc = RemoteCancelSelfTest.RunAsync().GetAwaiter().GetResult();
+                mutex.ReleaseMutex();
+                return rc;
+            }
             if (args.Contains("--zipprobe"))
             {
                 var rc = ZipProbe().GetAwaiter().GetResult();
@@ -65,15 +75,30 @@ internal static class Program
             }
             if (args.Contains("--bridge"))
             {
-                var rc = RunBridge(ParseParentPid(args)).GetAwaiter().GetResult();
+                var authToken = Environment.GetEnvironmentVariable(BridgeTokenEnvironment);
+                if (string.IsNullOrWhiteSpace(authToken))
+                {
+                    Log.Error($"Bridge mode requires {BridgeTokenEnvironment}; refusing to expose an unauthenticated localhost control plane.");
+                    mutex.ReleaseMutex();
+                    return 2;
+                }
+
+                var rc = RunBridge(ParseParentPid(args), authToken).GetAwaiter().GetResult();
                 mutex.ReleaseMutex();
                 return rc;
             }
+            if (args.Contains("--legacy-ui"))
+            {
+                Log.Warn("Starting unsupported legacy WinForms debug UI (--legacy-ui).");
+                ApplicationConfiguration.Initialize();
+                Application.Run(new MainForm());
+                mutex.ReleaseMutex();
+                return 0;
+            }
 
-            ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm());
+            Log.Warn("No backend mode selected. Launch catshare_gui.exe for the supported UI; use --legacy-ui only for backend debugging.");
             mutex.ReleaseMutex();
-            return 0;
+            return 2;
         }
         catch
         {
@@ -84,16 +109,16 @@ internal static class Program
     /// <summary>Headless mode: start the engine and idle (no UI). Handy for tests.</summary>
     private static async Task<int> ServeHeadless(TimeSpan duration)
     {
-        using var engine = new SenderEngine();
+        await using var engine = new SenderEngine();
         await engine.StartAsync(SenderEngine.DefaultPort);
         await Task.Delay(duration);
         await engine.StopAsync();
         return 0;
     }
 
-    private static async Task<int> RunBridge(int parentPid)
+    private static async Task<int> RunBridge(int parentPid, string authToken)
     {
-        await using var bridge = new CatShareBridgeServer();
+        await using var bridge = new CatShareBridgeServer(authToken);
         await bridge.StartAsync();
         if (parentPid <= 0)
         {
@@ -334,8 +359,8 @@ internal static class Program
     /// </summary>
     private static async Task<int> ZipProbe()
     {
-        using var engine = new SenderEngine();
-        await engine.StartAsync(SenderEngine.DefaultPort);
+        await using var server = new TransferServer();
+        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
 
         var tmp = Path.Combine(Path.GetTempPath(), "probe.pptx");
         using (var fs = File.Create(tmp))
@@ -345,7 +370,15 @@ internal static class Program
             using var w = new StreamWriter(e1.Open());
             w.Write("<probe/>");
         }
-        var task = engine.StageFiles(new[] { tmp })!;
+        var task = new TransferTask
+        {
+            Files = new List<string> { tmp },
+            SenderName = "OSharePC-ZipProbe",
+            SenderId = "0000",
+        };
+        task.ComputeSize();
+        server.SetTask(task);
+        server.AuthorizeLoopbackTest(task);
 
         var http = new HttpClient();
         foreach (var url in new[]
@@ -382,15 +415,23 @@ internal static class Program
     private static async Task<int> RunMockPhone()
     {
         int failures = 0;
-        using var engine = new SenderEngine();
-        await engine.StartAsync(SenderEngine.DefaultPort);
+        await using var server = new TransferServer();
+        await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
 
         // stage temp files (one small, one larger) to exercise the multi-file zip
         var tmp1 = Path.Combine(Path.GetTempPath(), "catshare-selftest.txt");
         var tmp2 = Path.Combine(Path.GetTempPath(), "catshare-selftest.bin");
         await File.WriteAllTextAsync(tmp1, "hello from catshare sender selftest");
         await File.WriteAllBytesAsync(tmp2, RandomNumberGenerator.GetBytes(128 * 1024));
-        var task = engine.StageFiles(new[] { tmp1, tmp2 })!;
+        var task = new TransferTask
+        {
+            Files = new List<string> { tmp1, tmp2 },
+            SenderName = "OSharePC-MockPhone",
+            SenderId = "0000",
+        };
+        task.ComputeSize();
+        server.SetTask(task);
+        server.ArmTransfer(task, IPAddress.Loopback.ToString(), IPAddress.Loopback.ToString());
 
         // --- play the phone ---
         var ws = new System.Net.WebSockets.ClientWebSocket();
@@ -441,28 +482,42 @@ internal static class Program
         if (totalSize != expectedTotal) { Log.Error("MOCKPHONE FAIL: totalSize mismatch"); failures++; }
         await Send(new Envelope { Type = "ack", Seq = sr.Seq, Method = "sendRequest", Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { }), HasPayload = true });
 
-        // 3. download the ZIP like the receiver does (folder-stream) — plaintext, the
-        //    pad's wlan flow connects without TLS (sender version >= 10015)
+        // 3. Download exactly like a stock OnePlus receiver. The official iOS sender
+        //    uses a chunked application/zip response named files.zip with direct
+        //    filenames and ZIP method STORED (0), not our legacy 0/ folder-stream.
         using var http = new System.Net.Http.HttpClient();
         var url = $"http://127.0.0.1:{SenderEngine.DefaultPort}/download?taskId={task.TaskId}";
         Log.Info($"MOCKPHONE: GET {url}");
         var resp = await http.GetAsync(url, cts.Token);
         if (!resp.IsSuccessStatusCode) { Log.Error($"MOCKPHONE FAIL: HTTP {(int)resp.StatusCode}"); failures++; return failures == 0 ? 0 : 1; }
-        Log.Info($"MOCKPHONE: HTTP {(int)resp.StatusCode}, oshare-transfer-type={(resp.Headers.TryGetValues("Oshare-Transfer-Type", out var tt) ? string.Join(",", tt!) : "none")}, len={resp.Content.Headers.ContentLength?.ToString() ?? "chunked"}");
-        if (!resp.Headers.TryGetValues("Oshare-Transfer-Type", out var osh) || !osh.Contains("folder-stream"))
-        { Log.Error("MOCKPHONE FAIL: missing Oshare-Transfer-Type: folder-stream"); failures++; }
+        Log.Info($"MOCKPHONE: HTTP {(int)resp.StatusCode}, transfer-type={(resp.Headers.TryGetValues("Oshare-Transfer-Type", out var tt) ? string.Join(",", tt!) : "none")}, len={resp.Content.Headers.ContentLength?.ToString() ?? "chunked"}");
 
-        await using var zipStream = await resp.Content.ReadAsStreamAsync(cts.Token);
-        using var zip = new System.IO.Compression.ZipArchive(zipStream, System.IO.Compression.ZipArchiveMode.Read);
+        if (resp.Headers.TryGetValues("Oshare-Transfer-Type", out _))
+        { Log.Error("MOCKPHONE FAIL: stock path must not advertise legacy Oshare-Transfer-Type"); failures++; }
+        var disposition = resp.Content.Headers.ContentDisposition?.FileName?.Trim('"');
+        if (!string.Equals(disposition, "files.zip", StringComparison.OrdinalIgnoreCase))
+        { Log.Error($"MOCKPHONE FAIL: Content-Disposition filename was '{disposition}', expected files.zip"); failures++; }
+
+        var zipBytes = await resp.Content.ReadAsByteArrayAsync(cts.Token);
+        if (zipBytes.Length < 30 || BitConverter.ToUInt32(zipBytes, 0) != 0x04034B50u)
+        { Log.Error("MOCKPHONE FAIL: invalid ZIP local header"); failures++; }
+        else if (BitConverter.ToUInt16(zipBytes, 8) != 0)
+        { Log.Error($"MOCKPHONE FAIL: ZIP compression method={BitConverter.ToUInt16(zipBytes, 8)}, expected STORED(0)"); failures++; }
+        else Log.Info("MOCKPHONE: local ZIP header confirms STORED method 0");
+
+        using var zipMemory = new MemoryStream(zipBytes, writable: false);
+        using var zip = new System.IO.Compression.ZipArchive(zipMemory, System.IO.Compression.ZipArchiveMode.Read);
         var entryNames = zip.Entries.Select(e => e.FullName).ToArray();
         Log.Info($"MOCKPHONE: zip entries: [{string.Join(", ", entryNames)}]");
-        if (entryNames.Length != 2 || entryNames.Any(n => !n.StartsWith("0/")))
-        { Log.Error("MOCKPHONE FAIL: entries not under 0/"); failures++; }
+        if (entryNames.Length != 2 || entryNames.Any(n => n.Contains('/')))
+        { Log.Error("MOCKPHONE FAIL: stock ZIP entries must be direct filenames"); failures++; }
         else
         {
             var ok = true;
             foreach (var entry in zip.Entries)
             {
+                if (entry.CompressedLength != entry.Length)
+                { Log.Error($"MOCKPHONE FAIL: {entry.FullName} is compressed ({entry.CompressedLength}/{entry.Length})"); ok = false; }
                 var src = entry.FullName.EndsWith(".txt") ? tmp1 : tmp2;
                 var downloaded = await File.ReadAllBytesAsync(src, cts.Token);
                 await using var es = entry.Open();
@@ -470,7 +525,8 @@ internal static class Program
                 await es.CopyToAsync(ms, cts.Token);
                 if (!ms.ToArray().SequenceEqual(downloaded)) { Log.Error($"MOCKPHONE FAIL: content mismatch for {entry.FullName}"); ok = false; }
             }
-            if (ok) Log.Info($"MOCKPHONE: content verified for {entryNames.Length} entries");
+            if (ok) Log.Info($"MOCKPHONE: official STORED content verified for {entryNames.Length} entries");
+            else failures++;
         }
 
         // 4. phone sends final status
@@ -479,7 +535,7 @@ internal static class Program
 
         File.Delete(tmp1);
         File.Delete(tmp2);
-        await engine.StopAsync();
+        await server.StopAsync();
         Log.Info(failures == 0 ? "MOCKPHONE PASSED" : $"MOCKPHONE FAILED ({failures})");
         return failures == 0 ? 0 : 1;
     }

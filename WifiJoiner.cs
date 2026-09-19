@@ -19,7 +19,21 @@ internal static class WifiJoiner
     /// list doesn't accumulate networks that don't exist.</summary>
     public static async Task CleanupStaleProfiles()
     {
-        try
+        var staleXml = Path.Combine(Path.GetTempPath(), ProfileName + ".xml");
+    try
+    {
+        if (File.Exists(staleXml))
+        {
+            File.Delete(staleXml);
+            Log.Info($"RX: removed stale WLAN profile XML '{staleXml}'");
+        }
+    }
+    catch (Exception ex)
+    {
+        Log.Warn($"RX: stale WLAN profile XML cleanup failed: {ex.Message}");
+    }
+
+    try
         {
             var shown = await Netsh("wlan show profiles");
             foreach (var line in shown.Stdout.Split('\n'))
@@ -60,7 +74,7 @@ internal static class WifiJoiner
                 var add = await Netsh($"wlan add profile filename=\"{file}\" user=current");
                 if (!add.Success) { errors.Add($"{auth} profile: {add.Detail}"); continue; }
                 state($"Wi-Fi association attempted ({auth})");
-                var connect = await Netsh($"wlan connect name=\"{name}\" ssid=\"{ssid}\" interface=\"{nic.Name}\"");
+                var connect = await Netsh($"wlan connect name=\"{name}\" ssid={QuoteArg(ssid)} interface=\"{nic.Name}\"");
                 if (!connect.Success) { errors.Add($"{auth} connect: {connect.Detail}"); await Netsh($"wlan delete profile name=\"{name}\""); continue; }
                 for (var i = 0; i < 120; i++)
                 {
@@ -149,4 +163,38 @@ internal static class WifiJoiner
     }
     private sealed record NetshResult(bool Success, string Detail, string Stdout);
     private static string Xml(string value) => System.Security.SecurityElement.Escape(value) ?? "";
+
+    /// <summary>Quotes a value per the Win32 CommandLineToArgvW rules so it lands as a
+    /// single netsh argument. The SSID comes from a BLE-advertised phone offer, so
+    /// without this an embedded '"' could inject extra netsh arguments (argument
+    /// injection) into the "wlan connect" invocation.</summary>
+    private static string QuoteArg(string value)
+    {
+        if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
+            return value;
+        var sb = new StringBuilder();
+        sb.Append('"');
+        for (var i = 0; i < value.Length; i++)
+        {
+            var backslashes = 0;
+            while (i < value.Length && value[i] == '\\') { backslashes++; i++; }
+            if (i == value.Length)
+            {
+                sb.Append('\\', backslashes * 2);
+                break;
+            }
+            if (value[i] == '"')
+            {
+                sb.Append('\\', backslashes * 2 + 1);
+                sb.Append('"');
+            }
+            else
+            {
+                sb.Append('\\', backslashes);
+                sb.Append(value[i]);
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
 }

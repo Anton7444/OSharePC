@@ -20,13 +20,13 @@ class CustomSegmentedButton<T> extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final borderColor = isDark ? AppColors.darkBorder : AppColors.lightBorder;
-    final activeBg = isDark ? const Color(0xFF28443B) : const Color(0xFFD0EAE2);
+    final activeBg = isDark ? AppColors.darkAccentStrong : AppColors.lightAccentStrong;
     final activeFg = isDark ? AppColors.darkAccent : AppColors.lightAccent;
     final inactiveFg = isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted;
 
     return Container(
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF162520) : const Color(0xFFE8F0EC),
+        color: isDark ? AppColors.darkAccentSubtle : AppColors.lightAccentSubtle,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: borderColor, width: 1),
       ),

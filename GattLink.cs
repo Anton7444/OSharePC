@@ -85,7 +85,7 @@ public sealed class GattLink : IDisposable
 
     /// <summary>Connect with retries — 'Unreachable' from GetGattServicesAsync is
     /// usually transient (address rotation, advertisement timing, RF).</summary>
-    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default)
+    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified)
     {
         Exception? last = null;
         for (int attempt = 1; attempt <= retries; attempt++)
@@ -96,33 +96,108 @@ public sealed class GattLink : IDisposable
             GattSession? session = null;
             try
             {
-                device = await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress);
+                device = addressType == BluetoothAddressType.Unspecified
+                    ? await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress)
+                    : await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress, addressType);
                 if (device is null)
                     throw new InvalidOperationException("device not found — is the phone still advertising?");
 
-                // MaintainConnection forces the stack to actually establish the LE link
+                // Match the stock Android client lifecycle: establish a real LE/GATT
+                // session first, then perform protocol service discovery. Do not race
+                // a full uncached database walk against the physical link coming up.
                 try
                 {
                     session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
-                    if (session is not null) session.MaintainConnection = true;
+                    if (session is not null)
+                    {
+                        Log.Info($"BLE: GATT session created status={session.SessionStatus} pdu={session.MaxPduSize} canMaintain={session.CanMaintainConnection}");
+                        if (session.CanMaintainConnection)
+                        {
+                            session.MaintainConnection = true;
+                            if (session.SessionStatus != GattSessionStatus.Active)
+                            {
+                                var activeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                                void OnStatusChanged(GattSession s, GattSessionStatusChangedEventArgs e)
+                                {
+                                    if (e.Status == GattSessionStatus.Active)
+                                        activeTcs.TrySetResult(true);
+                                }
+                                session.SessionStatusChanged += OnStatusChanged;
+                                try
+                                {
+                                    using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(350));
+                                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                                    await activeTcs.Task.WaitAsync(linkedCts.Token);
+                                }
+                                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                                {
+                                    // Timeout reached; proceed to service discovery
+                                }
+                                finally
+                                {
+                                    session.SessionStatusChanged -= OnStatusChanged;
+                                }
+                            }
+                        }
+                        Log.Info($"BLE: GATT session ready status={session.SessionStatus} pdu={session.MaxPduSize}");
+                    }
                 }
                 catch (Exception ex) { Log.Warn($"BLE: GattSession unavailable ({ex.Message})"); }
 
-                var svcResult = await device.GetGattServicesAsync(BluetoothCacheMode.Uncached);
-                if (svcResult.Status != GattCommunicationStatus.Success)
-                    throw new InvalidOperationException($"service discovery failed ({svcResult.Status})");
+                var discoveredServices = new List<GattDeviceService>();
+                GattCommunicationStatus discoveryStatus;
+                string discoveryLabel;
+
+                if (flow == SendFlow.CatShareHotspot)
+                {
+                    Log.Info("BLE: discovering target alliance service 9955 only");
+                    var result = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                    discoveryStatus = result.Status;
+                    discoveryLabel = "9955";
+                    if (result.Status == GattCommunicationStatus.Success)
+                        discoveredServices.AddRange(result.Services);
+                }
+                else
+                {
+                    Log.Info("BLE: discovering target OConnect service 9999 only");
+                    var oconnect = await device.GetGattServicesForUuidAsync(OConnectServiceUuid, BluetoothCacheMode.Uncached);
+                    discoveryStatus = oconnect.Status;
+                    discoveryLabel = "9999";
+                    if (oconnect.Status == GattCommunicationStatus.Success)
+                        discoveredServices.AddRange(oconnect.Services);
+
+                    // Auto can also target CatShare. Probe 9955 only if 9999 was
+                    // queried successfully and is genuinely absent. Never start a
+                    // second discovery after an already-failed physical link.
+                    if (flow == SendFlow.Auto &&
+                        discoveryStatus == GattCommunicationStatus.Success &&
+                        discoveredServices.Count == 0)
+                    {
+                        Log.Info("BLE: service 9999 absent; probing 9955 fallback");
+                        var alliance = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                        discoveryStatus = alliance.Status;
+                        discoveryLabel = "9955";
+                        if (alliance.Status == GattCommunicationStatus.Success)
+                            discoveredServices.AddRange(alliance.Services);
+                    }
+                }
+
+                if (discoveryStatus != GattCommunicationStatus.Success)
+                    throw new InvalidOperationException($"target service {discoveryLabel} discovery failed ({discoveryStatus})");
+                if (discoveredServices.Count == 0)
+                    throw new InvalidOperationException($"target service {discoveryLabel} is not exposed by the device");
 
                 var link = new GattLink();
                 link._device = device;
                 link._session = session;
-                link._services.AddRange(svcResult.Services);
+                link._services.AddRange(discoveredServices);
                 device = null;       // ownership moved to the link
                 session = null;
-                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (flow={flow}, attempt {attempt})");
+                Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, target={discoveryLabel}, attempt {attempt})");
 
                 try
                 {
-                    await link.EnumerateAsync(flow, svcResult.Services);
+                    await link.EnumerateAsync(flow, discoveredServices);
                     return link;
                 }
                 catch
@@ -156,16 +231,40 @@ public sealed class GattLink : IDisposable
         {
             try
             {
-                var r = await svc.GetCharacteristicsForUuidAsync(OConnectReadUuid, BluetoothCacheMode.Uncached);
-                var w = await svc.GetCharacteristicsForUuidAsync(OConnectWriteUuid, BluetoothCacheMode.Uncached);
-                var n = await svc.GetCharacteristicsForUuidAsync(OConnectNotifyUuid, BluetoothCacheMode.Uncached);
-                if (r.Status == GattCommunicationStatus.Success && r.Characteristics.Count > 0 &&
-                    w.Status == GattCommunicationStatus.Success && w.Characteristics.Count > 0 &&
-                    n.Status == GattCommunicationStatus.Success && n.Characteristics.Count > 0)
+                // Single-shot range discovery: gets all characteristics in 1 BLE RTT instead of 3
+                var charsResult = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+                if (charsResult.Status == GattCommunicationStatus.Success)
                 {
-                    OConnectReadChar = r.Characteristics[0];
-                    OConnectWriteChar = w.Characteristics[0];
-                    OConnectNotifyChar = n.Characteristics[0];
+                    foreach (var c in charsResult.Characteristics)
+                    {
+                        if (c.Uuid == OConnectReadUuid) OConnectReadChar = c;
+                        else if (c.Uuid == OConnectWriteUuid) OConnectWriteChar = c;
+                        else if (c.Uuid == OConnectNotifyUuid) OConnectNotifyChar = c;
+                    }
+                }
+
+                // Fallback for drivers that don't return all characteristics in one range query
+                if (OConnectReadChar is null)
+                {
+                    var r = await svc.GetCharacteristicsForUuidAsync(OConnectReadUuid, BluetoothCacheMode.Uncached);
+                    if (r.Status == GattCommunicationStatus.Success && r.Characteristics.Count > 0)
+                        OConnectReadChar = r.Characteristics[0];
+                }
+                if (OConnectWriteChar is null)
+                {
+                    var w = await svc.GetCharacteristicsForUuidAsync(OConnectWriteUuid, BluetoothCacheMode.Uncached);
+                    if (w.Status == GattCommunicationStatus.Success && w.Characteristics.Count > 0)
+                        OConnectWriteChar = w.Characteristics[0];
+                }
+                if (OConnectNotifyChar is null)
+                {
+                    var n = await svc.GetCharacteristicsForUuidAsync(OConnectNotifyUuid, BluetoothCacheMode.Uncached);
+                    if (n.Status == GattCommunicationStatus.Success && n.Characteristics.Count > 0)
+                        OConnectNotifyChar = n.Characteristics[0];
+                }
+
+                if (OConnectReadChar != null && OConnectWriteChar != null && OConnectNotifyChar != null)
+                {
                     Log.Info("BLE: OPlus-Connect service 9999 available (read 9897 / write 9896 / notify 9898)");
                 }
             }
@@ -178,19 +277,40 @@ public sealed class GattLink : IDisposable
         if (flow != SendFlow.OConnectLan || flow == SendFlow.Auto)
         foreach (var svc in services.Where(s => s.Uuid == ServiceUuid))
         {
-
             try
             {
-                var statusResult = await svc.GetCharacteristicsForUuidAsync(CharStatusUuid, BluetoothCacheMode.Uncached);
-                var p2pResult = await svc.GetCharacteristicsForUuidAsync(CharP2pUuid, BluetoothCacheMode.Uncached);
-                if (statusResult.Status != GattCommunicationStatus.Success || statusResult.Characteristics.Count == 0 ||
-                    p2pResult.Status != GattCommunicationStatus.Success || p2pResult.Characteristics.Count == 0)
+                GattCharacteristic? statusChar = null;
+                GattCharacteristic? p2pChar = null;
+
+                var charsResult = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+                if (charsResult.Status == GattCommunicationStatus.Success)
+                {
+                    foreach (var c in charsResult.Characteristics)
+                    {
+                        if (c.Uuid == CharStatusUuid) statusChar = c;
+                        else if (c.Uuid == CharP2pUuid) p2pChar = c;
+                    }
+                }
+
+                if (statusChar is null)
+                {
+                    var statusResult = await svc.GetCharacteristicsForUuidAsync(CharStatusUuid, BluetoothCacheMode.Uncached);
+                    if (statusResult.Status == GattCommunicationStatus.Success && statusResult.Characteristics.Count > 0)
+                        statusChar = statusResult.Characteristics[0];
+                }
+                if (p2pChar is null)
+                {
+                    var p2pResult = await svc.GetCharacteristicsForUuidAsync(CharP2pUuid, BluetoothCacheMode.Uncached);
+                    if (p2pResult.Status == GattCommunicationStatus.Success && p2pResult.Characteristics.Count > 0)
+                        p2pChar = p2pResult.Characteristics[0];
+                }
+
+                if (statusChar is null || p2pChar is null)
                 {
                     Log.Warn("BLE: found a 9955 service but its 9954/9953 characteristics are missing");
                     continue;
                 }
 
-                var statusChar = statusResult.Characteristics[0];
                 var read = await statusChar.ReadValueAsync(BluetoothCacheMode.Uncached);
                 if (read.Status != GattCommunicationStatus.Success)
                 {
@@ -213,7 +333,7 @@ public sealed class GattLink : IDisposable
                 Endpoints.Add(new GattEndpoint
                 {
                     StatusChar = statusChar,
-                    P2pChar = p2pResult.Characteristics[0],
+                    P2pChar = p2pChar,
                     Status = status,
                 });
                 Log.Info($"BLE: 9954 ({(status.CatShareVersion is null ? "stock 互传" : $"CatShare v{status.CatShareVersion}")}): {json}");
@@ -311,74 +431,85 @@ public sealed class GattLink : IDisposable
 
     /// <summary>
     /// OPlus-Connect (iOS-style) LAN flow, mirroring d8/v.java's 0x9896 state machine:
-    ///  1. read 0x9998 → {"state","key","version"} — phone marks us as the peer (N=1)
+    ///  1. read 0x9897 → {"state","key","version"} — phone marks us as the peer (N=1)
     ///  2. write 0x9896 state-1 (plain JSON, version ≥ 10302 keeps fields plaintext,
     ///     pv &lt; 5 skips account validation) → phone shows the receive card (N=2)
-    ///  3. write 0x9896 state-4 {"ip","port"} (each value AES-CBC encrypted with the
+    ///  3. write 0x9896 state-3 WLAN offer {"ip","port"} (each value AES-CBC encrypted with the
     ///     ECDH session key, iOS variant) → phone connects wss://ip:port directly.
     /// The 5s timer after step 1 means state-1 must be written immediately.
     /// </summary>
     public async Task OConnectLanSendAsync(
         LanInfo lan, int serverPort, OShareCrypto crypto, string senderName, int fileCount,
-        Action<string>? status = null, Func<bool>? phoneConnected = null, CancellationToken ct = default)
+        Action<string>? status = null, Func<bool>? phoneConnected = null,
+        Func<TimeSpan, CancellationToken, Task<bool>>? waitForPhoneConnectedAsync = null,
+        CancellationToken ct = default)
     {
         if (OConnectReadChar is null || OConnectWriteChar is null || OConnectNotifyChar is null)
             throw new InvalidOperationException(
                 "BLE: phone does not expose the OPlus-Connect service 9999 (互传 receive screen must be open; " +
                 "after a failed attempt the phone tears the service down until the screen is reopened).");
 
-        // 0. Windows negotiates the ATT MTU automatically; read the effective PDU size
-        int maxPdu = 247;
-        try
-        {
-            using var mtuSession = await GattSession.FromDeviceIdAsync(_device!.BluetoothDeviceId);
-            if (mtuSession is not null)
-            {
-                maxPdu = mtuSession.MaxPduSize;
-                Log.Info($"BLE: negotiated ATT MTU {maxPdu}");
-            }
-        }
-        catch (Exception ex) { Log.Warn($"BLE: MTU query failed ({ex.Message}), assuming 247"); }
+        // 0. Windows negotiates the ATT MTU automatically; read the effective PDU size from the active session
+        int maxPdu = _session?.MaxPduSize ?? 247;
+        Log.Info($"BLE: effective ATT MTU {maxPdu}");
 
         // 1. subscribe 0x9898 notifications (account challenge + wlan-ip messages).
         //    Every phone->PC message in the iOS-mode flow (account challenge, wlan
         //    offer, SoftAp info) is a notifyCharacteristicChanged on 0x9898 - without
         //    the CCCD write the phone silently drops all of them (Android 14+).
-        var notifyTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accountNotifyTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wlanNotifyTcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnNotify(GattCharacteristic c, GattValueChangedEventArgs e)
         {
             try
             {
                 var text = ReadString(e.CharacteristicValue);
                 using var doc = JsonDocument.Parse(text);
-                if (doc.RootElement.TryGetProperty("account_id", out _))
-                {
-                    Log.Info($"BLE: 9898 notify <- {text}");
-                    notifyTcs.TrySetResult(text);
-                }
-                else
-                {
-                    Log.Info($"BLE: 9898 notify (pre-challenge, ignored) <- {text}");
-                }
+                var root = doc.RootElement;
+                Log.Info($"BLE: 9898 notify <- {text}");
+
+                if (root.TryGetProperty("account_id", out _))
+                    accountNotifyTcs.TrySetResult(text);
+
+                if (root.TryGetProperty("wlan", out _) || root.TryGetProperty("ip", out _))
+                    wlanNotifyTcs.TrySetResult(text);
             }
             catch (Exception ex) { Log.Warn($"BLE: 9898 notify parse failed: {ex.Message}"); }
         }
         OConnectNotifyChar.ValueChanged += OnNotify;
 
-        // enable notifications via the CCCD descriptor. MUST be Uncached: the cached
-        // path returns an empty descriptor list on a fresh connection (false negative
-        // that silently killed the whole notify path in earlier builds).
-        var cccd = (await OConnectNotifyChar.GetDescriptorsAsync(BluetoothCacheMode.Uncached)).Descriptors
-            .FirstOrDefault(d => d.Uuid == CccdUuid);
-        Log.Info($"BLE: 0x9898 descriptors: [{string.Join(", ",
-            (await OConnectNotifyChar.GetDescriptorsAsync()).Descriptors.Select(d => ShortUuid(d.Uuid)))}]");
-        if (cccd is not null)
+        // Prefer the characteristic-level WinRT CCCD API. Some OnePlus builds hide
+        // the descriptor from enumeration even though the characteristic can notify.
+        var notificationsSubscribed = false;
+        try
         {
-            var w = await cccd.WriteValueAsync(ToBuffer(BitConverter.GetBytes((ushort)1)));
-            Log.Info($"BLE: CCCD(9898) subscribed ({w})");
+            var sub = await OConnectNotifyChar.WriteClientCharacteristicConfigurationDescriptorAsync(
+                GattClientCharacteristicConfigurationDescriptorValue.Notify);
+            notificationsSubscribed = sub == GattCommunicationStatus.Success;
+            Log.Info($"BLE: 9898 notification subscription via WinRT = {sub}");
         }
-        else
-            Log.Warn("BLE: 0x9898 has no CCCD descriptor - notifications may not arrive");
+        catch (Exception ex)
+        {
+            Log.Warn($"BLE: WinRT 9898 notification subscription failed: {ex.Message}");
+        }
+
+        if (!notificationsSubscribed)
+        {
+            var cccd = (await OConnectNotifyChar.GetDescriptorsAsync(BluetoothCacheMode.Uncached)).Descriptors
+                .FirstOrDefault(d => d.Uuid == CccdUuid);
+            Log.Info($"BLE: 0x9898 descriptors: [{string.Join(", ",
+                (await OConnectNotifyChar.GetDescriptorsAsync()).Descriptors.Select(d => ShortUuid(d.Uuid)))}]");
+            if (cccd is not null)
+            {
+                var w = await cccd.WriteValueAsync(ToBuffer(BitConverter.GetBytes((ushort)1)));
+                notificationsSubscribed = w == GattCommunicationStatus.Success;
+                Log.Info($"BLE: CCCD(9898) compatibility subscription = {w}");
+            }
+            else
+            {
+                Log.Warn("BLE: 0x9898 exposes no enumerable CCCD; official notify-driven flow unavailable on this Windows stack");
+            }
+        }
 
         try
         {
@@ -416,7 +547,7 @@ public sealed class GattLink : IDisposable
             if (OConnectPv >= 5)
             {
                 status?.Invoke("waiting for phone account validation...");
-                var challengeJson = await notifyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+                var challengeJson = await accountNotifyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
                 using var challenge = JsonDocument.Parse(challengeJson);
                 var encPhoneAccount = challenge.RootElement.TryGetProperty("account_id", out var ai)
                     ? ai.GetString() : null;
@@ -438,55 +569,104 @@ public sealed class GattLink : IDisposable
             }
             else
             {
-                // pv<5: the pad now shows the receive CARD. The user taps accept, which
-                // moves the pad to N=3. state3 writes sent before that are silently
-                // ignored by the pad (dispatch only handles N in {1,6,3,4}), so the
-                // retry loop below simply waits for the accept.
-                status?.Invoke("请在平板上点『接受』以确认接收…");
-                Log.Info("BLE: state1 (card flow) sent - waiting for the user to accept on the pad");
+                // pv<5: OnePlus Share advances only after the user accepts the card,
+                // then emits its WLAN transition on 9898.
+                status?.Invoke("请在手机上点『接受』以确认接收…");
+                Log.Info("BLE: state1 sent - waiting for official 9898 accept/WLAN transition");
             }
 
-            // 6. state-3: offer our wlan (ip/port) - the phone connects wss://ip:port.
-            //    60 x 3s = 3 minutes: enough time to accept the card on the pad.
             var encIp = OShareCrypto.CbcEncryptToB64(cbcKey, cbcIv, lan.IpString);
             var encPort = OShareCrypto.CbcEncryptToB64(cbcKey, cbcIv, serverPort.ToString());
-            status?.Invoke("offering LAN address, waiting for phone connection...");
-            for (int attempt = 1; attempt <= 60; attempt++)
+            var state3 = JsonSerializer.Serialize(new Dictionary<string, object>
             {
-                ct.ThrowIfCancellationRequested();
-                if (phoneConnected?.Invoke() == true)
-                {
-                    Log.Info("BLE: phone connected to our server - handshake complete");
-                    return;
-                }
-                var state3 = JsonSerializer.Serialize(new Dictionary<string, object>
-                {
-                    ["wlan"] = "wlan",
-                    ["wlan_accept"] = true,
-                    ["ip"] = encIp,
-                    ["port"] = encPort,
-                });
-                Log.Info($"BLE: 9896 state3 <- {state3}");
-                await WriteOConnectSingle(state3);
-                await Task.Delay(3000, ct);
-            }
-            throw new InvalidOperationException(
-                "BLE: phone never connected within 3 minutes of the wlan offer - " +
-                "accept the receive card on the pad (互传), and keep both devices on the same Wi-Fi.");
+                ["wlan"] = "wlan",
+                ["wlan_accept"] = true,
+                ["ip"] = encIp,
+                ["port"] = encPort,
+            });
+
+            // OnePlus Share's real iOS peer writes the WLAN offer immediately after
+  // state1, before the user presses Accept. The phone stores this state3 data
+  // while the confirmation card is visible and consumes it after acceptance.
+  // Waiting for a 9898 notification before the first state3 write creates a
+  // Windows-only race because some stacks cannot expose/subscribe the CCCD.
+  Log.Info($"BLE: 9896 state3 initial <- {state3}");
+  await WriteOConnectSingle(state3);
+  status?.Invoke("请在手机上点『接受』以确认接收…");
+
+  // 9898 is diagnostic/observational for pv=1, not a prerequisite.
+  if (notificationsSubscribed)
+  {
+      _ = wlanNotifyTcs.Task.ContinueWith(t =>
+      {
+          if (t.Status == TaskStatus.RanToCompletion)
+              Log.Info($"BLE: official WLAN transition observed: {t.Result}");
+      }, TaskScheduler.Default);
+  }
+  else
+  {
+      Log.Warn("BLE: 9898 notifications unavailable; continuing with official write-driven pv=1 flow");
+  }
+
+  // The real trace shows state3 being written again if the receiver has not
+  // opened the WebSocket yet. Keep retries bounded and tied to this session.
+  status?.Invoke("waiting for phone LAN/WebSocket connection...");
+  var connectionDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(24);
+  var nextState3Retry = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(3);
+  var state3RetryCount = 0;
+  while (DateTimeOffset.UtcNow < connectionDeadline)
+  {
+      ct.ThrowIfCancellationRequested();
+      if (phoneConnected?.Invoke() == true)
+      {
+          Log.Info("BLE: phone connected to our server - transfer session ready");
+          return;
+      }
+
+      var maxWait = nextState3Retry - DateTimeOffset.UtcNow;
+      if (maxWait <= TimeSpan.Zero) maxWait = TimeSpan.FromMilliseconds(50);
+      else if (maxWait > TimeSpan.FromSeconds(3)) maxWait = TimeSpan.FromSeconds(3);
+
+      if (waitForPhoneConnectedAsync != null)
+      {
+          var connected = await waitForPhoneConnectedAsync(maxWait, ct);
+          if (connected || phoneConnected?.Invoke() == true)
+          {
+              Log.Info("BLE: phone connected to our server (signaled) - transfer session ready");
+              return;
+          }
+      }
+      else
+      {
+          await Task.Delay(maxWait < TimeSpan.FromMilliseconds(200) ? maxWait : TimeSpan.FromMilliseconds(200), ct);
+          if (phoneConnected?.Invoke() == true)
+          {
+              Log.Info("BLE: phone connected to our server - transfer session ready");
+              return;
+          }
+      }
+
+      if (DateTimeOffset.UtcNow >= nextState3Retry && state3RetryCount < 4)
+      {
+          state3RetryCount++;
+          Log.Info($"BLE: 9896 state3 retry {state3RetryCount}/4 <- {state3}");
+          await WriteOConnectSingle(state3);
+          nextState3Retry = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(4);
+      }
+  }
+  throw new InvalidOperationException("BLE: phone did not establish the LAN/WebSocket transfer session after acceptance.");
         }
         finally
         {
             OConnectNotifyChar.ValueChanged -= OnNotify;
             try
             {
-                var cccdOff = (await OConnectNotifyChar.GetDescriptorsAsync(BluetoothCacheMode.Uncached)).Descriptors
-                    .FirstOrDefault(d => d.Uuid == CccdUuid);
-                if (cccdOff is not null)
-                    await cccdOff.WriteValueAsync(ToBuffer(BitConverter.GetBytes((ushort)0)));
+                await OConnectNotifyChar.WriteClientCharacteristicConfigurationDescriptorAsync(
+                    GattClientCharacteristicConfigurationDescriptorValue.None);
             }
             catch (Exception ex)
             {
-                Log.Warn($"BLE: CCCD(9898) unsubscribe failed: {ex.Message}");
+                Log.Warn($"BLE: 9898 unsubscribe failed: {ex.Message}");
             }
         }
     }

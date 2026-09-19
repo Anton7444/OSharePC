@@ -170,8 +170,8 @@ class _SendTabState extends State<SendTab> {
                         ),
                         decoration: BoxDecoration(
                           color: isDark
-                              ? const Color(0xFF1E3F35)
-                              : const Color(0xFFD4EDE5),
+                              ? AppColors.darkAccentSoft
+                              : AppColors.lightAccentSoft,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(
@@ -225,7 +225,7 @@ class _SendTabState extends State<SendTab> {
         ? (isDark ? AppColors.darkAccent : AppColors.lightAccent)
         : (isDark ? AppColors.darkBorder : AppColors.lightBorder);
     final bgColor = _isDragging
-        ? (isDark ? const Color(0xFF1B382F) : const Color(0xFFE2F3EC))
+        ? (isDark ? AppColors.darkAccentSoft : AppColors.lightAccentSoft)
         : (isDark ? AppColors.darkCard : AppColors.lightCard);
 
     return InkWell(
@@ -328,7 +328,7 @@ class _SendTabState extends State<SendTab> {
         ? (isDark ? AppColors.darkAccent : AppColors.lightAccent)
         : (isDark ? AppColors.darkBorder : AppColors.lightBorder);
     final bgColor = _isDragging
-        ? (isDark ? const Color(0xFF1B382F) : const Color(0xFFE2F3EC))
+        ? (isDark ? AppColors.darkAccentSoft : AppColors.lightAccentSoft)
         : (isDark ? AppColors.darkCard : AppColors.lightCard);
 
     return AnimatedContainer(
@@ -403,8 +403,8 @@ class _SendTabState extends State<SendTab> {
               padding: const EdgeInsets.symmetric(vertical: 6),
               decoration: BoxDecoration(
                 color: isDark
-                    ? const Color(0xFF1E3F35)
-                    : const Color(0xFFD4EDE5),
+                    ? AppColors.darkAccentSoft
+                    : AppColors.lightAccentSoft,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
@@ -437,8 +437,8 @@ class _SendTabState extends State<SendTab> {
                   ),
                   decoration: BoxDecoration(
                     color: isDark
-                        ? const Color(0xFF162520)
-                        : const Color(0xFFEFF5F2),
+                        ? AppColors.darkAccentSubtle
+                        : AppColors.lightAccentSubtle,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Row(
@@ -572,8 +572,8 @@ class _SendTabState extends State<SendTab> {
               height: 48,
               decoration: BoxDecoration(
                 color: isDark
-                    ? const Color(0xFF1E3F35)
-                    : const Color(0xFFD4EDE5),
+                    ? AppColors.darkAccentSoft
+                    : AppColors.lightAccentSoft,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(
@@ -608,8 +608,8 @@ class _SendTabState extends State<SendTab> {
                         ),
                         decoration: BoxDecoration(
                           color: isDark
-                              ? const Color(0xFF243932)
-                              : const Color(0xFFE2EBE6),
+                              ? AppColors.darkAccentSoft
+                              : AppColors.lightAccentSoft,
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
@@ -692,8 +692,8 @@ class _SendTabState extends State<SendTab> {
                 height: 60,
                 decoration: BoxDecoration(
                   color: isDark
-                      ? const Color(0xFF1E3F35)
-                      : const Color(0xFFD4EDE5),
+                      ? AppColors.darkAccentSoft
+                      : AppColors.lightAccentSoft,
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
@@ -723,8 +723,8 @@ class _SendTabState extends State<SendTab> {
                   value: transfer.progress > 0 ? transfer.progress : null,
                   minHeight: 8,
                   backgroundColor: isDark
-                      ? const Color(0xFF243932)
-                      : const Color(0xFFE2EBE6),
+                      ? AppColors.darkAccentSoft
+                      : AppColors.lightAccentSoft,
                   color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
                 ),
               ),

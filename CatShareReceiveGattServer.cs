@@ -77,6 +77,8 @@ public sealed class CatShareReceiveGattServer : IDisposable
                 if (provider.AdvertisementStatus == GattServiceProviderAdvertisementStatus.Started) return;
             }
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log.Error("RX: 9955 advertisement retry failed", ex); }
         finally { Interlocked.Exchange(ref _advertRetrying, 0); }
     }
 
@@ -158,15 +160,16 @@ public sealed class CatShareReceiveGattServer : IDisposable
 
     private async void OnStatusRead(GattLocalCharacteristic sender, GattReadRequestedEventArgs args)
     {
-        var request = await args.GetRequestAsync();
-        if (request is null) return;
         try
         {
+            var request = await args.GetRequestAsync();
+            if (request is null) return;
             var offset = (int)request.Offset;
             var bytes = offset >= _statusBytes.Length ? [] : _statusBytes[offset..];
             request.RespondWithValue(ToBuffer(bytes));
             State($"9954 read served ({bytes.Length}B)");
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Log.Warn($"RX: 9954 read failed: {ex.Message}");
@@ -175,10 +178,11 @@ public sealed class CatShareReceiveGattServer : IDisposable
 
     private async void OnP2pWrite(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args)
     {
-        var request = await args.GetRequestAsync();
-        if (request is null) return;
+        GattWriteRequest? request = null;
         try
         {
+            request = await args.GetRequestAsync();
+            if (request is null) return;
             var reader = DataReader.FromBuffer(request.Value);
             var bytes = new byte[request.Value.Length];
             reader.ReadBytes(bytes);
@@ -218,6 +222,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
                 catch (Exception ex) { Log.Error("RX: accepted-offer handler failed", ex); }
             }
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             Log.Error("RX: 9953 write handling failed", ex);
