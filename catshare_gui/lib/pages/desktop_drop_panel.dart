@@ -268,7 +268,6 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   // and 1 is the expanded device picker.
   late final AnimationController _visual;
 
-  Offset _anchor = const Offset(1904, 1064);
   int _geometryGeneration = 0;
   int _collapseGeneration = 0;
   Timer? _collapseTimer;
@@ -299,10 +298,6 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   }
 
   Future<void> _initWindow() async {
-    // main.dart already parked the native window at the idle rect for this
-    // same anchor before runApp(); this just caches the anchor point so stage
-    // transitions can keep the corner pinned.
-    _anchor = await resolveCornerAnchor();
     await windowManager.setAlwaysOnTop(true);
   }
 
