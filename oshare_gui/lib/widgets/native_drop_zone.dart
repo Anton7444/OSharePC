@@ -6,7 +6,7 @@ class DragDropService {
   static final DragDropService instance = DragDropService._();
   DragDropService._();
 
-  static const MethodChannel _channel = MethodChannel('catshare/drag_drop');
+  static const MethodChannel _channel = MethodChannel('oshare/drag_drop');
 
   final List<void Function(bool isDragging)> _dragStateListeners = [];
   final List<void Function(List<String> paths)> _dropListeners = [];

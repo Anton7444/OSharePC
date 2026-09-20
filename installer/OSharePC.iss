@@ -2,8 +2,7 @@
 #define MyAppVersion "1.0.1"
 #endif
 #define MyAppName "OShare PC"
-#define MyAppExeName "OSharePC.exe"
-
+#define MyAppExeName "oshare_gui.exe"
 
 
 
@@ -124,12 +123,11 @@ begin
       '$res = $wr.GetResponse(); ' +
       '$res.Close(); ' +
     '} catch {}; ' +
-    'Get-Process -Name ''OSharePC'' -ErrorAction SilentlyContinue | Where-Object { ' +
+    'Get-Process -Name ''oshare_gui'' -ErrorAction SilentlyContinue | Where-Object { ' +
       'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
     '} | ForEach-Object { try { $_.CloseMainWindow() } catch {} }; ' +
     'Start-Sleep -Milliseconds 1200; ' +
-    'Get-Process -Name ''OSharePC'', ''CatShareSender'' -ErrorAction SilentlyContinue | Where-Object { ' +
-      'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
+    'Get-Process -Name ''oshare_gui'', ''OSharePC'' -ErrorAction SilentlyContinue | Where-Object { ' +      'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
     '} | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} }; ' +
     'Start-Sleep -Milliseconds 300;';
 
@@ -188,16 +186,16 @@ begin
 
     if UninstallRemoveAllData then
     begin
-      DelTree(ExpandConstant('{localappdata}\CatShareSender'), True, True, True);
-      DelTree(ExpandConstant('{userappdata}\com.catshare\catshare_gui'), True, True, True);
-      RemoveDir(ExpandConstant('{userappdata}\com.catshare'));
-      DelTree(ExpandConstant('{userappdata}\CatShare'), True, True, True);
+      DelTree(ExpandConstant('{localappdata}\OSharePC'), True, True, True);
+      DelTree(ExpandConstant('{userappdata}\com.oshare\oshare_gui'), True, True, True);
+      RemoveDir(ExpandConstant('{userappdata}\com.oshare'));
+      DelTree(ExpandConstant('{userappdata}\OShare'), True, True, True);
 
       NetshExe := ExpandConstant('{sys}\netsh.exe');
       if not FileExists(NetshExe) then
         NetshExe := 'netsh.exe';
-      Exec(NetshExe, 'advfirewall firewall delete rule name="CatShareSender"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Exec(NetshExe, 'advfirewall firewall delete rule name="CatShareSenderBandEcho"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(NetshExe, 'advfirewall firewall delete rule name="OSharePC"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(NetshExe, 'advfirewall firewall delete rule name="OSharePCBandEcho"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
 
     RemoveDir(ExpandConstant('{app}'));

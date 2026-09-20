@@ -1,12 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
-import 'package:catshare_gui/models/models.dart';
-import 'package:catshare_gui/pages/desktop_drop_panel.dart';
-import 'package:catshare_gui/config/language.dart';
-import 'package:catshare_gui/services/desktop_drop_panel_service.dart';
-import 'package:catshare_gui/services/bridge_client.dart';
-import 'package:catshare_gui/services/outgoing_staging_controller.dart';
-import 'package:catshare_gui/widgets/native_drop_zone.dart';
+import 'package:oshare_gui/models/models.dart';
+import 'package:oshare_gui/pages/desktop_drop_panel.dart';
+import 'package:oshare_gui/config/language.dart';
+import 'package:oshare_gui/services/desktop_drop_panel_service.dart';
+import 'package:oshare_gui/services/bridge_client.dart';
+import 'package:oshare_gui/services/outgoing_staging_controller.dart';
+import 'package:oshare_gui/widgets/native_drop_zone.dart';
 
 void main() {
   testWidgets('failed staged cancel keeps panel open without sending', (
@@ -101,7 +101,7 @@ void main() {
       name: 'A',
       kind: 'Phone',
       rssi: -40,
-      catShare: false,
+      oShare: false,
       addressText: 'A',
     );
     final second = DeviceModel(
@@ -109,7 +109,7 @@ void main() {
       name: 'B',
       kind: 'Phone',
       rssi: -45,
-      catShare: false,
+      oShare: false,
       addressText: 'B',
     );
 

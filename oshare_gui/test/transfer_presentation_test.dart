@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:catshare_gui/services/transfer_presentation.dart';
+import 'package:oshare_gui/services/transfer_presentation.dart';
 
 void main() {
   test('ETA is unavailable without a positive speed', () {

@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Text;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// Streaming ZIP writer matching the OnePlus Share iOS FileChunkedInput data path:

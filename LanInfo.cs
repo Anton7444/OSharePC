@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// Picks the "real" LAN adapter: the active IPv4 interface that owns the default

@@ -10,12 +10,12 @@ flutter_sdk/
 deploy-gui/
 installer-output/
 
-catshare_gui/.dart_tool/
-catshare_gui/build/
-catshare_gui/.idea/
-catshare_gui/.flutter-plugins-dependencies
-catshare_gui/*.iml
-catshare_gui/windows/flutter/ephemeral/
+oshare_gui/.dart_tool/
+oshare_gui/build/
+oshare_gui/.idea/
+oshare_gui/.flutter-plugins-dependencies
+oshare_gui/*.iml
+oshare_gui/windows/flutter/ephemeral/
 
 *.pdb
 *.log
@@ -28,14 +28,14 @@ gui_out.txt
 gui_err.txt
 
 # Local signing/private certificate material.
-CatShare.pfx
-CatShare.cer
+OShare.pfx
+OShare.cer
 *.p12
 *.key
 
 # Generated visualisation artifacts.
-catshare-architecture.html
-catshare-architecture.json
+oshare-architecture.html
+oshare-architecture.json
 pelican-bike.html
 
 Thumbs.db

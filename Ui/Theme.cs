@@ -1,6 +1,6 @@
 using Microsoft.Win32;
 
-namespace CatShareSender.Ui;
+namespace OShareSender.Ui;
 
 /// <summary>One Material-3 style color scheme (teal seed #009688), light or dark.</summary>
 public sealed class ThemeScheme
@@ -164,7 +164,7 @@ public static class Theme
 
     public static Color WithAlpha(Color c, int alpha) => Color.FromArgb(alpha, c);
 
-    private const string RegistryKey = @"Software\CatShareSender";
+    private const string RegistryKey = @"Software\OShareSender";
     private const string RegistryValue = "DarkMode";
 
     /// <summary>Loads the persisted mode; falls back to the Windows app theme.</summary>

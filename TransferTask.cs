@@ -1,4 +1,4 @@
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>A pending or running send task: the files we advertise in sendRequest and
 /// stream back on GET /download?taskId=...</summary>
@@ -46,11 +46,11 @@ public sealed class TransferTask
         PreparedCrcCache.Begin(Files);
     }
 
-    /// <summary>sendRequest body per pa/d.java (TaskInfo) + CatShare receiver expectations.</summary>
+    /// <summary>sendRequest body per pa/d.java (TaskInfo) + OShare receiver expectations.</summary>
     public Dictionary<string, object> BuildSendRequest() => new()
     {
         ["id"] = TaskId,
-        ["taskId"] = TaskId,                 // CatShare receiver reads taskId first
+        ["taskId"] = TaskId,                 // OShare receiver reads taskId first
         ["senderId"] = SenderId,
         ["senderName"] = SenderName,
         ["fileName"] = FirstFileName,

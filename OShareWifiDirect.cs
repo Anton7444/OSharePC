@@ -2,21 +2,21 @@ using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Devices.Enumeration;
 using Windows.Devices.WiFiDirect;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>Connects Windows to the Android-created, temporary Wi-Fi Direct group.</summary>
-public sealed class CatShareWifiDirectConnection : IDisposable
+public sealed class OShareWifiDirectConnection : IDisposable
 {
     private readonly WiFiDirectDevice _device;
     public string RemoteHost { get; }
 
-    private CatShareWifiDirectConnection(WiFiDirectDevice device, string remoteHost)
+    private OShareWifiDirectConnection(WiFiDirectDevice device, string remoteHost)
     {
         _device = device;
         RemoteHost = remoteHost;
     }
 
-    public static async Task<CatShareWifiDirectConnection> ConnectAsync(
+    public static async Task<OShareWifiDirectConnection> ConnectAsync(
         string remoteMac, Action<string>? state = null, CancellationToken ct = default)
     {
         var selector = WiFiDirectDevice.GetDeviceSelector();
@@ -40,7 +40,7 @@ public sealed class CatShareWifiDirectConnection : IDisposable
                 var device = await WiFiDirectDevice.FromIdAsync(info.Id).AsTask(ct);
                 var host = await WaitForRemoteHostAsync(device, ct);
                 state?.Invoke($"Wi-Fi Direct connected ({host})");
-                return new CatShareWifiDirectConnection(device, host);
+                return new OShareWifiDirectConnection(device, host);
             }
             catch (Exception ex)
             {

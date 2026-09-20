@@ -67,7 +67,7 @@ void main() async {
   bridgeClient.setLanguage(initialLanguage);
 
   runApp(
-    CatShareApp(
+    OShareApp(
       bridgeClient: bridgeClient,
       trayService: trayService,
       desktopDropPanelService: desktopDropPanelService,
@@ -146,14 +146,14 @@ Future<void> _runDesktopDropPanel() async {
   );
 }
 
-class CatShareApp extends StatefulWidget {
+class OShareApp extends StatefulWidget {
   final BridgeClient bridgeClient;
   final TrayService trayService;
   final DesktopDropPanelService desktopDropPanelService;
   final bool startHidden;
   final AppLanguage initialLanguage;
 
-  const CatShareApp({
+  const OShareApp({
     super.key,
     required this.bridgeClient,
     required this.trayService,
@@ -163,10 +163,10 @@ class CatShareApp extends StatefulWidget {
   });
 
   @override
-  State<CatShareApp> createState() => _CatShareAppState();
+  State<OShareApp> createState() => _OShareAppState();
 }
 
-class _CatShareAppState extends State<CatShareApp> {
+class _OShareAppState extends State<OShareApp> {
   ThemeMode _themeMode = ThemeMode.dark;
   AccentPreset _accent = AppColors.accentPresets.first;
   late AppLanguage _language;

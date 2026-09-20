@@ -12,7 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// HTTPS Kestrel server the phone connects to:
@@ -20,7 +20,7 @@ namespace CatShareSender;
 ///   https://&lt;pc-ip&gt;:&lt;port&gt;/download?taskId=..  ZIP ("folder-stream") download
 ///   https://&lt;pc-ip&gt;:&lt;port&gt;/thumbnail?taskId=.. 404 (no thumbnails yet)
 /// TLS: self-signed; the OShare client uses InsecureTrustManagerFactory and the
-/// CatShare app trusts everything, so no cert prep is needed on the phone.
+/// OShare app trusts everything, so no cert prep is needed on the phone.
 /// </summary>
 public sealed class TransferServer : IAsyncDisposable
 {
@@ -31,7 +31,7 @@ public sealed class TransferServer : IAsyncDisposable
     public bool IsRunning { get; private set; }
 
     /// <summary>True after a stock-alliance credential write; controls the raw "files"
-    /// trigger, which the CatShare app's strict parser would reject.</summary>
+    /// trigger, which the OShare app's strict parser would reject.</summary>
     public volatile bool PeerLooksStock = true;
 
     /// <summary>True while a phone WebSocket session is open (used by the OConnect
@@ -319,17 +319,17 @@ public sealed class TransferServer : IAsyncDisposable
     private static void TryAddFirewallRule(int port)
     {
         EnsureFirewallRule(
-            "CatShareSender",
-            $"advfirewall firewall add rule name=\"CatShareSender\" dir=in action=allow protocol=TCP localport={port} remoteip=localsubnet",
-            $"advfirewall firewall set rule name=\"CatShareSender\" new protocol=TCP localport={port} remoteip=localsubnet",
+            "OSharePC",
+            $"advfirewall firewall add rule name=\"OSharePC\" dir=in action=allow protocol=TCP localport={port} remoteip=localsubnet",
+            $"advfirewall firewall set rule name=\"OSharePC\" new protocol=TCP localport={port} remoteip=localsubnet",
             $"the phone will NOT be able to connect — allow TCP {port} from LocalSubnet in Windows Firewall");
 
         var exe = Environment.ProcessPath;
         if (!string.IsNullOrEmpty(exe))
             EnsureFirewallRule(
-                "CatShareSenderBandEcho",
-                $"advfirewall firewall add rule name=\"CatShareSenderBandEcho\" dir=in action=allow program=\"{exe}\" protocol=UDP remoteip=localsubnet",
-                $"advfirewall firewall set rule name=\"CatShareSenderBandEcho\" new program=\"{exe}\" protocol=UDP remoteip=localsubnet",
+                "OSharePCBandEcho",
+                $"advfirewall firewall add rule name=\"OSharePCBandEcho\" dir=in action=allow program=\"{exe}\" protocol=UDP remoteip=localsubnet",
+                $"advfirewall firewall set rule name=\"OSharePCBandEcho\" new program=\"{exe}\" protocol=UDP remoteip=localsubnet",
                 "the phone's LAN check times out and it falls back to hotspot mode");
     }
 
@@ -378,7 +378,7 @@ public sealed class TransferServer : IAsyncDisposable
 
             if (!p.WaitForExit(30000)) return (false, "elevated netsh timed out");
             if (p.ExitCode != 0) return (false, $"elevated netsh exited {p.ExitCode}");
-            var name = verifyRuleName ?? "CatShareSender";
+            var name = verifyRuleName ?? "OSharePC";
             var (_, chkOut) = RunNetsh($"advfirewall firewall show rule name=\"{name}\"", elevate: false);
             return (chkOut.Contains(name, StringComparison.OrdinalIgnoreCase), "updated via UAC prompt");
         }
@@ -420,7 +420,7 @@ public sealed class TransferServer : IAsyncDisposable
         try
         {
             // SENDER initiates versionNegotiation (decompiled j9/l.java:138).
-            // CatShare receiver accepts {"version":n} and replies {"version":min(n,1),"threadLimit":5}.
+            // OShare receiver accepts {"version":n} and replies {"version":min(n,1),"threadLimit":5}.
             await session.SendText(Envelope.Build("action", seq++, "versionNegotiation", new { version = 2 }));
             var vnAck = await session.ReceiveUntilAsync(e => e.IsAck && e.Method == "versionNegotiation", TimeSpan.FromSeconds(10));
             if (vnAck is null) { Log.Warn("WS: no versionNegotiation ack within 10s"); return; }
@@ -444,7 +444,7 @@ public sealed class TransferServer : IAsyncDisposable
             _wsConnectedTcs.TrySetResult(true);
 
             // The stock receiver starts downloading when it receives the bare
-            // string "files" (j9/g.java:898). The CatShare receiver parses every
+            // string "files" (j9/g.java:898). The OShare receiver parses every
             // text frame strictly, so we only send it to stock peers.
             if (session.PeerLooksStock)
             {
@@ -453,7 +453,7 @@ public sealed class TransferServer : IAsyncDisposable
             }
             else
             {
-                Log.Info("WS: CatShare-style peer, skipping raw 'files' trigger");
+                Log.Info("WS: OShare-style peer, skipping raw 'files' trigger");
             }
 
             // Wait for the download + final status.
@@ -642,9 +642,9 @@ public sealed class TransferServer : IAsyncDisposable
                 if (exception is not null) msg += $" :: {exception.Message}";
                 switch (logLevel)
                 {
-                    case LogLevel.Error or LogLevel.Critical: CatShareSender.Log.Error(msg); break;
-                    case LogLevel.Warning: CatShareSender.Log.Warn(msg); break;
-                    default: CatShareSender.Log.Info(msg); break;
+                    case LogLevel.Error or LogLevel.Critical: OShareSender.Log.Error(msg); break;
+                    case LogLevel.Warning: OShareSender.Log.Warn(msg); break;
+                    default: OShareSender.Log.Info(msg); break;
                 }
             }
         }
@@ -720,7 +720,7 @@ public sealed class TransferServer : IAsyncDisposable
         }
 
         // whole-batch mode — stock OnePlus peers use the official STORED ZIP path;
-        // custom/CatShare peers retain the legacy folder-stream compatibility path.
+        // custom/OShare peers retain the legacy folder-stream compatibility path.
         try
         {
             await WriteDownloadZip(ctx, task.Files, task.TotalSize, task.FirstFileName, _cancelCts.Token);
@@ -743,7 +743,7 @@ public sealed class TransferServer : IAsyncDisposable
     /// Stock OnePlus/OShare peers use the APK's iOSFileResponse/FileChunkedInput
     /// format: application/zip, chunked HTTP, direct filenames, STORED entries with
     /// CRC/size known before the local header, and 1 MiB data chunks. The legacy
-    /// folder-stream path remains only for the custom CatShare-compatible peer.
+    /// folder-stream path remains only for the custom OShare-compatible peer.
     /// </summary>
     private async Task WriteDownloadZip(
         HttpContext ctx,
@@ -786,7 +786,7 @@ public sealed class TransferServer : IAsyncDisposable
         await WriteFolderStreamZip(ctx, files, total, cancelToken);
     }
 
-    /// <summary>Legacy CatShare compatibility ZIP (entries under 0/). Stock OnePlus
+    /// <summary>Legacy OShare compatibility ZIP (entries under 0/). Stock OnePlus
     /// peers do not use this path.</summary>
     private async Task WriteFolderStreamZip(HttpContext ctx, IReadOnlyList<string> files, long total, CancellationToken cancelToken)
     {

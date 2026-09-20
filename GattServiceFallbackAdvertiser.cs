@@ -2,7 +2,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// Many Windows BT stacks abort GattServiceProvider.StartAdvertising outright
@@ -11,7 +11,7 @@ namespace CatShareSender;
 ///
 /// Raw 0x16 service-data sections ARE publishable through
 /// BluetoothLEAdvertisementPublisher (verified: 9955, 8881, 0x21 3331 all Started).
-/// Android maps 0x16 into ScanRecord.getServiceData(), which the 互传/CatShare
+/// Android maps 0x16 into ScanRecord.getServiceData(), which the 互传/OShare
 /// scanners match on; the phone then connects to this address and the GATT
 /// server (which works regardless of the provider's own advertising) answers.
 /// </summary>
@@ -63,7 +63,7 @@ public sealed class GattServiceFallbackAdvertiser : IDisposable
         _desired = true;
         var adv = new BluetoothLEAdvertisement();
 
-        // 9955 — CatShare/alliance receive service (GattServerService.kt)
+        // 9955 — OShare/alliance receive service (GattServerService.kt)
         adv.DataSections.Add(new BluetoothLEAdvertisementDataSection
         { DataType = 0x16, Data = Buf(new byte[] { 0x55, 0x99, 0x01 }) });
 

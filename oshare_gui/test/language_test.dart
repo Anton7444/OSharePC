@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:catshare_gui/config/language.dart';
+import 'package:oshare_gui/config/language.dart';
 
 void main() {
   const requiredKeys = <String>[

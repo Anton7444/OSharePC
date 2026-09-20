@@ -1,9 +1,9 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
-using CatShareSender.Ui;
+using OShareSender.Ui;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>Main window, styled after LocalSend: left nav rail, Send tab (selection card +
 /// nearby device tiles), Receive tab, Log tab, whole-window drag-to-send and themed dialogs.</summary>
@@ -99,7 +99,7 @@ public sealed class MainForm : Form
         _engine.DeviceSeen += OnDeviceSeen;
         _engine.Scanner.DeviceExpired += _ => QueueUi(RefreshDevices);
         _engine.TransferStateChanged += OnTransferState;
-        _engine.ConfirmIncomingCatShare = ConfirmIncomingAsync;
+        _engine.ConfirmIncomingOShare = ConfirmIncomingAsync;
         _engine.ConfirmIncomingTransfer = ConfirmIncomingTransferAsync;
         _engine.ReceiveProgress += (done, total) => QueueUi(() => OnReceiveProgress(done, total));
         _engine.ReceiveCompleted += (sender, files) => QueueUi(() => OnReceiveCompleted(sender, files));
@@ -187,7 +187,7 @@ public sealed class MainForm : Form
 
         // mode dropdown
         var savedIdx = _modeBox.SelectedIndex;
-        _modeBox.Items = [Lang.T("Mode.Auto"), Lang.T("Mode.Alliance"), Lang.T("Mode.CatShare")];
+        _modeBox.Items = [Lang.T("Mode.Auto"), Lang.T("Mode.Alliance"), Lang.T("Mode.OShare")];
         _modeBox.SelectedIndex = savedIdx;
 
         // file summary
@@ -254,7 +254,7 @@ public sealed class MainForm : Form
         _statusText = new TextBlock(Lang.T("Status.Starting"), 9f, dim: true) { Bounds = new Rectangle(16, 0, 200, 64) };
         _footerBar = new RoundedProgressBar { Visible = false };
         _modeBox = new AppDropdown(220, 40);
-        _modeBox.Items = [Lang.T("Mode.Auto"), Lang.T("Mode.Alliance"), Lang.T("Mode.CatShare")];
+        _modeBox.Items = [Lang.T("Mode.Auto"), Lang.T("Mode.Alliance"), Lang.T("Mode.OShare")];
         _modeBox.SelectedIndex = 0;
         _sendBtn = new AppButton(Lang.T("Btn.Send"), Glyphs.Send, AppButton.AppBtnStyle.Filled, 148, 40)
         {
@@ -768,7 +768,7 @@ public sealed class MainForm : Form
         }
     }
 
-    private Task<bool> ConfirmIncomingAsync(CatShareP2pOffer offer)
+    private Task<bool> ConfirmIncomingAsync(OShareP2pOffer offer)
     {
         if (IsDisposed || Disposing || !IsHandleCreated) return Task.FromResult(false);
         if (InvokeRequired)
@@ -783,7 +783,7 @@ public sealed class MainForm : Form
         }
 
         var answer = MessageBox.Show(this,
-            $"A CatShare device ({offer.SenderId}) wants to send files to this PC.\n\nAccept the incoming transfer?",
+            $"A OShare device ({offer.SenderId}) wants to send files to this PC.\n\nAccept the incoming transfer?",
             "Incoming OsharePC transfer", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
             MessageBoxDefaultButton.Button2);
         return Task.FromResult(answer == DialogResult.Yes);
@@ -907,7 +907,7 @@ public sealed class MainForm : Form
             var flow = _modeBox.SelectedIndex switch
             {
                 1 => SendFlow.OConnectLan,
-                2 => SendFlow.CatShareHotspot,
+                2 => SendFlow.OShareHotspot,
                 _ => SendFlow.Auto,
             };
             await _engine.SendToAsync(tile.Device, flow);

@@ -2,7 +2,7 @@ using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
-namespace CatShareSender.Ui;
+namespace OShareSender.Ui;
 
 /// <summary>Segoe MDL2 Assets glyph code points (Windows 10/11 system font).</summary>
 internal static class Glyphs

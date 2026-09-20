@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 internal static class RemoteCancelSelfTest
 {
@@ -14,7 +14,7 @@ internal static class RemoteCancelSelfTest
         await using var server = new TransferServer();
         await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
 
-        var tmp = Path.Combine(Path.GetTempPath(), "catshare-cancel-selftest.bin");
+        var tmp = Path.Combine(Path.GetTempPath(), "oshare-cancel-selftest.bin");
         await File.WriteAllBytesAsync(tmp, RandomNumberGenerator.GetBytes(4096));
         try
         {

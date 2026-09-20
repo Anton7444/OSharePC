@@ -3,12 +3,12 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 public enum PhoneKind
 {
-    /// <summary>moe.reimu.catshare app — advertisement: 128-bit 3331 + 0xffff(27B)/0x01ff(6B) service data.</summary>
-    CatShare,
+    /// <summary>moe.reimu.oshare app — advertisement: 128-bit 3331 + 0xffff(27B)/0x01ff(6B) service data.</summary>
+    OShare,
     /// <summary>Stock alliance ROM (OPPO/OnePlus/Xiaomi/vivo/…) — 128-bit 3331 + vender/bleFlag service data.</summary>
     Alliance,
     /// <summary>Legacy OEM variants (0x3333/0x3334, 0x6666/0x6667, 0x8181/0x8182) — display only for now.</summary>
@@ -30,7 +30,7 @@ public sealed class PhoneDevice
     public string DeviceIdPart1 { get; set; } = "";
     /// <summary>deviceId[6:16] from the scan-response service data.</summary>
     public string DeviceIdPart2 { get; set; } = "";
-    /// <summary>CatShare-style 4-hex sender id from the 27-byte payload.</summary>
+    /// <summary>OShare-style 4-hex sender id from the 27-byte payload.</summary>
     public string SenderId { get; set; } = "";
     public int Version { get; set; }
     public short Rssi { get; set; }
@@ -49,7 +49,7 @@ public sealed class PhoneDevice
 
     public bool HasCompleteIdentity => Kind switch
     {
-        PhoneKind.CatShare => SenderId.Length == 4,
+        PhoneKind.OShare => SenderId.Length == 4,
         PhoneKind.Alliance => AllianceUuidSeen &&
                               DeviceIdPart1.Length == 6 &&
                               DeviceIdPart2.Length == 10 &&
@@ -69,7 +69,7 @@ public sealed class PhoneDevice
 
     public string KindLabel => Kind switch
     {
-        PhoneKind.CatShare => "CatShare",
+        PhoneKind.OShare => "OShare",
         PhoneKind.Alliance => $"Alliance ({BrandFromVender(Vender)})",
         _ => "Legacy OEM"
     };
@@ -94,7 +94,7 @@ public sealed class PhoneDevice
 }
 
 /// <summary>
-/// Scans for phones running 互传/CatShare in receive mode.
+/// Scans for phones running 互传/OShare in receive mode.
 /// OnePlus Share 16.10.61's common parser (c8/b.b -> d8/o.n) accepts a device only
 /// after a complete ScanRecord is present: the custom 128-bit 0x3331 UUID plus the
 /// fixed vendor/flag, 6+10 byte device id, name and version fields. Android merges
@@ -278,7 +278,7 @@ public sealed class PhoneScanner : IDisposable
         {
             if (!_devices.TryGetValue(args.BluetoothAddress, out device!))
             {
-                var kind = sections.Any(s => s.Uuid16 is 0xFFFF or 0x01FF) ? PhoneKind.CatShare : PhoneKind.Alliance;
+                var kind = sections.Any(s => s.Uuid16 is 0xFFFF or 0x01FF) ? PhoneKind.OShare : PhoneKind.Alliance;
                 ushort firstUuid = sections.Count > 0 ? sections[0].Uuid16 : (ushort)0;
                 if (!hasAllianceUuid && !IsKnownSectionUuid(firstUuid))
                     return;
@@ -307,7 +307,7 @@ public sealed class PhoneScanner : IDisposable
 
                 if (s.Uuid16 == 0xFFFF && payload.Length == 27)
                 {
-                    device.Kind = PhoneKind.CatShare;
+                    device.Kind = PhoneKind.OShare;
                     device.SenderId = $"{payload[8]:x2}{payload[9]:x2}";
                     var n = DecodeName(payload, 10, 16);
                     if (n.Length > 0) device.Name = n;
@@ -316,7 +316,7 @@ public sealed class PhoneScanner : IDisposable
                 }
                 else if (s.Uuid16 == 0x01FF && payload.Length >= 2)
                 {
-                    device.Kind = PhoneKind.CatShare;
+                    device.Kind = PhoneKind.OShare;
                 }
                 else if ((hasAllianceUuid || device.Kind == PhoneKind.Alliance) && payload.Length is 6 or 27)
                 {

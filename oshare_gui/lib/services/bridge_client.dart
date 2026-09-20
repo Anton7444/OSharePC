@@ -263,9 +263,9 @@ class BridgeClient extends ChangeNotifier {
     final exeDir = File(Platform.resolvedExecutable).parent.path;
     final projectRoot = Directory.current.path;
     final candidates = [
-      p.join(exeDir, 'engine', 'CatShareSender.exe'),
-      p.join(exeDir, 'CatShareSender.exe'),
-      p.join(projectRoot, 'deploy-gui', 'engine', 'CatShareSender.exe'),
+      p.join(exeDir, 'engine', 'OSharePC.exe'),
+      p.join(exeDir, 'OSharePC.exe'),
+      p.join(projectRoot, 'deploy-gui', 'engine', 'OSharePC.exe'),
       p.join(
         projectRoot,
         'bin',
@@ -273,7 +273,7 @@ class BridgeClient extends ChangeNotifier {
         'net10.0-windows10.0.19041.0',
         'win-x64',
         'publish',
-        'CatShareSender.exe',
+        'OSharePC.exe',
       ),
     ];
 
@@ -286,7 +286,7 @@ class BridgeClient extends ChangeNotifier {
     }
 
     // Development fallback only. Never silently launch an arbitrary old EXE.
-    final projectFile = p.join(projectRoot, 'CatShareSender.csproj');
+    final projectFile = p.join(projectRoot, 'OShareSender.csproj');
     if (File(projectFile).existsSync()) {
       debugPrint('Starting backend via dotnet run with parent PID $pid');
       _startBackendProcess('dotnet', [

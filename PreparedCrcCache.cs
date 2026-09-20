@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// Prepares the CRC32 required by STORED ZIP entries as soon as files are staged.

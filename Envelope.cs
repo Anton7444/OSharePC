@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// OShare WebSocket text-frame envelope, mirroring the decompiled ca/e.java:

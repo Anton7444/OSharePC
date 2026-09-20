@@ -9,10 +9,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>Localhost control plane for the Flutter shell. Manages SenderEngine lifecycle and provides a REST/polling event bridge.</summary>
-public sealed class CatShareBridgeServer : IAsyncDisposable
+public sealed class OShareBridgeServer : IAsyncDisposable
 {
     public const int Port = 8960;
     public const string TokenHeader = "X-OSharePC-Bridge-Token";
@@ -29,7 +29,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private int _shutdownRequested;
 
-    public CatShareBridgeServer(string authToken)
+    public OShareBridgeServer(string authToken)
     {
         if (string.IsNullOrWhiteSpace(authToken) || authToken.Length < 32)
             throw new ArgumentException("Bridge authentication token is missing or too short.", nameof(authToken));
@@ -85,7 +85,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
 
         _engine.ConfirmIncomingTransfer = (name, mimeType, count) => ConfirmViaBridge(name, mimeType, count);
 
-        _engine.ConfirmIncomingCatShare = offer =>
+        _engine.ConfirmIncomingOShare = offer =>
             ConfirmViaBridge(offer.SenderId, $"Wi-Fi Direct: {offer.Ssid}", "1", offer.SenderId);
 
         await _engine.StartAsync(SenderEngine.DefaultPort);
@@ -173,7 +173,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
                 name = DisplayName(d, devices),
                 kind = d.KindLabel,
                 rssi = d.Rssi,
-                catShare = d.Kind == PhoneKind.CatShare,
+                oShare = d.Kind == PhoneKind.OShare,
                 addressText = d.AddressStr,
             }));
         });
@@ -321,7 +321,7 @@ public sealed class CatShareBridgeServer : IAsyncDisposable
         return $"{name} [ID {suffix}]";
     }
 
-    /// <summary>Routes an incoming-transfer confirmation (stock or CatShare) through
+    /// <summary>Routes an incoming-transfer confirmation (stock or OShare) through
     /// the bridge's pending-transfer event flow; the Flutter UI resolves it via
     /// POST /api/confirm-receive. Times out to 'reject' after 30 seconds.</summary>
     private Task<bool> ConfirmViaBridge(string name, string mimeType, string count, string? identity = null)

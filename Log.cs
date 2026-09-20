@@ -1,4 +1,4 @@
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>Simple timestamped logger with an in-memory ring, file output and UI event.</summary>
 public static class Log
@@ -16,7 +16,7 @@ public static class Log
     {
         try
         {
-            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CatShareSender");
+            var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OSharePC");
             Directory.CreateDirectory(dir);
             LogFilePath = Path.Combine(dir, "sender.log");
             _writer = new StreamWriter(LogFilePath, append: true) { AutoFlush = true };
@@ -25,7 +25,7 @@ public static class Log
         {
             // logging must never take the app down
         }
-        Info("==== CatShareSender started ====");
+        Info("==== OShareSender started ====");
     }
 
     public static void Info(string msg) => Write("INFO", msg);

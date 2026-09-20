@@ -10,7 +10,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Diagnostics;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 public sealed record ReceiveMetadata(
     string TaskId,
@@ -23,7 +23,7 @@ public sealed record ReceiveMetadata(
 /// <summary>
 /// Connects as a WebSocket + HTTP client to the sending phone/pad,
 /// performs version negotiation, accepts the sendRequest, and streams the ZIP download.
-/// Supports both plain 'ws://' (stock OPlus with version ≥ 10015) and 'wss://' (CatShare app).
+/// Supports both plain 'ws://' (stock OPlus with version ≥ 10015) and 'wss://' (OShare app).
 /// </summary>
 public sealed class ReceiveSession : IDisposable
 {
@@ -276,7 +276,7 @@ public sealed class ReceiveSession : IDisposable
         // ZipArchive in Read mode needs a seekable stream (it reads the central
         // directory from the end), and the HTTP response stream is not seekable —
         // spool the download to a temp file first.
-        var tempZip = Path.Combine(Path.GetTempPath(), $"catshare-rx-{Guid.NewGuid():N}.zip");
+        var tempZip = Path.Combine(Path.GetTempPath(), $"oshare-rx-{Guid.NewGuid():N}.zip");
         try
         {
             await using (var spool = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None,

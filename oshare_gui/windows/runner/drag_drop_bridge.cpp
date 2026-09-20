@@ -20,7 +20,7 @@ std::string WideToUtf8(const std::wstring& wstr) {
 
 DragDropBridge* DragDropBridge::Register(flutter::BinaryMessenger* messenger, HWND window_handle) {
   auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-      messenger, "catshare/drag_drop", &flutter::StandardMethodCodec::GetInstance());
+      messenger, "oshare/drag_drop", &flutter::StandardMethodCodec::GetInstance());
   auto bridge = new DragDropBridge(std::move(channel), window_handle);
   return bridge;
 }

@@ -2,7 +2,7 @@ using System.Net.NetworkInformation;
 using Windows.Networking.Connectivity;
 using Windows.Networking.NetworkOperators;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// Wraps Windows Mobile Hotspot (NetworkOperatorTetheringManager) so the PC hosts a

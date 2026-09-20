@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// Crypto matching the decompiled lb/a0.java (EncryptOrDecryptUtil):

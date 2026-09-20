@@ -4,22 +4,22 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
-public sealed record CatShareP2pOffer(
+public sealed record OShareP2pOffer(
     string SenderId,
     string Ssid,
     string Psk,
     string Mac,
     int Port,
-    int? CatShareVersion);
+    int? OShareVersion);
 
 /// <summary>
-/// CatShare's account-free receive side. Android's P2pSenderService reads the
+/// OShare's account-free receive side. Android's P2pSenderService reads the
 /// 9954 characteristic, then writes P2pInfo to 9953. No HeyTap/OConnect state is
 /// involved in this service.
 /// </summary>
-public sealed class CatShareReceiveGattServer : IDisposable
+public sealed class OShareReceiveGattServer : IDisposable
 {
     public static readonly Guid ServiceUuid = new("00009955-0000-1000-8000-00805f9b34fb");
     public static readonly Guid StatusUuid = new("00009954-0000-1000-8000-00805f9b34fb");
@@ -35,7 +35,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
 
     public bool IsRunning { get; private set; }
     public event Action<string>? StateChanged;
-    public event Action<CatShareP2pOffer>? OfferAccepted;
+    public event Action<OShareP2pOffer>? OfferAccepted;
 
     /// <summary>Raised when the 9955 GATT advert starts/aborts — Windows only allows
     /// ONE connectable advert, so consumers must yield their own.</summary>
@@ -58,7 +58,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
         try
         {
             // retry indefinitely — the 9955 advert is what makes the PC connectable
-            // for the CatShare app, and the slot usually frees up within seconds
+            // for the OShare app, and the slot usually frees up within seconds
             while (IsRunning)
             {
                 await Task.Delay(TimeSpan.FromSeconds(5));
@@ -83,7 +83,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
     }
 
     /// <summary>Return true after displaying a confirmation prompt to the user.</summary>
-    public Func<CatShareP2pOffer, Task<bool>>? ConfirmIncoming { get; set; }
+    public Func<OShareP2pOffer, Task<bool>>? ConfirmIncoming { get; set; }
 
     private void State(string message)
     {
@@ -97,7 +97,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
 
         var result = await GattServiceProvider.CreateAsync(ServiceUuid);
         if (result.Error != BluetoothError.Success)
-            throw new InvalidOperationException($"CatShare receive GATT provider failed: {result.Error}");
+            throw new InvalidOperationException($"OShare receive GATT provider failed: {result.Error}");
 
         var status = await result.ServiceProvider.Service.CreateCharacteristicAsync(StatusUuid,
             new GattLocalCharacteristicParameters
@@ -106,7 +106,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
                 ReadProtectionLevel = GattProtectionLevel.Plain,
             });
         if (status.Error != BluetoothError.Success)
-            throw new InvalidOperationException($"CatShare 9954 creation failed: {status.Error}");
+            throw new InvalidOperationException($"OShare 9954 creation failed: {status.Error}");
 
         var p2p = await result.ServiceProvider.Service.CreateCharacteristicAsync(P2pUuid,
             new GattLocalCharacteristicParameters
@@ -116,7 +116,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
                 WriteProtectionLevel = GattProtectionLevel.Plain,
             });
         if (p2p.Error != BluetoothError.Success)
-            throw new InvalidOperationException($"CatShare 9953 creation failed: {p2p.Error}");
+            throw new InvalidOperationException($"OShare 9953 creation failed: {p2p.Error}");
 
         _status = status.Characteristic;
         _p2p = p2p.Characteristic;
@@ -127,7 +127,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
             state = 0,
             key = _crypto.PublicKeyB64,
             mac = string.IsNullOrWhiteSpace(deviceMac) ? "02:00:00:00:00:00" : deviceMac,
-            catShare = 1,
+            oShare = 1,
         }));
 
         _provider = result.ServiceProvider;
@@ -155,7 +155,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
             IsDiscoverable = true,
             IsConnectable = true,
         });
-        State("account-free CatShare receive service is ready");
+        State("account-free OShare receive service is ready");
     }
 
     private async void OnStatusRead(GattLocalCharacteristic sender, GattReadRequestedEventArgs args)
@@ -202,7 +202,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
             lock (_writeGate) json = Encoding.UTF8.GetString(_writeBuffer.ToArray()).Trim();
             if (json.Length == 0 || !json.EndsWith('}')) return;
 
-            CatShareP2pOffer offer;
+            OShareP2pOffer offer;
             try { offer = ParseOffer(json); }
             catch (JsonException) { ResetWriteBuffer(); return; }
             catch (Exception ex)
@@ -212,7 +212,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
                 return;
             }
             ResetWriteBuffer();
-            State($"incoming CatShare offer from {offer.SenderId} ({offer.Ssid})");
+            State($"incoming OShare offer from {offer.SenderId} ({offer.Ssid})");
 
             var accept = ConfirmIncoming is not null && await ConfirmIncoming(offer);
             State(accept ? "incoming offer accepted" : "incoming offer rejected");
@@ -230,7 +230,7 @@ public sealed class CatShareReceiveGattServer : IDisposable
         }
     }
 
-    private CatShareP2pOffer ParseOffer(string json)
+    private OShareP2pOffer ParseOffer(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -255,9 +255,9 @@ public sealed class CatShareReceiveGattServer : IDisposable
             string.IsNullOrWhiteSpace(mac) || port is < 1 or > 65535)
             throw new InvalidOperationException("offer is missing valid Wi-Fi Direct credentials");
 
-        int? version = root.TryGetProperty("catShare", out var versionValue) &&
+        int? version = root.TryGetProperty("oShare", out var versionValue) &&
                        versionValue.TryGetInt32(out var v) ? v : null;
-        return new CatShareP2pOffer(id, ssid, psk, mac, port, version);
+        return new OShareP2pOffer(id, ssid, psk, mac, port, version);
     }
 
     private static string String(JsonElement root, string key) =>

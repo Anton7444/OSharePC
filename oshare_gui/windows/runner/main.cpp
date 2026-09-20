@@ -24,7 +24,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   HANDLE hMutex = nullptr;
   if (!is_drop_panel) {
-    hMutex = CreateMutex(nullptr, TRUE, L"Local\\CatShareGui-SingleInstance");
+    hMutex = CreateMutex(nullptr, TRUE, L"Local\\OShareGui-SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
       // The drop panel is another Flutter window, so duplicate launches must
       // target the main app by its dedicated title.

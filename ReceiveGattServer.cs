@@ -6,7 +6,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// PC as the RECEIVER of a phone→PC transfer (the iOS/PC-emulation role in stock ColorOS/OxygenOS):
@@ -37,7 +37,7 @@ public sealed class ReceiveGattServer : IDisposable
 
     /// <summary>Directory where incoming files will be saved.</summary>
     public string SaveDirectory { get; set; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "CatShare");
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "OShare");
 
     /// <summary>
     /// Raised when a remote phone offers files. Return true to accept or false to reject.

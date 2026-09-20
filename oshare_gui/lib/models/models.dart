@@ -5,7 +5,7 @@ class DeviceModel {
   final String name;
   final String kind;
   final int rssi;
-  final bool catShare;
+  final bool oShare;
   final String addressText;
 
   DeviceModel({
@@ -13,7 +13,7 @@ class DeviceModel {
     required this.name,
     required this.kind,
     required this.rssi,
-    required this.catShare,
+    required this.oShare,
     required this.addressText,
   });
 
@@ -23,7 +23,7 @@ class DeviceModel {
       name: json['name']?.toString() ?? 'Nearby device',
       kind: json['kind']?.toString() ?? 'Mutual Transmission',
       rssi: json['rssi'] is num ? (json['rssi'] as num).toInt() : -70,
-      catShare: json['catShare'] == true,
+      oShare: json['oShare'] == true,
       addressText: json['addressText']?.toString() ?? '',
     );
   }

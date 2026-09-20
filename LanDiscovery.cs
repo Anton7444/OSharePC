@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>
 /// The OPlus-Connect LAN discovery (SSDP-style HTTP-over-UDP on port 10150/10151):

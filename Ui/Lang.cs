@@ -1,4 +1,4 @@
-namespace CatShareSender.Ui;
+namespace OShareSender.Ui;
 
 public enum LangId { En, ZhHant, ZhHans }
 
@@ -50,7 +50,7 @@ public static class Lang
     // ── persistence ──────────────────────────────────────────────────────
 
     private static readonly string ConfigDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CatShare");
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "OShare");
     private static readonly string ConfigFile = Path.Combine(ConfigDir, "lang.txt");
 
     public static void Load()
@@ -112,9 +112,9 @@ public static class Lang
 
         // Empty device hint
         ["Hint.NoPhones"]       = ["No nearby phones yet", "\u5c1a\u7121\u9644\u8fd1\u7684\u624b\u6a5f", "\u6682\u65e0\u9644\u8fd1\u7684\u624b\u673a"],
-        ["Hint.OpenApp"]        = ["Open {0} or CatShare on your phone to appear here",
-                                   "\u5728\u624b\u6a5f\u4e0a\u958b\u555f {0} \u6216 CatShare \u4ee5\u986f\u793a\u5728\u6b64",
-                                   "\u5728\u624b\u673a\u4e0a\u6253\u5f00 {0} \u6216 CatShare \u4ee5\u663e\u793a\u5728\u6b64"],
+        ["Hint.OpenApp"]        = ["Open {0} or OShare on your phone to appear here",
+                                   "\u5728\u624b\u6a5f\u4e0a\u958b\u555f {0} \u6216 OShare \u4ee5\u986f\u793a\u5728\u6b64",
+                                   "\u5728\u624b\u673a\u4e0a\u6253\u5f00 {0} \u6216 OShare \u4ee5\u663e\u793a\u5728\u6b64"],
         ["Hint.NoReceived"]     = ["No files received yet. Send files from your phone via 互传 / OShare.",
                                    "\u5c1a\u672a\u63a5\u6536\u4efb\u4f55\u6a94\u6848\u3002\u8acb\u5f9e\u624b\u6a5f\u4e0a\u4f7f\u7528\u300c\u4e92\u50b3\u300d\u5206\u4eab\u6a94\u6848\u81f3\u6b64\u96fb\u8166\u3002",
                                    "\u5c1a\u672a\u63a5\u6536\u4efb\u4f55\u6587\u4ef6\u3002\u8bf7\u4ece\u624b\u673a\u4e0a\u4f7f\u7528\u201c\u4e92\u4f20\u201d\u5206\u4eab\u6587\u4ef6\u81f3\u6b64\u7535\u8111\u3002"],
@@ -144,9 +144,9 @@ public static class Lang
         ["Dialog.IncomingPrompt"]    = ["{0} wants to send {1} file(s) ({2}).\n\nAccept incoming transfer?",
                                         "{0} \u60f3\u8981\u50b3\u9001 {1} \u500b\u6a94\u6848 ({2})\u3002\n\n\u662f\u5426\u63a5\u53d7\u50b3\u8f38\uff1f",
                                         "{0} \u60f3\u8981\u53d1\u9001 {1} \u4e2a\u6587\u4ef6 ({2})\u3002\n\n\u662f\u5426\u63a5\u53d7\u4f20\u8f93\uff1f"],
-        ["Dialog.AlreadyRunning"]    = ["CatShareSender is already running (check the system tray).",
-                                        "CatShareSender \u5df2\u5728\u57f7\u884c\u4e2d\uff08\u8acb\u6aa2\u67e5\u7cfb\u7d71\u5323\uff09\u3002",
-                                        "CatShareSender \u5df2\u5728\u8fd0\u884c\u4e2d\uff08\u8bf7\u68c0\u67e5\u7cfb\u7edf\u6258\u76d8\uff09\u3002"],
+        ["Dialog.AlreadyRunning"]    = ["OShareSender is already running (check the system tray).",
+                                        "OShareSender \u5df2\u5728\u57f7\u884c\u4e2d\uff08\u8acb\u6aa2\u67e5\u7cfb\u7d71\u5323\uff09\u3002",
+                                        "OShareSender \u5df2\u5728\u8fd0\u884c\u4e2d\uff08\u8bf7\u68c0\u67e5\u7cfb\u7edf\u6258\u76d8\uff09\u3002"],
         ["Dialog.StillRunning"]      = ["Still running in the tray.",
                                         "\u4ecd\u5728\u7cfb\u7d71\u5323\u4e2d\u57f7\u884c\u3002",
                                         "\u4ecd\u5728\u7cfb\u7edf\u6258\u76d8\u4e2d\u8fd0\u884c\u3002"],
@@ -170,7 +170,7 @@ public static class Lang
         // Mode dropdown
         ["Mode.Auto"]           = ["Auto (detect from phone)", "\u81ea\u52d5\uff08\u5f9e\u624b\u6a5f\u5075\u6e2c\uff09", "\u81ea\u52a8\uff08\u4ece\u624b\u673a\u68c0\u6d4b\uff09"],
         ["Mode.Alliance"]       = ["\u539f\u88dd\u4e92\u50b3 - iOS\u6a21\u64ec\u5340\u57df\u7db2\u8def", "\u539f\u88dd\u4e92\u50b3 - iOS\u6a21\u64ec\u5340\u57df\u7db2\u8def", "\u539f\u88c5\u4e92\u4f20 - iOS\u6a21\u62df\u5c40\u57df\u7f51"],
-        ["Mode.CatShare"]       = ["CatShare - Hotspot mode", "CatShare - \u71b1\u9ede\u6a21\u5f0f", "CatShare - \u70ed\u70b9\u6a21\u5f0f"],
+        ["Mode.OShare"]       = ["OShare - Hotspot mode", "OShare - \u71b1\u9ede\u6a21\u5f0f", "OShare - \u70ed\u70b9\u6a21\u5f0f"],
 
         // Engine messages (shown in UI status bar)
         ["Engine.NoLan"]        = ["No LAN adapter with a default gateway found \u2014 connect this PC to the same Wi-Fi router as the phone.",
@@ -179,10 +179,10 @@ public static class Lang
         ["Engine.NoNetProfile"] = ["No network connection profile found \u2014 connect this laptop to Wi-Fi first.",
                                    "\u672a\u627e\u5230\u7db2\u8def\u9023\u7dda\u914d\u7f6e \u2014 \u8acb\u5148\u8b93\u7b46\u8a18\u672c\u9023\u4e0a Wi-Fi\u3002",
                                    "\u672a\u627e\u5230\u7f51\u7edc\u8fde\u63a5\u914d\u7f6e \u2014 \u8bf7\u5148\u8ba9\u7b14\u8bb0\u672c\u8fde\u4e0a Wi-Fi\u3002"],
-        ["Engine.CatShareModeError"] = [
-            "BLE: CatShare mode requires selecting a 'My Phone' (CatShare type) device \u2014 the current selection is an Alliance broadcast. Both entries come from two apps on the same phone; please pick the right one.",
-            "BLE\uff1aCatShare \u6a21\u5f0f\u9700\u8981\u9078\u64c7\u300c\u6211\u7684\u624b\u6a5f\u300d\uff08CatShare \u985e\u578b\uff09\u7684\u88dd\u7f6e \u2014 \u7576\u524d\u9078\u4e2d\u7684\u662f\u539f\u88dd\u4e92\u50b3\u7684\u5ee3\u64ad\u3002\u5169\u689d\u88dd\u7f6e\u689d\u76ee\u4f86\u81ea\u540c\u4e00\u90e8\u624b\u6a5f\u4e0a\u7684\u5169\u500b App\uff0c\u8acb\u9078\u5c0d\u3002",
-            "BLE\uff1aCatShare \u6a21\u5f0f\u9700\u8981\u9009\u62e9\u201c\u6211\u7684\u624b\u673a\u201d\uff08CatShare \u7c7b\u578b\uff09\u7684\u8bbe\u5907 \u2014 \u5f53\u524d\u9009\u4e2d\u7684\u662f\u539f\u88c5\u4e92\u4f20\u7684\u5e7f\u64ad\u3002\u4e24\u6761\u8bbe\u5907\u6761\u76ee\u6765\u81ea\u540c\u4e00\u90e8\u624b\u673a\u4e0a\u7684\u4e24\u4e2a App\uff0c\u8bf7\u9009\u5bf9\u3002"],
+        ["Engine.OShareModeError"] = [
+            "BLE: OShare mode requires selecting a 'My Phone' (OShare type) device \u2014 the current selection is an Alliance broadcast. Both entries come from two apps on the same phone; please pick the right one.",
+            "BLE\uff1aOShare \u6a21\u5f0f\u9700\u8981\u9078\u64c7\u300c\u6211\u7684\u624b\u6a5f\u300d\uff08OShare \u985e\u578b\uff09\u7684\u88dd\u7f6e \u2014 \u7576\u524d\u9078\u4e2d\u7684\u662f\u539f\u88dd\u4e92\u50b3\u7684\u5ee3\u64ad\u3002\u5169\u689d\u88dd\u7f6e\u689d\u76ee\u4f86\u81ea\u540c\u4e00\u90e8\u624b\u6a5f\u4e0a\u7684\u5169\u500b App\uff0c\u8acb\u9078\u5c0d\u3002",
+            "BLE\uff1aOShare \u6a21\u5f0f\u9700\u8981\u9009\u62e9\u201c\u6211\u7684\u624b\u673a\u201d\uff08OShare \u7c7b\u578b\uff09\u7684\u8bbe\u5907 \u2014 \u5f53\u524d\u9009\u4e2d\u7684\u662f\u539f\u88c5\u4e92\u4f20\u7684\u5e7f\u64ad\u3002\u4e24\u6761\u8bbe\u5907\u6761\u76ee\u6765\u81ea\u540c\u4e00\u90e8\u624b\u673a\u4e0a\u7684\u4e24\u4e2a App\uff0c\u8bf7\u9009\u5bf9\u3002"],
         ["Engine.StartingHotspot"] = ["starting Wi-Fi hotspot\u2026", "\u6b63\u5728\u555f\u52d5 Wi-Fi \u71b1\u9ede\u2026", "\u6b63\u5728\u542f\u52a8 Wi-Fi \u70ed\u70b9\u2026"],
         ["Engine.HotspotUp"]    = ["hotspot '{0}' up \u2014 the phone will switch Wi-Fi to it",
                                    "\u71b1\u9ede\u300c{0}\u300d\u5df2\u555f\u52d5 \u2014 \u624b\u6a5f\u5c07\u5207\u63db Wi-Fi \u9023\u7dda",

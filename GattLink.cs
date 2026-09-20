@@ -3,7 +3,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>What the phone told us on the 0x9954 status read.</summary>
 public sealed class PhoneStatus
@@ -11,18 +11,18 @@ public sealed class PhoneStatus
     public int State;
     public string Mac = "";
     public string PublicKey = "";
-    public int? CatShareVersion;   // present only for the CatShare app
+    public int? OShareVersion;   // present only for the OShare app
 }
 
 /// <summary>One GATT 9955 service instance exposed by the phone. Both the stock 互传
-/// app AND the CatShare app can host this same service UUID on one phone — the
-/// 9954 payload (presence of "catShare") tells them apart.</summary>
+/// app AND the OShare app can host this same service UUID on one phone — the
+/// 9954 payload (presence of "oShare") tells them apart.</summary>
 public sealed class GattEndpoint
 {
     public required GattCharacteristic StatusChar;
     public required GattCharacteristic P2pChar;
     public required PhoneStatus Status;
-    public bool IsCatShare => Status.CatShareVersion is not null;
+    public bool IsOShare => Status.OShareVersion is not null;
 }
 
 /// <summary>Which transfer flow to use — the two are fully isolated so neither
@@ -33,22 +33,22 @@ public enum SendFlow
     Auto,
     /// <summary>Stock 互传 via service 9999 (iOS-emulation, pure LAN, no hotspot).</summary>
     OConnectLan,
-    /// <summary>CatShare app via service 9955 + hotspot AP join.</summary>
-    CatShareHotspot,
+    /// <summary>OShare app via service 9955 + hotspot AP join.</summary>
+    OShareHotspot,
 }
 
-/// <summary>Which credentials to write to 0x9953 (CatShare flow only).</summary>
+/// <summary>Which credentials to write to 0x9953 (OShare flow only).</summary>
 public enum CredentialMode
 {
-    /// <summary>CatShare app (v7+): plain JSON, lanHost points at the PC over the router LAN.</summary>
-    CatShareLan,
+    /// <summary>OShare app (v7+): plain JSON, lanHost points at the PC over the router LAN.</summary>
+    OShareLan,
     /// <summary>Stock alliance: AES-CTR encrypted ssid/psk/mac + ECDH key.</summary>
     StockAlliance
 }
 
 /// <summary>
 /// GATT client link to a phone in receive mode. The phone may expose the alliance
-/// service 00009955-0000-1000-8000-00805f9b34fb more than once (stock app + CatShare
+/// service 00009955-0000-1000-8000-00805f9b34fb more than once (stock app + OShare
 /// app each register their own); every instance is enumerated and classified so the
 /// credentials land in the right app.
 /// It ALSO enumerates service 00009999 (OPlus Connect / iOS 互传) whose
@@ -148,7 +148,7 @@ public sealed class GattLink : IDisposable
                 GattCommunicationStatus discoveryStatus;
                 string discoveryLabel;
 
-                if (flow == SendFlow.CatShareHotspot)
+                if (flow == SendFlow.OShareHotspot)
                 {
                     Log.Info("BLE: discovering target alliance service 9955 only");
                     var result = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
@@ -166,7 +166,7 @@ public sealed class GattLink : IDisposable
                     if (oconnect.Status == GattCommunicationStatus.Success)
                         discoveredServices.AddRange(oconnect.Services);
 
-                    // Auto can also target CatShare. Probe 9955 only if 9999 was
+                    // Auto can also target OShare. Probe 9955 only if 9999 was
                     // queried successfully and is genuinely absent. Never start a
                     // second discovery after an already-failed physical link.
                     if (flow == SendFlow.Auto &&
@@ -217,7 +217,7 @@ public sealed class GattLink : IDisposable
             }
         }
         throw new InvalidOperationException($"BLE: connect failed after {retries} attempts — {last?.Message}. " +
-            "Make sure the 互传/CatShare receive screen stays open on the phone.");
+            "Make sure the 互传/OShare receive screen stays open on the phone.");
     }
 
     /// <summary>Enumerates the services needed by the selected flow. Called by
@@ -225,7 +225,7 @@ public sealed class GattLink : IDisposable
     private async Task EnumerateAsync(SendFlow flow, IReadOnlyList<Windows.Devices.Bluetooth.GenericAttributeProfile.GattDeviceService> services)
     {
         // 0x9999 OPlus-Connect service (read 0x9897 / write 0x9896 / notify 0x9898) —
-        // OConnect flow only. Isolation: never touched by the CatShare flow.
+        // OConnect flow only. Isolation: never touched by the OShare flow.
         if (flow == SendFlow.OConnectLan || flow == SendFlow.Auto)
         foreach (var svc in services.Where(s => s.Uuid == OConnectServiceUuid))
         {
@@ -271,7 +271,7 @@ public sealed class GattLink : IDisposable
             catch (Exception ex) { Log.Warn($"BLE: 9999 service probe failed: {ex.Message}"); }
         }
 
-        // 9955 alliance service — CatShare flow only. Isolation: the OConnect flow
+        // 9955 alliance service — OShare flow only. Isolation: the OConnect flow
         // never reads 9954 here (a 0x9998 read arms the stock state machine; keep
         // the two flows from touching each other's phone-side state).
         if (flow != SendFlow.OConnectLan || flow == SendFlow.Auto)
@@ -327,8 +327,8 @@ public sealed class GattLink : IDisposable
                     Mac = root.TryGetProperty("mac", out var mac) ? mac.GetString() ?? "" : "",
                     PublicKey = root.TryGetProperty("key", out var key) ? key.GetString() ?? "" : "",
                 };
-                if (root.TryGetProperty("catShare", out var cs) && cs.ValueKind == JsonValueKind.Number && cs.TryGetInt32(out var v))
-                    status.CatShareVersion = v;
+                if (root.TryGetProperty("oShare", out var cs) && cs.ValueKind == JsonValueKind.Number && cs.TryGetInt32(out var v))
+                    status.OShareVersion = v;
 
                 Endpoints.Add(new GattEndpoint
                 {
@@ -336,7 +336,7 @@ public sealed class GattLink : IDisposable
                     P2pChar = p2pChar,
                     Status = status,
                 });
-                Log.Info($"BLE: 9954 ({(status.CatShareVersion is null ? "stock 互传" : $"CatShare v{status.CatShareVersion}")}): {json}");
+                Log.Info($"BLE: 9954 ({(status.OShareVersion is null ? "stock 互传" : $"OShare v{status.OShareVersion}")}): {json}");
             }
             catch (Exception ex)
             {
@@ -344,12 +344,12 @@ public sealed class GattLink : IDisposable
             }
         }
 
-        if (flow == SendFlow.CatShareHotspot && Endpoints.Count == 0)
+        if (flow == SendFlow.OShareHotspot && Endpoints.Count == 0)
             throw new InvalidOperationException(
-                "BLE: phone has no usable alliance service 9955 — open the 互传/CatShare receive screen on the phone first.");
+                "BLE: phone has no usable alliance service 9955 — open the 互传/OShare receive screen on the phone first.");
         if (Endpoints.Count > 1)
             Log.Info($"BLE: phone exposes {Endpoints.Count} alliance service instances " +
-                     $"({string.Join(", ", Endpoints.Select(e => e.IsCatShare ? "CatShare" : "stock"))})");
+                     $"({string.Join(", ", Endpoints.Select(e => e.IsOShare ? "OShare" : "stock"))})");
     }
 
     /// <summary>Builds and writes the credential payload to the chosen endpoint.
@@ -361,9 +361,9 @@ public sealed class GattLink : IDisposable
         CancellationToken ct = default)
     {
         string json;
-        if (mode == CredentialMode.CatShareLan)
+        if (mode == CredentialMode.OShareLan)
         {
-            // CatShare app v7 (P2pReceiverService.runReceive): the phone joins the AP
+            // OShare app v7 (P2pReceiverService.runReceive): the phone joins the AP
             // named p2pInfo.ssid with p2pInfo.psk via WifiP2pManager.connect, then
             // connects to wss://<groupOwnerAddress>:<port>/websocket — so ssid/psk
             // MUST be the PC hotspot's. (v7 has no lanHost support; the field is
@@ -378,7 +378,7 @@ public sealed class GattLink : IDisposable
                 ["mac"] = macOverride ?? lan.MacColonLower,
                 ["port"] = serverPort,
                 ["lanHost"] = lan.IpString,
-                ["catShare"] = 7,
+                ["oShare"] = 7,
             });
         }
         else

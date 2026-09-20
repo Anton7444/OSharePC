@@ -437,7 +437,7 @@ function Invoke-BuildLocal {
     )
 
     $configPath = Join-Path $repoRoot '.build-local.config.json'
-    $guiProject = Join-Path $repoRoot 'catshare_gui'
+    $guiProject = Join-Path $repoRoot 'oshare_gui'
     $guiRelease = Join-Path $guiProject 'build\windows\x64\runner\Release'
     $backendPublish = Join-Path $repoRoot 'artifacts\backend'
     $portableStage = Join-Path $repoRoot 'deploy-gui'
@@ -573,8 +573,7 @@ function Invoke-BuildLocal {
             finally {
                 Pop-Location
             }
-            Assert-File -Path (Join-Path $guiRelease 'OSharePC.exe') -Description 'Flutter release executable'
-            if (-not (Test-Path -LiteralPath (Join-Path $guiRelease 'data\flutter_assets') -PathType Container)) {
+            Assert-File -Path (Join-Path $guiRelease 'oshare_gui.exe') -Description 'Flutter release executable'            if (-not (Test-Path -LiteralPath (Join-Path $guiRelease 'data\flutter_assets') -PathType Container)) {
                 throw "Flutter release assets are missing: $(Join-Path $guiRelease 'data\flutter_assets')"
             }
         }
@@ -582,12 +581,12 @@ function Invoke-BuildLocal {
         Invoke-Stage 'C# backend Release win-x64 publish' {
             & $dotnet @(
                 'publish',
-                (Join-Path $repoRoot 'CatShareSender.csproj'),
+                (Join-Path $repoRoot 'OShareSender.csproj'),
                 '-c', 'Release',
                 '-r', 'win-x64',
                 '--self-contained', 'true',
                 '-o', $backendPublish)
-            Assert-File -Path (Join-Path $backendPublish 'CatShareSender.exe') -Description 'Published backend executable'
+            Assert-File -Path (Join-Path $backendPublish 'OSharePC.exe') -Description 'Published backend executable'
         }
 
         Invoke-Stage 'Assemble shared portable runtime' {
@@ -596,11 +595,10 @@ function Invoke-BuildLocal {
                 -GuiRelease $guiRelease `
                 -BackendPublish $backendPublish `
                 -OutputDirectory $portableStage
-            Assert-File -Path (Join-Path $portableStage 'OSharePC.exe') -Description 'Assembled GUI executable'
-            if (-not (Test-Path -LiteralPath (Join-Path $portableStage 'data\flutter_assets') -PathType Container)) {
+            Assert-File -Path (Join-Path $portableStage 'oshare_gui.exe') -Description 'Assembled GUI executable'            if (-not (Test-Path -LiteralPath (Join-Path $portableStage 'data\flutter_assets') -PathType Container)) {
                 throw "Assembled Flutter assets are missing: $(Join-Path $portableStage 'data\flutter_assets')"
             }
-            Assert-File -Path (Join-Path $portableStage 'engine\CatShareSender.exe') -Description 'Assembled backend executable'
+            Assert-File -Path (Join-Path $portableStage 'engine\OSharePC.exe') -Description 'Assembled backend executable'
         }
 
         if ($targetPlan.BuildPortable) {
@@ -616,8 +614,7 @@ function Invoke-BuildLocal {
                 $zip = [System.IO.Compression.ZipFile]::OpenRead($portableZip)
                 try {
                     $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-                    foreach ($requiredEntry in @('OSharePC.exe', 'engine/CatShareSender.exe')) {
-                        if ($entries -notcontains $requiredEntry) {
+                    foreach ($requiredEntry in @('oshare_gui.exe', 'engine/OSharePC.exe')) {                        if ($entries -notcontains $requiredEntry) {
                             throw "Portable ZIP is incomplete; missing $requiredEntry"
                         }
                     }

@@ -19,8 +19,7 @@ OShare PC 與 OPPO 或 OnePlus 並無關聯
 
 ### 可攜版
 
-下載 `OSharePC-Portable-<version>-win-x64.zip`，解壓縮到任意位置後執行 `OSharePC.exe`。
-
+下載 `OSharePC-Portable-<version>-win-x64.zip`，解壓縮到任意位置後執行 `oshare_gui.exe`。
 ## 系統需求
 
 - Windows 10 19041 或更新版本
@@ -38,19 +37,19 @@ OShare PC 與 OPPO 或 OnePlus 並無關聯
 請分別安裝 .NET SDK 與 Flutter；不要使用被忽略的本機 `flutter_sdk` 目錄。
 
 ```powershell
-dotnet build CatShareSender.csproj -c Release -r win-x64
-dotnet publish CatShareSender.csproj -c Release -r win-x64 --self-contained true -o artifacts\backend
+dotnet build OShareSender.csproj -c Release -r win-x64
+dotnet publish OShareSender.csproj -c Release -r win-x64 --self-contained true -o artifacts\backend
 
-cd catshare_gui
+cd oshare_gui
 flutter pub get
 flutter analyze
 flutter build windows --release
 cd ..
 ```
 
-若要組裝正式執行環境，請將 Flutter release 輸出複製到 `deploy-gui`，建立 `deploy-gui\engine`，並將已 publish 的 `artifacts\backend\CatShareSender.exe` 放到該 engine 目錄中。GUI 會以具驗證的 bridge 模式啟動位於其旁邊的後端。`CatShareSender.exe` 定位為後端 engine；不帶模式參數直接啟動時會退出，不再開啟第二套產品 UI。舊 WinForms 介面只保留作不受支援的除錯用途，必須明確使用 `CatShareSender.exe --legacy-ui` 啟動。
+若要組裝正式執行環境，請將 Flutter release 輸出複製到 `deploy-gui`，建立 `deploy-gui\engine`，並將已 publish 的 `artifacts\backend\OSharePC.exe` 放到該 engine 目錄中。GUI 會以具驗證的 bridge 模式啟動位於其旁邊的後端。`OSharePC.exe` 定位為後端 engine；不帶模式參數直接啟動時會退出，不再開啟第二套產品 UI。舊 WinForms 介面只保留作不受支援的除錯用途，必須明確使用 `OSharePC.exe --legacy-ui` 啟動。
 
-若要進行離線後端檢查，請執行 `CatShareSender.exe --selftest` 與 `CatShareSender.exe --mockphone`。由於後端是 Windows GUI 執行檔，請查看 `%LOCALAPPDATA%\CatShareSender\sender.log`，確認其中出現 `SELFTEST PASSED` 與 `MOCKPHONE PASSED`。
+若要進行離線後端檢查，請執行 `OSharePC.exe --selftest` 與 `OSharePC.exe --mockphone`。由於後端是 Windows GUI 執行檔，請查看 `%LOCALAPPDATA%\OSharePC\sender.log`，確認其中出現 `SELFTEST PASSED` 與 `MOCKPHONE PASSED`。
 
 
 ## 免責聲明

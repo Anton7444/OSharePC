@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 internal sealed record SavedSettings(
     string? DeviceName,
@@ -16,7 +16,7 @@ internal static class SettingsStore
 {
     private static readonly string DirectoryPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "CatShareSender");
+        "OSharePC");
     private static readonly string FilePath = Path.Combine(DirectoryPath, "settings.json");
     private static readonly SemaphoreSlim SaveGate = new(1, 1);
 

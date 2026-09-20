@@ -13,9 +13,8 @@ Copy-Item -Path (Join-Path $BackendPublish '*') -Destination $engine -Recurse -F
 Get-ChildItem -Path $OutputDirectory -Recurse -Include '*.pdb', '*.log', 'gui_out.txt', 'gui_err.txt' | Remove-Item -Force
 
 foreach ($required in @(
-    (Join-Path $OutputDirectory 'OSharePC.exe'),
-    (Join-Path $OutputDirectory 'data\flutter_assets'),
-    (Join-Path $OutputDirectory 'engine\CatShareSender.exe')
+    (Join-Path $OutputDirectory 'oshare_gui.exe'),    (Join-Path $OutputDirectory 'data\flutter_assets'),
+    (Join-Path $OutputDirectory 'engine\OSharePC.exe')
 )) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Portable runtime is incomplete; missing $required"

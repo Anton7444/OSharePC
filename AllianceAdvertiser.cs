@@ -4,7 +4,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 public enum AllianceAdvertisementState
 {
@@ -110,7 +110,7 @@ public sealed class AllianceAdvertiser : IDisposable
         var rspSection = new BluetoothLEAdvertisementDataSection
         {
             DataType = 0x16,
-            // CatShare's Android scanner accepts the scan-response section only
+            // OShare's Android scanner accepts the scan-response section only
             // when its payload is exactly 27 bytes: id[6..16], name[16], version.
             // The old 10-byte payload made the PC visible to a sniffer but not to
             // ShareActivity.deviceScanner().
@@ -156,7 +156,7 @@ public sealed class AllianceAdvertiser : IDisposable
         State = AllianceAdvertisementState.Unavailable;
         Log.Warn(
             "BLE: Windows refused the alliance advertisement payload — stock phones will NOT see this PC. " +
-            "The CatShare-app flow does not need advertising and still works. " +
+            "The OShare-app flow does not need advertising and still works. " +
             "Fix options: install the vendor Bluetooth driver, use Windows 11 with an " +
             "extended-advertising-capable radio (e.g. Qualcomm FastConnect 7800), or use a BT 5.x USB dongle.");
     }

@@ -4,16 +4,16 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 internal static class WifiJoiner
 {
     private static string? _staticAdapter;
     /// <summary>Deterministic temp-profile name: at most ONE can ever leak (a killed
     /// process skips the finally-delete), and CleanupStaleProfiles removes it on startup.
-    /// The previous random per-transfer name left a new dead "CatShare-<guid>" network
+    /// The previous random per-transfer name left a new dead "OShare-<guid>" network
     /// in the Wi-Fi list every time a delete failed.</summary>
-    internal const string ProfileName = "CatShare-Link";
+    internal const string ProfileName = "OShare-Link";
 
     /// <summary>Delete leftover temp profiles from killed runs so the Windows Wi-Fi
     /// list doesn't accumulate networks that don't exist.</summary>
@@ -42,7 +42,7 @@ internal static class WifiJoiner
                     line, @"(?:All User Profile|所有用户配置文件)\s*:\s*(.+)$");
                 if (!m.Success) continue;
                 var profile = m.Groups[1].Value.Trim();
-                if (profile.StartsWith("CatShare-", StringComparison.OrdinalIgnoreCase))
+                if (profile.StartsWith("OShare-", StringComparison.OrdinalIgnoreCase))
                     await Netsh($"wlan delete profile name=\"{profile}\"");
             }
         }

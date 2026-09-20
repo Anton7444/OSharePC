@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
-using CatShareSender.Ui;
+using OShareSender.Ui;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 /// <summary>Glues scanner, advertiser, GATT link, transfer server, and receive engine together.</summary>
 public sealed class SenderEngine : IDisposable, IAsyncDisposable
@@ -13,14 +13,14 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     public TransferServer Server { get; } = new();
     public HotspotManager Hotspot { get; } = new();
     public ReceiveGattServer Receiver { get; } = new();
-    public CatShareReceiveGattServer CatShareReceiveGatt { get; } = new();
+    public OShareReceiveGattServer OShareReceiveGatt { get; } = new();
     public GattServiceFallbackAdvertiser FallbackAdvertiser { get; } = new();
     public LanDiscovery? LanDisc { get; private set; }
 
     public LanInfo? Lan { get; private set; }
     public int Port { get; private set; } = DefaultPort;
 
-    /// <summary>4-hex id used in the CatShare-style credential payload.</summary>
+    /// <summary>4-hex id used in the OShare-style credential payload.</summary>
     public string SenderId { get; private set; } = "";
 
     private TransferTask? _staged;
@@ -28,7 +28,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     private bool _rxBeaconUp;      // 8881 connectable advert currently on air
     private bool _catAdvertUp;     // 9955 connectable advert currently on air
     private CancellationTokenSource? _sendCts;
-    private CancellationTokenSource? _catShareReceiveCts;
+    private CancellationTokenSource? _oShareReceiveCts;
     private CancellationTokenSource? _devicePruneCts;
     private readonly ConcurrentDictionary<string, string> _lanPeerIps = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _sendGate = new(1, 1);
@@ -45,8 +45,8 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     /// <summary>UI hook for incoming transfers: (senderName, mimeType, fileCount) -> accept/reject.</summary>
     public Func<string, string, string, Task<bool>>? ConfirmIncomingTransfer { get; set; }
 
-    /// <summary>Legacy hook for CatShare Wi-Fi Direct incoming offer.</summary>
-    public Func<CatShareP2pOffer, Task<bool>>? ConfirmIncomingCatShare { get; set; }
+    /// <summary>Legacy hook for OShare Wi-Fi Direct incoming offer.</summary>
+    public Func<OShareP2pOffer, Task<bool>>? ConfirmIncomingOShare { get; set; }
 
     public SenderEngine()
     {
@@ -86,15 +86,15 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
             ? Task.FromResult(true)
             : ConfirmIncomingTransfer(name, type, count);
 
-        // CatShare app Wi-Fi Direct GATT receiver wiring
-        CatShareReceiveGatt.StateChanged += state => TransferStateChanged?.Invoke("", $"catshare-rx: {state}");
-        CatShareReceiveGatt.ConfirmIncoming = offer => ConfirmIncomingCatShare is null
+        // OShare app Wi-Fi Direct GATT receiver wiring
+        OShareReceiveGatt.StateChanged += state => TransferStateChanged?.Invoke("", $"oshare-rx: {state}");
+        OShareReceiveGatt.ConfirmIncoming = offer => ConfirmIncomingOShare is null
             ? Task.FromResult(false)
-            : ConfirmIncomingCatShare(offer);
-        CatShareReceiveGatt.OfferAccepted += offer => _ = PullIncomingCatShareAsync(offer);
+            : ConfirmIncomingOShare(offer);
+        OShareReceiveGatt.OfferAccepted += offer => _ = PullIncomingOShareAsync(offer);
 
         // Windows allows only ONE advertising slot. The connectable GATT adverts
-        // (8881 beacon / 9955 CatShare) are the ones a phone can actually CONNECT
+        // (8881 beacon / 9955 OShare) are the ones a phone can actually CONNECT
         // to, so they win and retry indefinitely; the non-connectable fallback
         // advert only fills visibility gaps — and only after a 30s grace delay so
         // a retrying GATT advert can claim the slot first.
@@ -107,14 +107,14 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         }
         Receiver.BeaconStarted += () => { _rxBeaconUp = true; UpdateCoordination(); };
         Receiver.BeaconAborted += () => { _rxBeaconUp = false; UpdateCoordination(); };
-        CatShareReceiveGatt.AdvertStarted += () => { _catAdvertUp = true; UpdateCoordination(); };
-        CatShareReceiveGatt.AdvertAborted += () => { _catAdvertUp = false; UpdateCoordination(); };
+        OShareReceiveGatt.AdvertStarted += () => { _catAdvertUp = true; UpdateCoordination(); };
+        OShareReceiveGatt.AdvertAborted += () => { _catAdvertUp = false; UpdateCoordination(); };
 
         // Windows may briefly abort one provider when the other provider claims
         // the single advertising slot. Let both providers retry; the old
         // receive path recovered this exact Started -> Aborted -> Started race.
         Receiver.RetryGate = () => true;
-        CatShareReceiveGatt.RetryGate = () => true;
+        OShareReceiveGatt.RetryGate = () => true;
     }
 
     public async Task StartAsync(int port)
@@ -125,7 +125,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         Port = port;
 
         // remove leftover hotspot-join profiles (from killed runs) so dead
-        // "CatShare-*" networks don't linger in the Windows Wi-Fi list
+        // "OShare-*" networks don't linger in the Windows Wi-Fi list
         _ = WifiJoiner.CleanupStaleProfiles();
 
         await Server.StartAsync(port);
@@ -223,7 +223,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         {
             Advertiser.Stop();
             Receiver.Stop();
-            CatShareReceiveGatt.Stop();
+            OShareReceiveGatt.Stop();
             FallbackAdvertiser.Stop();
             TransferStateChanged?.Invoke("", "receive paused");
             Log.Info("Receive mode disabled: stopped advertiser and receivers.");
@@ -240,7 +240,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
                 // Windows' single connectable BLE slot indefinitely.
                 if (!Receiver.IsRunning && !_rxBeaconUp)
                 {
-                    try { await CatShareReceiveGatt.StartAsync(Lan.MacColonLower); } catch (Exception ex) { Log.Warn($"RX CatShare restart failed: {ex.Message}"); }
+                    try { await OShareReceiveGatt.StartAsync(Lan.MacColonLower); } catch (Exception ex) { Log.Warn($"RX OShare restart failed: {ex.Message}"); }
                 }
                 FallbackAdvertiser.Pause();
             }
@@ -252,7 +252,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     public void CancelTransfer()
     {
         _sendCts?.Cancel();
-        _catShareReceiveCts?.Cancel();
+        _oShareReceiveCts?.Cancel();
         Receiver.CancelTransfer();
         Server.CancelActiveTransfer();
         TransferStateChanged?.Invoke(_staged?.TaskId ?? "", "transfer cancelled");
@@ -274,7 +274,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         Advertiser.Stop();
         Receiver.Stop();
         LanDisc?.Dispose();
-        CatShareReceiveGatt.Stop();
+        OShareReceiveGatt.Stop();
         FallbackAdvertiser.Stop();
         await Hotspot.StopAsync();
         await Server.StopAsync();
@@ -334,7 +334,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         // complete ScanRecord. Windows splits ADV + SCAN_RSP, so wait for our
         // reconstructed complete record and never retry a stale BLE address blindly.
         Task? hotspotPrewarmTask = null;
-        if (flow == SendFlow.CatShareHotspot || device.Kind == PhoneKind.CatShare)
+        if (flow == SendFlow.OShareHotspot || device.Kind == PhoneKind.OShare)
         {
             Log.Info("Hotspot: pre-warming mobile hotspot concurrently with BLE connection...");
             hotspotPrewarmTask = Hotspot.EnsureStartedAsync();
@@ -404,7 +404,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
                         await Task.Delay(250, ct);
                         connectedLink = await GattLink.ConnectAsync(
                             candidate.Address,
-                            SendFlow.CatShareHotspot,
+                            SendFlow.OShareHotspot,
                             1,
                             s => TransferStateChanged?.Invoke(_staged.TaskId, s),
                             ct,
@@ -447,10 +447,10 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         var resolvedFlow = flow switch
         {
             SendFlow.OConnectLan => SendFlow.OConnectLan,
-            SendFlow.CatShareHotspot => SendFlow.CatShareHotspot,
+            SendFlow.OShareHotspot => SendFlow.OShareHotspot,
             _ => (link.OConnectReadChar != null && link.OConnectWriteChar != null)
                 ? SendFlow.OConnectLan
-                : SendFlow.CatShareHotspot,
+                : SendFlow.OShareHotspot,
         };
 
         if (resolvedFlow == SendFlow.OConnectLan)
@@ -484,14 +484,14 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
             return;
         }
 
-        var endpoint = link.Endpoints.FirstOrDefault(e => e.IsCatShare) ?? link.Endpoints.FirstOrDefault();
+        var endpoint = link.Endpoints.FirstOrDefault(e => e.IsOShare) ?? link.Endpoints.FirstOrDefault();
         if (endpoint is null)
-            throw new InvalidOperationException("Phone exposed no compatible GATT endpoint (neither CatShare nor Alliance).");
+            throw new InvalidOperationException("Phone exposed no compatible GATT endpoint (neither OShare nor Alliance).");
 
         TransferStateChanged?.Invoke(_staged.TaskId, "starting Wi-Fi hotspot…");
-        // The CatShare app parses every WebSocket frame strictly and dies on the raw
+        // The OShare app parses every WebSocket frame strictly and dies on the raw
         // 'files' trigger — only stock peers may receive it.
-        Server.PeerLooksStock = !endpoint.IsCatShare;
+        Server.PeerLooksStock = !endpoint.IsOShare;
         if (hotspotPrewarmTask != null)
         {
             await hotspotPrewarmTask;
@@ -504,10 +504,10 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
             $"hotspot '{Hotspot.Ssid}' up — the phone will switch Wi-Fi to it");
 
         Server.ArmTransfer(_staged, string.IsNullOrWhiteSpace(Hotspot.GatewayIp) ? null : Hotspot.GatewayIp);
-        var credentialMode = endpoint.IsCatShare
-            ? CredentialMode.CatShareLan
+        var credentialMode = endpoint.IsOShare
+            ? CredentialMode.OShareLan
             : CredentialMode.StockAlliance;
-        Log.Info($"BLE: using {(endpoint.IsCatShare ? "CatShare" : "stock alliance")} 9955 credentials");
+        Log.Info($"BLE: using {(endpoint.IsOShare ? "OShare" : "stock alliance")} 9955 credentials");
         await link.SendCredentialsAsync(
             endpoint, credentialMode, endpoint.Status, Lan, Port, _crypto, SenderId,
             freq: 0,
@@ -536,7 +536,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         Advertiser.Dispose();
         Receiver.Dispose();
         LanDisc?.Dispose();
-        CatShareReceiveGatt.Dispose();
+        OShareReceiveGatt.Dispose();
         FallbackAdvertiser.Dispose();
         await Hotspot.StopAsync();
         await Server.DisposeAsync();
@@ -544,14 +544,14 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         _sendGate.Dispose();
     }
 
-    private async Task PullIncomingCatShareAsync(CatShareP2pOffer offer)
+    private async Task PullIncomingOShareAsync(OShareP2pOffer offer)
     {
         using var receiveCts = new CancellationTokenSource();
-        _catShareReceiveCts = receiveCts;
+        _oShareReceiveCts = receiveCts;
         try
         {
             TransferStateChanged?.Invoke("", $"joining Wi-Fi Direct group '{offer.Ssid}'…");
-            using var connection = await CatShareWifiDirectConnection.ConnectAsync(
+            using var connection = await OShareWifiDirectConnection.ConnectAsync(
                 offer.Mac,
                 state => TransferStateChanged?.Invoke("", $"receive: {state}"), receiveCts.Token);
             var files = await ReceiveSession.PullAsync(
@@ -572,11 +572,11 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Log.Error("RX: CatShare transfer failed", ex);
+            Log.Error("RX: OShare transfer failed", ex);
             ReceiveFailed?.Invoke(offer.SenderId, ex.Message);
             TransferStateChanged?.Invoke("", $"receive failed: {ex.Message}");
         }
-        finally { _catShareReceiveCts = null; }
+        finally { _oShareReceiveCts = null; }
     }
 
     /// <summary>Blocks until async cleanup (sockets/GATT sessions/hotspot/firewall

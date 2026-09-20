@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace CatShareSender.Ui;
+namespace OShareSender.Ui;
 
 public enum DialogKind { Info, Error, Success }
 

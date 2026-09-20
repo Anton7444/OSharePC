@@ -118,7 +118,7 @@ class _SettingsTabState extends State<SettingsTab> {
     final localAppData = Platform.environment['LOCALAPPDATA'];
     if (localAppData == null || localAppData.isEmpty) return;
 
-    final dir = Directory('$localAppData\\CatShareSender');
+    final dir = Directory('$localAppData\\OSharePC');
     if (!dir.existsSync()) {
       dir.createSync(recursive: true);
     }
@@ -167,7 +167,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         const SizedBox(height: 4),
                         Text(
                           status.saveDirectory.isEmpty
-                              ? 'Downloads\\CatShare'
+                              ? 'Downloads\\OShare'
                               : status.saveDirectory,
                           style: TextStyle(
                             fontSize: 12,
@@ -639,7 +639,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          '%LOCALAPPDATA%\\CatShareSender',
+                          '%LOCALAPPDATA%\\OSharePC',
                           style: TextStyle(
                             fontSize: 12,
                             color: isDark

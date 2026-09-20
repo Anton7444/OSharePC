@@ -1,13 +1,13 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Reflection;
-using CatShareSender.Ui;
+using OShareSender.Ui;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
-namespace CatShareSender;
+namespace OShareSender;
 
 internal static class Program
 {
@@ -22,14 +22,14 @@ internal static class Program
     {
         Log.Init();
         Lang.Load();
-        Log.Info($"CatShareSender version {Version}");
+        Log.Info($"OSharePC version {Version}");
 
         // single instance — two running copies would fight over the BLE scanner,
         // the port and the log file (tray Exit used to fail, piling up instances)
-        var mutex = new Mutex(true, "Local\\CatShareSender-SingleInstance", out var firstInstance);
+        var mutex = new Mutex(true, "Local\\OSharePC-SingleInstance", out var firstInstance);
         if (!firstInstance)
         {
-            Log.Warn("another CatShareSender instance is already running — exiting");
+            Log.Warn("another OSharePC instance is already running — exiting");
             ApplicationConfiguration.Initialize();
             AppDialog.Show(null, "OsharePC", Lang.T("Dialog.AlreadyRunning"), Ui.DialogKind.Info);
             return 0;
@@ -96,8 +96,7 @@ internal static class Program
                 return 0;
             }
 
-            Log.Warn("No backend mode selected. Launch OSharePC.exe for the supported UI; use --legacy-ui only for backend debugging.");
-            mutex.ReleaseMutex();
+            Log.Warn("No backend mode selected. Launch oshare_gui.exe for the supported UI; use --legacy-ui only for backend debugging.");            mutex.ReleaseMutex();
             return 2;
         }
         catch
@@ -118,7 +117,7 @@ internal static class Program
 
     private static async Task<int> RunBridge(int parentPid, string authToken)
     {
-        await using var bridge = new CatShareBridgeServer(authToken);
+        await using var bridge = new OShareBridgeServer(authToken);
         await bridge.StartAsync();
         if (parentPid <= 0)
         {
@@ -157,7 +156,7 @@ internal static class Program
     /// <summary>
     /// Exhaustive probe of every advertisement shape Windows might accept, to find
     /// one that satisfies the alliance parser (uuid-list AD + ≥62-byte record).
-    /// Run: CatShareSender.exe --advprobe
+    /// Run: OSharePC.exe --advprobe
     /// </summary>
     private static async Task<int> AdvProbe()
     {
@@ -240,11 +239,11 @@ internal static class Program
         });
 
         // 5. legacy + LocalName (officially forbidden, confirm)
-        await Try("legacy + LocalName", (a, p) => { a.LocalName = "CatSharePC"; });
+        await Try("legacy + LocalName", (a, p) => { a.LocalName = "OSharePC"; });
 
         // 5b-5g. legacy raw 16-bit-UUID lists (0x02/0x03) and local-name (0x09) sections.
         // Android maps 0x02/0x03 into ScanRecord.getServiceUuids() and 0x09 into the
-        // advertised name — exactly what the 互传/CatShare send-sheet scanners match on.
+        // advertised name — exactly what the 互传/OShare send-sheet scanners match on.
         await Try("legacy + raw 0x03 uuid-list 0x8881", (a, p) =>
         {
             a.DataSections.Add(new BluetoothLEAdvertisementDataSection
@@ -297,7 +296,7 @@ internal static class Program
             a.ManufacturerData.Add(new BluetoothLEManufacturerData
             { CompanyId = 0x0065, Data = Buf(new byte[] { 0x01, 0x02, 0x03 }) });
         });
-        await Try("legacy + raw 0x16 svcdata 0x01ff (catshare)", (a, p) =>
+        await Try("legacy + raw 0x16 svcdata 0x01ff (oshare)", (a, p) =>
         {
             a.DataSections.Add(new BluetoothLEAdvertisementDataSection
             { DataType = 0x16, Data = Buf(new byte[] { 0xff, 0x01, 0x01 }) });
@@ -419,9 +418,9 @@ internal static class Program
         await server.StartAsync(SenderEngine.DefaultPort, configureFirewall: false);
 
         // stage temp files (one small, one larger) to exercise the multi-file zip
-        var tmp1 = Path.Combine(Path.GetTempPath(), "catshare-selftest.txt");
-        var tmp2 = Path.Combine(Path.GetTempPath(), "catshare-selftest.bin");
-        await File.WriteAllTextAsync(tmp1, "hello from catshare sender selftest");
+        var tmp1 = Path.Combine(Path.GetTempPath(), "oshare-selftest.txt");
+        var tmp2 = Path.Combine(Path.GetTempPath(), "oshare-selftest.bin");
+        await File.WriteAllTextAsync(tmp1, "hello from oshare sender selftest");
         await File.WriteAllBytesAsync(tmp2, RandomNumberGenerator.GetBytes(128 * 1024));
         var task = new TransferTask
         {
@@ -563,9 +562,9 @@ internal static class Program
         Log.Info("SELFTEST ok: AES-CTR roundtrip");
 
         // 2) Java compat spot check: openssl `enc -aes-256-ctr` must match for a fixed vector.
-        //    key = 000102...1f, iv = ASCII "0102030405060708", plaintext "catshare-test-123"
+        //    key = 000102...1f, iv = ASCII "0102030405060708", plaintext "oshare-test-123"
         var vectorKey = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
-        var vectorPlain = "catshare-test-123";
+        var vectorPlain = "oshare-test-123";
         var vectorOut = Convert.ToHexString(OShareCrypto.CtrTransform(vectorKey, System.Text.Encoding.UTF8.GetBytes(vectorPlain)));
         Log.Info($"SELFTEST CTR vector (compare with openssl): {vectorOut.ToLowerInvariant()}");
 
@@ -623,7 +622,7 @@ internal static class Program
         else Log.Info("SELFTEST ok: AES-CBC roundtrip");
 
         // 8) Directory traversal safety check
-        var safeDir = Path.Combine(Path.GetTempPath(), "CatShareTestDir");
+        var safeDir = Path.Combine(Path.GetTempPath(), "OShareTestDir");
         var safeResult = ReceiveSession.SafePath(safeDir, "../../evil.exe");
         if (!safeResult.StartsWith(safeDir, StringComparison.OrdinalIgnoreCase) || safeResult.Contains(".."))
         {
