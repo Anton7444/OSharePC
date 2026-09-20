@@ -13,66 +13,40 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete all Actions artifacts
+      - name: Delete artifacts from older commits
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          CURRENT_SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
+          echo "Keeping artifacts belonging to current commit: $CURRENT_SHA"
+
+          page=1
           deleted=0
+          kept=0
 
           while true; do
-            response="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=1")"
+            response="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=$page")"
             count="$(jq '.artifacts | length' <<<"$response")"
             [ "$count" -eq 0 ] && break
 
-            while IFS=$'\t' read -r id name size; do
-              echo "DELETE artifact $id  $name  bytes=$size"
-              gh api --method DELETE "/repos/$REPO/actions/artifacts/$id"
-              deleted=$((deleted + 1))
-            done < <(jq -r '.artifacts[] | [.id, .name, .size_in_bytes] | @tsv' <<<"$response")
-          done
-
-          echo "Deleted $deleted artifact(s)."
-
-      - name: Delete all previous workflow runs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          deleted=0
-
-          while true; do
-            response="$(gh api "/repos/$REPO/actions/runs?per_page=100&page=1")"
-            remaining="$(jq --argjson current "$CURRENT_RUN_ID" '[.workflow_runs[] | select(.id != $current)] | length' <<<"$response")"
-            [ "$remaining" -eq 0 ] && break
-
-            while IFS=$'\t' read -r id status name; do
-              [ -z "$id" ] && continue
-              echo "PROCESS run $id  $name  status=$status"
-
-              if [ "$status" != "completed" ]; then
-                gh api --method POST "/repos/$REPO/actions/runs/$id/cancel" >/dev/null 2>&1 || true
-                for _ in $(seq 1 30); do
-                  status="$(gh api "/repos/$REPO/actions/runs/$id" --jq '.status' 2>/dev/null || echo completed)"
-                  [ "$status" = "completed" ] && break
-                  sleep 2
-                done
-              fi
-
-              status="$(gh api "/repos/$REPO/actions/runs/$id" --jq '.status' 2>/dev/null || echo completed)"
-              if [ "$status" = "completed" ]; then
-                echo "DELETE run $id  $name"
-                gh api --method DELETE "/repos/$REPO/actions/runs/$id" || true
-                deleted=$((deleted + 1))
+            while IFS=$'\t' read -r id name sha size; do
+              if [ "$sha" = "$CURRENT_SHA" ]; then
+                echo "KEEP   $id  $name  sha=$sha  bytes=$size"
+                kept=$((kept + 1))
               else
-                echo "SKIP run $id because status is still $status"
+                echo "DELETE $id  $name  sha=$sha  bytes=$size"
+                gh api --method DELETE "/repos/$REPO/actions/artifacts/$id"
+                deleted=$((deleted + 1))
               fi
-            done < <(jq --argjson current "$CURRENT_RUN_ID" -r '.workflow_runs[] | select(.id != $current) | [.id, .status, .name] | @tsv' <<<"$response")
+            done < <(jq -r '.artifacts[] | [.id, .name, (.workflow_run.head_sha // ""), .size_in_bytes] | @tsv' <<<"$response")
+
+            # Deletions shrink the collection, so restart from page 1 to avoid skipping entries.
+            page=1
+            remaining="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=1" | jq '[.artifacts[] | select((.workflow_run.head_sha // "") != env.CURRENT_SHA)] | length')"
+            [ "$remaining" -eq 0 ] && break
           done
 
-          echo "Deleted $deleted previous workflow run(s); kept current cleanup run $CURRENT_RUN_ID."
+          echo "Deleted $deleted old artifact(s); kept $kept artifact(s) from the current commit."
