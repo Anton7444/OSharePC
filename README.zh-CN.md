@@ -19,7 +19,7 @@ OShare PC 与 OPPO 或 OnePlus 并没有关联。
 
 ### 便携版
 
-下载 `OSharePC-Portable-<version>-win-x64.zip`，解压到任意位置后运行 `catshare_gui.exe`。
+下载 `OSharePC-Portable-<version>-win-x64.zip`，解压到任意位置后运行 `OSharePC.exe`。
 
 ## 系统要求
 

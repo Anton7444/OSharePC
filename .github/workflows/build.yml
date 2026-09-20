@@ -105,7 +105,7 @@ jobs:
           $setup = 'OSharePC-Setup-win-x64.exe'
           if (-not (Test-Path -LiteralPath $zip)) { throw "Missing $zip" }
           if ((Get-Item -LiteralPath $zip).Length -le 0) { throw "$zip is empty" }
-          if (-not (Test-Path -LiteralPath 'deploy-gui/catshare_gui.exe')) { throw 'Missing deploy-gui/catshare_gui.exe' }
+          if (-not (Test-Path -LiteralPath 'deploy-gui/OSharePC.exe')) { throw 'Missing deploy-gui/OSharePC.exe' }
           if (-not (Test-Path -LiteralPath 'deploy-gui/data/flutter_assets')) { throw 'Missing deploy-gui/data/flutter_assets' }
           if (-not (Test-Path -LiteralPath 'deploy-gui/engine/CatShareSender.exe')) { throw 'Missing deploy-gui/engine/CatShareSender.exe' }
           if (-not (Test-Path -LiteralPath $setup)) { throw "Missing $setup" }

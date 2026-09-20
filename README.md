@@ -19,7 +19,7 @@ Download `OSharePC-Setup-<version>.exe`, run it, and optionally choose to create
 
 ### Portable
 
-Download `OSharePC-Portable-<version>-win-x64.zip`, extract it anywhere, and run `catshare_gui.exe`.
+Download `OSharePC-Portable-<version>-win-x64.zip`, extract it anywhere, and run `OSharePC.exe`.
 
 ## System Requirements
 

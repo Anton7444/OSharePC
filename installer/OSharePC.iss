@@ -2,7 +2,7 @@
 #define MyAppVersion "1.0.1"
 #endif
 #define MyAppName "OShare PC"
-#define MyAppExeName "catshare_gui.exe"
+#define MyAppExeName "OSharePC.exe"
 
 
 
@@ -124,11 +124,11 @@ begin
       '$res = $wr.GetResponse(); ' +
       '$res.Close(); ' +
     '} catch {}; ' +
-    'Get-Process -Name ''catshare_gui'' -ErrorAction SilentlyContinue | Where-Object { ' +
+    'Get-Process -Name ''OSharePC'' -ErrorAction SilentlyContinue | Where-Object { ' +
       'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
     '} | ForEach-Object { try { $_.CloseMainWindow() } catch {} }; ' +
     'Start-Sleep -Milliseconds 1200; ' +
-    'Get-Process -Name ''catshare_gui'', ''CatShareSender'' -ErrorAction SilentlyContinue | Where-Object { ' +
+    'Get-Process -Name ''OSharePC'', ''CatShareSender'' -ErrorAction SilentlyContinue | Where-Object { ' +
       'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
     '} | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} }; ' +
     'Start-Sleep -Milliseconds 300;';

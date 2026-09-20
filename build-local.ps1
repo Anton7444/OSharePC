@@ -573,7 +573,7 @@ function Invoke-BuildLocal {
             finally {
                 Pop-Location
             }
-            Assert-File -Path (Join-Path $guiRelease 'catshare_gui.exe') -Description 'Flutter release executable'
+            Assert-File -Path (Join-Path $guiRelease 'OSharePC.exe') -Description 'Flutter release executable'
             if (-not (Test-Path -LiteralPath (Join-Path $guiRelease 'data\flutter_assets') -PathType Container)) {
                 throw "Flutter release assets are missing: $(Join-Path $guiRelease 'data\flutter_assets')"
             }
@@ -596,7 +596,7 @@ function Invoke-BuildLocal {
                 -GuiRelease $guiRelease `
                 -BackendPublish $backendPublish `
                 -OutputDirectory $portableStage
-            Assert-File -Path (Join-Path $portableStage 'catshare_gui.exe') -Description 'Assembled GUI executable'
+            Assert-File -Path (Join-Path $portableStage 'OSharePC.exe') -Description 'Assembled GUI executable'
             if (-not (Test-Path -LiteralPath (Join-Path $portableStage 'data\flutter_assets') -PathType Container)) {
                 throw "Assembled Flutter assets are missing: $(Join-Path $portableStage 'data\flutter_assets')"
             }
@@ -616,7 +616,7 @@ function Invoke-BuildLocal {
                 $zip = [System.IO.Compression.ZipFile]::OpenRead($portableZip)
                 try {
                     $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-                    foreach ($requiredEntry in @('catshare_gui.exe', 'engine/CatShareSender.exe')) {
+                    foreach ($requiredEntry in @('OSharePC.exe', 'engine/CatShareSender.exe')) {
                         if ($entries -notcontains $requiredEntry) {
                             throw "Portable ZIP is incomplete; missing $requiredEntry"
                         }
