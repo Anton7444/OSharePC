@@ -23,15 +23,15 @@ jobs:
           set -euo pipefail
           echo "Keeping artifacts belonging to current commit: $CURRENT_SHA"
 
-          page=1
           deleted=0
           kept=0
 
           while true; do
-            response="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=$page")"
+            response="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=1")"
             count="$(jq '.artifacts | length' <<<"$response")"
             [ "$count" -eq 0 ] && break
 
+            deletable=0
             while IFS=$'\t' read -r id name sha size; do
               if [ "$sha" = "$CURRENT_SHA" ]; then
                 echo "KEEP   $id  $name  sha=$sha  bytes=$size"
@@ -40,13 +40,70 @@ jobs:
                 echo "DELETE $id  $name  sha=$sha  bytes=$size"
                 gh api --method DELETE "/repos/$REPO/actions/artifacts/$id"
                 deleted=$((deleted + 1))
+                deletable=$((deletable + 1))
               fi
             done < <(jq -r '.artifacts[] | [.id, .name, (.workflow_run.head_sha // ""), .size_in_bytes] | @tsv' <<<"$response")
 
-            # Deletions shrink the collection, so restart from page 1 to avoid skipping entries.
-            page=1
-            remaining="$(gh api "/repos/$REPO/actions/artifacts?per_page=100&page=1" | jq '[.artifacts[] | select((.workflow_run.head_sha // "") != env.CURRENT_SHA)] | length')"
-            [ "$remaining" -eq 0 ] && break
+            [ "$deletable" -eq 0 ] && break
           done
 
           echo "Deleted $deleted old artifact(s); kept $kept artifact(s) from the current commit."
+
+      - name: Delete old completed workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_SHA: ${{ github.sha }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Keeping current run $CURRENT_RUN_ID and runs for current commit $CURRENT_SHA"
+
+          ids=()
+          page=1
+
+          while true; do
+            response="$(gh api "/repos/$REPO/actions/runs?per_page=100&page=$page")"
+            count="$(jq '.workflow_runs | length' <<<"$response")"
+            [ "$count" -eq 0 ] && break
+
+            while IFS=$'\t' read -r id status sha name; do
+              if [ "$id" = "$CURRENT_RUN_ID" ] || [ "$sha" = "$CURRENT_SHA" ] || [ "$status" != "completed" ]; then
+                echo "KEEP   $id  $name  status=$status sha=$sha"
+              else
+                ids+=("$id")
+              fi
+            done < <(jq -r '.workflow_runs[] | [.id, .status, (.head_sha // ""), .name] | @tsv' <<<"$response")
+
+            page=$((page + 1))
+          done
+
+          deleted=0
+          for id in "${ids[@]}"; do
+            echo "DELETE run $id"
+            gh api --method DELETE "/repos/$REPO/actions/runs/$id"
+            deleted=$((deleted + 1))
+          done
+
+          echo "Deleted $deleted old completed workflow run(s)."
+
+      - name: Dispatch release requested by commit
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_SHA: ${{ github.sha }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          first_line="${COMMIT_MESSAGE%%$'\n'*}"
+          if [[ "$first_line" =~ ^release:[[:space:]]*v?([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            echo "Dispatching release v$version for $CURRENT_SHA"
+            gh workflow run release.yml --repo "$REPO" --ref main -f version="$version" -f target_sha="$CURRENT_SHA"
+          else
+            echo "No release requested by commit message."
+          fi
