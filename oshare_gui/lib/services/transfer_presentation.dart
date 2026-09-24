@@ -1,4 +1,45 @@
+import 'dart:collection';
 import 'dart:math' as math;
+import '../models/models.dart';
+
+bool shouldAutoAcceptIncomingTransfer(QuickSaveMode mode) =>
+    mode == QuickSaveMode.on;
+
+bool shouldShowReceiveTransferModal({
+  required bool isActive,
+  required String phase,
+  required bool isWindowVisible,
+  required bool resultWasHidden,
+}) {
+  if (!isActive || !isWindowVisible) return false;
+  final isResult = const ['completed', 'failed', 'cancelled'].contains(phase);
+  return !isResult || !resultWasHidden;
+}
+
+bool shouldShowSendTransferModal({
+  required bool isActive,
+  required bool isBackground,
+}) => isActive && !isBackground;
+
+bool shouldShowSendResultDialog({
+  required bool isBackground,
+  required bool isWindowVisible,
+  required bool isDuplicate,
+}) => isBackground && isWindowVisible && !isDuplicate;
+
+class SendResultEventTracker {
+  static const _maxRememberedIds = 128;
+  final LinkedHashSet<String> _handledRequestIds = LinkedHashSet<String>();
+
+  bool isFirst(String? requestId) {
+    if (requestId == null || requestId.isEmpty) return true;
+    if (!_handledRequestIds.add(requestId)) return false;
+    if (_handledRequestIds.length > _maxRememberedIds) {
+      _handledRequestIds.remove(_handledRequestIds.first);
+    }
+    return true;
+  }
+}
 
 Duration? estimateRemaining({
   required int sentBytes,

@@ -51,6 +51,8 @@ class DesktopDropPanelService {
         },
         includeParentEnvironment: true,
       );
+      unawaited(process.stdout.drain<void>());
+      unawaited(process.stderr.drain<void>());
       _process = process;
       unawaited(
         process.exitCode.then((_) {

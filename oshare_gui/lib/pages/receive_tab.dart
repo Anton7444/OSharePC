@@ -4,6 +4,7 @@ import '../config/language.dart';
 import '../models/models.dart';
 import '../services/bridge_client.dart';
 import '../services/outgoing_staging_controller.dart';
+import '../services/transfer_presentation.dart';
 import '../widgets/custom_segmented_button.dart';
 import '../widgets/native_drop_zone.dart';
 import '../widgets/radar_logo.dart';
@@ -35,7 +36,11 @@ class _ReceiveTabState extends State<ReceiveTab> {
     if (widget.client.pendingIncomingOffer != null) return false;
     final transfer = widget.client.transferState;
     if (transfer.active && !transfer.isSending) {
-      if (!const ['completed', 'failed', 'cancelled'].contains(transfer.phase)) {
+      if (!const [
+        'completed',
+        'failed',
+        'cancelled',
+      ].contains(transfer.phase)) {
         return false;
       }
     }
@@ -208,7 +213,9 @@ class _ReceiveTabState extends State<ReceiveTab> {
                       style: TextStyle(
                         fontSize: 34,
                         fontWeight: FontWeight.w700,
-                        color: isDark ? AppColors.darkText : AppColors.lightText,
+                        color: isDark
+                            ? AppColors.darkText
+                            : AppColors.lightText,
                         letterSpacing: -0.5,
                       ),
                     ),
@@ -269,10 +276,12 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         appText(widget.language, 'off'),
                         appText(widget.language, 'on'),
                       ],
-                      selected: widget.client.quickSaveMode == QuickSaveMode.favorites
+                      selected:
+                          widget.client.quickSaveMode == QuickSaveMode.favorites
                           ? QuickSaveMode.off
                           : widget.client.quickSaveMode,
-                      onSelected: (mode) => widget.client.setQuickSaveMode(mode),
+                      onSelected: (mode) =>
+                          widget.client.setQuickSaveMode(mode),
                     ),
                   ],
                 ),
@@ -281,10 +290,15 @@ class _ReceiveTabState extends State<ReceiveTab> {
           ),
 
           // 6. Incoming Transfer Dialog Modal Overlay
-          if (widget.client.pendingIncomingOffer != null)
+          if (widget.client.pendingIncomingOffer != null &&
+              widget.client.mainWindowVisible)
             _buildIncomingModal(context, widget.client.pendingIncomingOffer!),
-          if (widget.client.transferState.active &&
-              !widget.client.transferState.isSending)
+          if (shouldShowReceiveTransferModal(
+            isActive: widget.client.transferState.active,
+            phase: widget.client.transferState.phase,
+            isWindowVisible: widget.client.mainWindowVisible,
+            resultWasHidden: widget.client.transferState.isBackground,
+          ))
             _buildTransferModal(context, widget.client.transferState),
 
           // 7. Drag and Drop Overlay
@@ -742,7 +756,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                               : AppColors.lightBorder,
                         ),
                       ),
-                      onPressed: () => widget.client.confirmReceive(offer.id, false),
+                      onPressed: () =>
+                          widget.client.confirmReceive(offer.id, false),
                       child: Text(
                         appText(widget.language, 'decline'),
                         style: TextStyle(
@@ -768,7 +783,8 @@ class _ReceiveTabState extends State<ReceiveTab> {
                         ),
                         elevation: 0,
                       ),
-                      onPressed: () => widget.client.confirmReceive(offer.id, true),
+                      onPressed: () =>
+                          widget.client.confirmReceive(offer.id, true),
                       child: Text(
                         appText(widget.language, 'accept'),
                         style: const TextStyle(fontWeight: FontWeight.w700),

@@ -45,6 +45,7 @@ public sealed class TransferServer : IAsyncDisposable
     private string? _successfulTaskId;
     private string? _reportedFailureTaskId;
     private string? _locallyCancelledTaskId;
+    private TaskCompletionSource<bool> _transferCompletionTcs = NewTransferCompletionSource();
 
     // A staged task is NOT remotely readable until the BLE credential flow arms it.
     // Once a WebSocket peer claims the armed task, every /download request must come
@@ -85,6 +86,25 @@ public sealed class TransferServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Waits until the phone reports a terminal transfer result. The BLE
+    /// credential exchange only arms the HTTP/WebSocket transfer; it is not a
+    /// completion signal.
+    /// </summary>
+    public async Task WaitForTransferCompletionAsync(string taskId, CancellationToken ct = default)
+    {
+        Task<bool> completion;
+        lock (_peerGate)
+        {
+            if (_activeTask?.TaskId != taskId)
+                throw new InvalidOperationException("Cannot wait for a transfer that is not active.");
+            completion = _transferCompletionTcs.Task;
+        }
+
+        if (!await completion.WaitAsync(ct))
+            throw new InvalidOperationException("The phone did not complete the transfer.");
+    }
+
     public void ArmTransfer(TransferTask task, string? allowedLocalIp = null, string? expectedPeerIp = null)
     {
         if (_activeTask?.TaskId != task.TaskId)
@@ -102,6 +122,7 @@ public sealed class TransferServer : IAsyncDisposable
             _successfulTaskId = null;
             _reportedFailureTaskId = null;
             _locallyCancelledTaskId = null;
+            _transferCompletionTcs = NewTransferCompletionSource();
             _wsConnectedTcs.TrySetResult(false);
             _wsConnectedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
@@ -148,6 +169,9 @@ public sealed class TransferServer : IAsyncDisposable
     private static IPAddress? NormalizeIp(IPAddress? ip) =>
         ip?.IsIPv4MappedToIPv6 == true ? ip.MapToIPv4() : ip;
 
+    private static TaskCompletionSource<bool> NewTransferCompletionSource() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     private bool IsSuccessful(string taskId)
     {
         lock (_peerGate) return _successfulTaskId == taskId;
@@ -166,6 +190,7 @@ public sealed class TransferServer : IAsyncDisposable
         {
             _successfulTaskId = taskId;
             _reportedFailureTaskId = null;
+            _transferCompletionTcs.TrySetResult(true);
         }
     }
 
@@ -178,6 +203,7 @@ public sealed class TransferServer : IAsyncDisposable
             if (_successfulTaskId == taskId || _locallyCancelledTaskId == taskId || _reportedFailureTaskId == taskId)
                 return;
             _reportedFailureTaskId = taskId;
+            _transferCompletionTcs.TrySetResult(false);
         }
         Log.Warn($"TransferServer: remote transfer failed task={taskId}: {reason}");
         try { TransferFailed?.Invoke(taskId, reason); } catch { }

@@ -28,6 +28,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private Task? _sendTask;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private int _shutdownRequested;
+    private int _sendQuiet;
+    private string? _sendRequestId;
 
     public OShareBridgeServer(string authToken)
     {
@@ -78,10 +80,22 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         _engine.Server.StatusReceived += (taskId, type, reason) =>
         {
             if (type == 1)
-                Push("sendCompleted", new { taskId });
+            {
+                var quiet = Volatile.Read(ref _sendQuiet) != 0;
+                var requestId = Volatile.Read(ref _sendRequestId);
+                Push("sendCompleted", new { taskId, quiet, requestId });
+                Interlocked.CompareExchange(ref _sendRequestId, null, requestId);
+                Interlocked.Exchange(ref _sendQuiet, 0);
+            }
         };
         _engine.Server.TransferFailed += (taskId, error) =>
-            Push("sendFailed", new { taskId, error });
+        {
+            var quiet = Volatile.Read(ref _sendQuiet) != 0;
+            var requestId = Volatile.Read(ref _sendRequestId);
+            Push("sendFailed", new { taskId, error, quiet, requestId });
+            Interlocked.CompareExchange(ref _sendRequestId, null, requestId);
+            Interlocked.Exchange(ref _sendQuiet, 0);
+        };
 
         _engine.ConfirmIncomingTransfer = (name, mimeType, count) => ConfirmViaBridge(name, mimeType, count);
 
@@ -152,6 +166,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 state = _lastState,
                 themeMode = SettingsStore.Current.ThemeMode,
                 quickSaveMode = SettingsStore.Current.QuickSaveMode,
+                sendQuiet = Volatile.Read(ref _sendQuiet) != 0,
                 minimizeToTray = SettingsStore.Current.MinimizeToTray,
                 closeToTray = SettingsStore.Current.CloseToTray,
                 pendingTransfer = pending is null ? null : new
@@ -274,14 +289,33 @@ public sealed class OShareBridgeServer : IAsyncDisposable
 
         app.MapPost("/api/send", async (SendRequest body) =>
         {
+            var requestId = string.IsNullOrWhiteSpace(body.RequestId)
+                ? Guid.NewGuid().ToString("N")
+                : body.RequestId!;
+            var quiet = body.Quiet;
+
+            IResult Reject(int statusCode, string error)
+            {
+                if (quiet) Push("sendFailed", new { error, quiet, requestId });
+                return statusCode switch
+                {
+                    StatusCodes.Status400BadRequest => Results.BadRequest(new { error }),
+                    StatusCodes.Status404NotFound => Results.NotFound(new { error }),
+                    _ => Results.Conflict(new { error }),
+                };
+            }
+
             if (string.IsNullOrWhiteSpace(body.Address) || !ulong.TryParse(body.Address, out var address))
-                return Results.BadRequest(new { error = "Expected a BLE address string." });
+                return Reject(StatusCodes.Status400BadRequest, "Expected a BLE address string.");
             var device = _engine.Scanner.Devices.FirstOrDefault(d => d.Address == address);
-            if (device is null) return Results.NotFound(new { error = "Device is no longer visible." });
-            if (!await _sendGate.WaitAsync(0)) return Results.Conflict(new { error = "A transfer is already running." });
+            if (device is null) return Reject(StatusCodes.Status404NotFound, "Device is no longer visible.");
+            if (!await _sendGate.WaitAsync(0)) return Reject(StatusCodes.Status409Conflict, "A transfer is already running.");
             try
             {
-                if (_sendTask is { IsCompleted: false }) return Results.Conflict(new { error = "A transfer is already running." });
+                if (_sendTask is { IsCompleted: false }) return Reject(StatusCodes.Status409Conflict, "A transfer is already running.");
+                Interlocked.Exchange(ref _sendRequestId, requestId);
+                Interlocked.Exchange(ref _sendQuiet, body.Quiet ? 1 : 0);
+                Push("sendStarted", new { device = device.Name, quiet, requestId });
                 _sendTask = _engine.SendToAsync(device);
             }
             finally { _sendGate.Release(); }
@@ -291,10 +325,12 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 {
                     var error = t.Exception?.GetBaseException().Message ?? "send failed";
                     Log.Warn($"send failed: {error}");
-                    Push("sendFailed", new { error });
+                    Push("sendFailed", new { error, quiet, requestId });
+                    Interlocked.CompareExchange(ref _sendRequestId, null, requestId);
+                    Interlocked.Exchange(ref _sendQuiet, 0);
                 }
             });
-            return Results.Accepted(value: new { device = device.Name, address = device.Address });
+            return Results.Accepted(value: new { device = device.Name, address = device.Address, requestId });
         });
 
         _app = app;
@@ -405,5 +441,5 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         bool? MinimizeToTray,
         bool? CloseToTray);
     private sealed record StageRequest(string[]? Files);
-    private sealed record SendRequest(string? Address);
+    private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null);
 }

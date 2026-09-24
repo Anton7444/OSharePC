@@ -770,7 +770,8 @@ public sealed class MainForm : Form
 
     private Task<bool> ConfirmIncomingAsync(OShareP2pOffer offer)
     {
-        if (IsDisposed || Disposing || !IsHandleCreated) return Task.FromResult(false);
+        if (IsDisposed || Disposing) return Task.FromResult(false);
+        if (!IsHandleCreated) return Task.FromResult(false);
         if (InvokeRequired)
         {
             var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -781,6 +782,9 @@ public sealed class MainForm : Form
             });
             return result.Task;
         }
+        if (SettingsStore.Current.QuickSaveMode == 2 &&
+            (WindowState == FormWindowState.Minimized || !Visible))
+            return Task.FromResult(true);
 
         var answer = MessageBox.Show(this,
             $"A OShare device ({offer.SenderId}) wants to send files to this PC.\n\nAccept the incoming transfer?",
@@ -791,7 +795,8 @@ public sealed class MainForm : Form
 
     private Task<bool> ConfirmIncomingTransferAsync(string senderName, string mimeType, string fileCount)
     {
-        if (IsDisposed || Disposing || !IsHandleCreated) return Task.FromResult(false);
+        if (IsDisposed || Disposing) return Task.FromResult(false);
+        if (!IsHandleCreated) return Task.FromResult(false);
         if (InvokeRequired)
         {
             var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -802,6 +807,9 @@ public sealed class MainForm : Form
             });
             return result.Task;
         }
+        if (SettingsStore.Current.QuickSaveMode == 2 &&
+            (WindowState == FormWindowState.Minimized || !Visible))
+            return Task.FromResult(true);
 
         var msg = string.Format(Lang.T("Dialog.IncomingPrompt"), senderName, fileCount, mimeType);
         var answer = MessageBox.Show(this,

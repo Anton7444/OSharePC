@@ -41,6 +41,8 @@ class EngineStatus {
   final int transferPort;
   final String state;
   final IncomingTransferOffer? pendingTransfer;
+  final int? quickSaveMode;
+  final bool sendQuiet;
 
   EngineStatus({
     this.seq = 0,
@@ -54,6 +56,8 @@ class EngineStatus {
     required this.transferPort,
     required this.state,
     this.pendingTransfer,
+    this.quickSaveMode,
+    this.sendQuiet = false,
   });
 
   factory EngineStatus.initial() {
@@ -69,6 +73,8 @@ class EngineStatus {
       transferPort: 8959,
       state: 'Connecting to bridge...',
       pendingTransfer: null,
+      quickSaveMode: null,
+      sendQuiet: false,
     );
   }
 
@@ -91,6 +97,10 @@ class EngineStatus {
               Map<String, dynamic>.from(json['pendingTransfer']),
             )
           : null,
+      quickSaveMode: json['quickSaveMode'] is num
+          ? (json['quickSaveMode'] as num).toInt()
+          : null,
+      sendQuiet: json['sendQuiet'] == true,
     );
   }
 }
@@ -136,6 +146,7 @@ class TransferStateModel {
   final String saveDirectory;
   final String errorText;
   final int fileCount;
+  final bool isBackground;
 
   TransferStateModel({
     this.active = false,
@@ -150,6 +161,7 @@ class TransferStateModel {
     this.saveDirectory = '',
     this.errorText = '',
     this.fileCount = 1,
+    this.isBackground = false,
   });
 
   double get progress {

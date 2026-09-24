@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:oshare_gui/models/models.dart';
 import 'package:oshare_gui/services/transfer_presentation.dart';
 
 void main() {
@@ -41,5 +42,130 @@ void main() {
     expect(fileNameForPath(r'C:\\Users\\Anton\\report.txt'), 'report.txt');
     expect(fileNameForPath('/tmp/report.txt'), 'report.txt');
     expect(fileNameForPath('report.txt'), 'report.txt');
+  });
+
+  test(
+    'receive modal shows its completed result only for visible transfers',
+    () {
+      expect(
+        shouldShowReceiveTransferModal(
+          isActive: true,
+          phase: 'receiving',
+          isWindowVisible: true,
+          resultWasHidden: false,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldShowReceiveTransferModal(
+          isActive: false,
+          phase: 'completed',
+          isWindowVisible: true,
+          resultWasHidden: false,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldShowReceiveTransferModal(
+          isActive: true,
+          phase: 'completed',
+          isWindowVisible: true,
+          resultWasHidden: false,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldShowReceiveTransferModal(
+          isActive: true,
+          phase: 'failed',
+          isWindowVisible: true,
+          resultWasHidden: false,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldShowReceiveTransferModal(
+          isActive: true,
+          phase: 'completed',
+          isWindowVisible: false,
+          resultWasHidden: true,
+        ),
+        isFalse,
+      );
+      expect(
+        shouldShowReceiveTransferModal(
+          isActive: true,
+          phase: 'completed',
+          isWindowVisible: true,
+          resultWasHidden: true,
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test('Quick Save accepts incoming transfers without prompting', () {
+    expect(shouldAutoAcceptIncomingTransfer(QuickSaveMode.on), isTrue);
+    expect(shouldAutoAcceptIncomingTransfer(QuickSaveMode.off), isFalse);
+    expect(shouldAutoAcceptIncomingTransfer(QuickSaveMode.favorites), isFalse);
+  });
+
+  test('desktop drop sends do not show the main Send-tab modal', () {
+    expect(
+      shouldShowSendTransferModal(isActive: true, isBackground: true),
+      isFalse,
+    );
+    expect(
+      shouldShowSendTransferModal(isActive: true, isBackground: false),
+      isTrue,
+    );
+    expect(
+      shouldShowSendTransferModal(isActive: false, isBackground: false),
+      isFalse,
+    );
+  });
+
+  test('desktop drop results show only in a visible main window', () {
+    expect(
+      shouldShowSendResultDialog(
+        isBackground: true,
+        isWindowVisible: true,
+        isDuplicate: false,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldShowSendResultDialog(
+        isBackground: true,
+        isWindowVisible: false,
+        isDuplicate: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowSendResultDialog(
+        isBackground: false,
+        isWindowVisible: true,
+        isDuplicate: false,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldShowSendResultDialog(
+        isBackground: true,
+        isWindowVisible: true,
+        isDuplicate: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test('send result event IDs are handled only once', () {
+    final tracker = SendResultEventTracker();
+
+    expect(tracker.isFirst('send-1'), isTrue);
+    expect(tracker.isFirst('send-1'), isFalse);
+    expect(tracker.isFirst('send-2'), isTrue);
+    expect(tracker.isFirst(null), isTrue);
   });
 }

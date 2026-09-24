@@ -573,7 +573,8 @@ function Invoke-BuildLocal {
             finally {
                 Pop-Location
             }
-            Assert-File -Path (Join-Path $guiRelease 'oshare_gui.exe') -Description 'Flutter release executable'            if (-not (Test-Path -LiteralPath (Join-Path $guiRelease 'data\flutter_assets') -PathType Container)) {
+            Assert-File -Path (Join-Path $guiRelease 'oshare_gui.exe') -Description 'Flutter release executable'
+            if (-not (Test-Path -LiteralPath (Join-Path $guiRelease 'data\flutter_assets') -PathType Container)) {
                 throw "Flutter release assets are missing: $(Join-Path $guiRelease 'data\flutter_assets')"
             }
         }
@@ -595,7 +596,8 @@ function Invoke-BuildLocal {
                 -GuiRelease $guiRelease `
                 -BackendPublish $backendPublish `
                 -OutputDirectory $portableStage
-            Assert-File -Path (Join-Path $portableStage 'oshare_gui.exe') -Description 'Assembled GUI executable'            if (-not (Test-Path -LiteralPath (Join-Path $portableStage 'data\flutter_assets') -PathType Container)) {
+            Assert-File -Path (Join-Path $portableStage 'oshare_gui.exe') -Description 'Assembled GUI executable'
+            if (-not (Test-Path -LiteralPath (Join-Path $portableStage 'data\flutter_assets') -PathType Container)) {
                 throw "Assembled Flutter assets are missing: $(Join-Path $portableStage 'data\flutter_assets')"
             }
             Assert-File -Path (Join-Path $portableStage 'engine\OSharePC.exe') -Description 'Assembled backend executable'

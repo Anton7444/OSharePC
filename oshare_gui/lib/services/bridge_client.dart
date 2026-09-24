@@ -8,13 +8,15 @@ import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/language.dart';
 import '../models/models.dart';
+import 'transfer_presentation.dart';
 
 class BridgeClient extends ChangeNotifier {
   static const String baseUrl = 'http://127.0.0.1:8960';
-  static const String _tokenHeader = 'X-OSharePC-Bridge-Token';
+  static const String tokenHeader = 'X-OSharePC-Bridge-Token';
   static const String _tokenEnvironment = 'OSHAREPC_BRIDGE_TOKEN';
   final String _bridgeToken;
   final bool manageBackend;
+  final bool manageIncomingTransfers;
 
   static String _generateBridgeToken() {
     final random = Random.secure();
@@ -22,7 +24,7 @@ class BridgeClient extends ChangeNotifier {
     return base64UrlEncode(bytes).replaceAll('=', '');
   }
 
-  Map<String, String> get _authHeaders => {_tokenHeader: _bridgeToken};
+  Map<String, String> get _authHeaders => {tokenHeader: _bridgeToken};
   Map<String, String> get _jsonHeaders => {
     ..._authHeaders,
     'Content-Type': 'application/json',
@@ -43,17 +45,21 @@ class BridgeClient extends ChangeNotifier {
 
   EngineStatus _status = EngineStatus.initial();
   List<DeviceModel> _devices = [];
-  QuickSaveMode _quickSaveMode = QuickSaveMode.favorites;
+  QuickSaveMode _quickSaveMode;
   bool _receiveSuccessNotifications = true;
   AppLanguage _language = AppLanguage.english;
   TransferStateModel _transferState = TransferStateModel();
   IncomingTransferOffer? _pendingIncomingOffer;
   final Set<String> _dismissedTransferIds = {};
+  final SendResultEventTracker _sendResultEventTracker =
+      SendResultEventTracker();
   int _lastEventSeq = 0;
   bool _isConnecting = true;
   Timer? _pollTimer;
   bool _pollInFlight = false;
   Timer? _clearTransferTimer;
+  bool _backgroundSend = false;
+  bool _mainWindowVisible;
   Process? _backendProcess;
   bool _backendStartInFlight = false;
   Timer? _restartTimer;
@@ -64,21 +70,31 @@ class BridgeClient extends ChangeNotifier {
   int _lastProgressBytes = 0;
   String? _connectionIssue;
   void Function(String title, String message)? onNotification;
+  void Function(bool success, String message)? onSendResult;
+  void Function(TransferStateModel transfer)? onReceiveCompleted;
 
   EngineStatus get status => _status;
   List<DeviceModel> get devices => _devices;
   QuickSaveMode get quickSaveMode => _quickSaveMode;
+  bool get mainWindowVisible => _mainWindowVisible;
   bool get receiveSuccessNotifications => _receiveSuccessNotifications;
   TransferStateModel get transferState => _transferState;
   IncomingTransferOffer? get pendingIncomingOffer => _pendingIncomingOffer;
   bool get isConnecting => _isConnecting;
   String? get connectionIssue => _connectionIssue;
 
-  BridgeClient({String? bridgeToken, this.manageBackend = true})
-    : _bridgeToken =
-          bridgeToken ??
-          Platform.environment[_tokenEnvironment] ??
-          _generateBridgeToken() {
+  BridgeClient({
+    String? bridgeToken,
+    this.manageBackend = true,
+    this.manageIncomingTransfers = true,
+    QuickSaveMode initialQuickSaveMode = QuickSaveMode.favorites,
+    bool initialWindowVisible = true,
+  }) : _bridgeToken =
+           bridgeToken ??
+           Platform.environment[_tokenEnvironment] ??
+           _generateBridgeToken(),
+       _quickSaveMode = initialQuickSaveMode,
+       _mainWindowVisible = initialWindowVisible {
     _initPreferences();
     _startSupervisor();
   }
@@ -129,7 +145,11 @@ class BridgeClient extends ChangeNotifier {
 
   Future<void> setQuickSaveMode(QuickSaveMode mode) async {
     _quickSaveMode = mode;
+    final pendingId = _status.pendingTransfer?.id ?? _pendingIncomingOffer?.id;
     notifyListeners();
+    if (shouldAutoAcceptIncomingTransfer(mode) && pendingId != null) {
+      unawaited(confirmReceive(pendingId, true));
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('quick_save_mode', mode.index);
@@ -160,7 +180,9 @@ class BridgeClient extends ChangeNotifier {
     _pollTimer = Timer(delay, () async {
       if (_disposed || _pollInFlight) return;
       _pollInFlight = true;
-      try { await _poll(); } finally {
+      try {
+        await _poll();
+      } finally {
         _pollInFlight = false;
         _schedulePoll(const Duration(seconds: 1));
       }
@@ -177,6 +199,17 @@ class BridgeClient extends ChangeNotifier {
         _restartAttempts = 0;
         final json = jsonDecode(statusResp.body);
         _status = EngineStatus.fromJson(json);
+        _syncQuickSaveMode(_status.quickSaveMode);
+        if (_status.sendQuiet) {
+          _backgroundSend = true;
+        } else if (_transferState.phase == 'idle' ||
+            const [
+              'completed',
+              'failed',
+              'cancelled',
+            ].contains(_transferState.phase)) {
+          _backgroundSend = false;
+        }
 
         // Fast-forward cursor on initial connect to avoid replaying stale events
         if (_lastEventSeq == 0 && _status.seq > 0) {
@@ -184,10 +217,10 @@ class BridgeClient extends ChangeNotifier {
         }
 
         // Sync pending transfer with server status
-        if (_status.pendingTransfer != null) {
+        if (manageIncomingTransfers && _status.pendingTransfer != null) {
           final current = _status.pendingTransfer!;
           if (!_dismissedTransferIds.contains(current.id)) {
-            if (_quickSaveMode == QuickSaveMode.on) {
+            if (shouldAutoAcceptIncomingTransfer(_quickSaveMode)) {
               confirmReceive(current.id, true);
             } else if (_pendingIncomingOffer?.id != current.id) {
               _pendingIncomingOffer = current;
@@ -195,7 +228,7 @@ class BridgeClient extends ChangeNotifier {
           } else {
             _pendingIncomingOffer = null;
           }
-        } else {
+        } else if (manageIncomingTransfers) {
           // No active pending transfer on server
           if (_pendingIncomingOffer != null) {
             _pendingIncomingOffer = null;
@@ -239,6 +272,25 @@ class BridgeClient extends ChangeNotifier {
       notifyListeners();
       _ensureBackendRunning();
     }
+  }
+
+  void _syncQuickSaveMode(int? modeIndex) {
+    if (modeIndex == null) return;
+    final mode = QuickSaveMode.values[modeIndex.clamp(0, 2)];
+    if (_quickSaveMode == mode) return;
+    _quickSaveMode = mode;
+  }
+
+  void setMainWindowVisible(bool visible) {
+    if (_mainWindowVisible == visible) return;
+    _mainWindowVisible = visible;
+    final pendingId = _status.pendingTransfer?.id ?? _pendingIncomingOffer?.id;
+    if (manageIncomingTransfers &&
+        shouldAutoAcceptIncomingTransfer(_quickSaveMode) &&
+        pendingId != null) {
+      unawaited(confirmReceive(pendingId, true));
+    }
+    if (!_disposed) notifyListeners();
   }
 
   void _ensureBackendRunning() {
@@ -352,13 +404,14 @@ class BridgeClient extends ChangeNotifier {
       final data = ev['data'];
 
       if (type == 'incomingTransfer' && data is Map) {
+        if (!manageIncomingTransfers) continue;
         final offer = IncomingTransferOffer.fromJson(
           Map<String, dynamic>.from(data),
         );
         // Only accept if not dismissed and server currently reports this as active pending transfer
         if (!_dismissedTransferIds.contains(offer.id) &&
             _status.pendingTransfer?.id == offer.id) {
-          if (_quickSaveMode == QuickSaveMode.on) {
+          if (shouldAutoAcceptIncomingTransfer(_quickSaveMode)) {
             confirmReceive(offer.id, true);
           } else {
             _pendingIncomingOffer = offer;
@@ -373,6 +426,20 @@ class BridgeClient extends ChangeNotifier {
             (id == null || _pendingIncomingOffer!.id == id)) {
           _pendingIncomingOffer = null;
         }
+      } else if (type == 'sendStarted') {
+        final quiet = data is Map && data['quiet'] == true;
+        _backgroundSend = quiet;
+        _transferState = TransferStateModel(
+          active: true,
+          isSending: true,
+          targetDevice: data is Map
+              ? data['device']?.toString() ?? _transferState.targetDevice
+              : _transferState.targetDevice,
+          statusText: _transferState.statusText.isEmpty
+              ? 'Connecting...'
+              : _transferState.statusText,
+          isBackground: quiet,
+        );
       } else if (type == 'receiveMetadata' && data is Map) {
         _transferState = TransferStateModel(
           active: true,
@@ -391,6 +458,7 @@ class BridgeClient extends ChangeNotifier {
           fileCount:
               (data['fileCount'] as num?)?.toInt() ?? _transferState.fileCount,
           saveDirectory: _status.saveDirectory,
+          isBackground: _quickSaveMode == QuickSaveMode.on,
         );
       } else if (type == 'receiveProgress' && data is Map) {
         final done = (data['done'] as num?)?.toInt() ?? 0;
@@ -401,10 +469,26 @@ class BridgeClient extends ChangeNotifier {
         final total = (data['total'] as num?)?.toInt() ?? 0;
         _updateProgress(sent, total, isSending: true);
       } else if (type == 'sendCompleted') {
-        onNotification?.call(
-          'OsharePC',
-          'File transfer finished successfully.',
-        );
+        final quiet = data is Map && data.containsKey('quiet')
+            ? data['quiet'] == true
+            : _backgroundSend;
+        final requestId = data is Map ? data['requestId']?.toString() : null;
+        final isFirstResult = _sendResultEventTracker.isFirst(requestId);
+        if (shouldShowSendResultDialog(
+          isBackground: quiet,
+          isWindowVisible: _mainWindowVisible,
+          isDuplicate: !isFirstResult,
+        )) {
+          onSendResult?.call(
+            true,
+            appText(_language, 'desktopDropTransferCompleted'),
+          );
+        } else if (!quiet && !_mainWindowVisible) {
+          onNotification?.call(
+            'OsharePC',
+            'File transfer finished successfully.',
+          );
+        }
         _transferState = TransferStateModel(
           active: true,
           isSending: true,
@@ -415,14 +499,10 @@ class BridgeClient extends ChangeNotifier {
           totalBytes: _transferState.totalBytes,
           phase: 'completed',
           statusText: 'Transfer complete',
+          isBackground: quiet || !_mainWindowVisible,
         );
+        _backgroundSend = false;
       } else if (type == 'receiveCompleted') {
-        if (_receiveSuccessNotifications) {
-          onNotification?.call(
-            'OsharePC',
-            'File receive finished successfully.',
-          );
-        }
         _transferState = TransferStateModel(
           active: true,
           isSending: false,
@@ -436,17 +516,44 @@ class BridgeClient extends ChangeNotifier {
           phase: 'completed',
           statusText: 'Transfer complete',
           saveDirectory: _status.saveDirectory,
+          isBackground: !_mainWindowVisible,
         );
         _pendingIncomingOffer = null;
+        onReceiveCompleted?.call(_transferState);
       } else if (type == 'receiveFailed' || type == 'sendFailed') {
         final isSendingFailure = type == 'sendFailed';
+        final isBackground = isSendingFailure
+            ? (data is Map && data.containsKey('quiet')
+                  ? data['quiet'] == true
+                  : _backgroundSend)
+            : !_mainWindowVisible;
         final error = data is Map ? data['error']?.toString() : null;
         final localizedError = _localizedTransferError(
           error,
           isSending: isSendingFailure,
         );
         debugPrint('Backend transfer failure detail: ${error ?? '(none)'}');
-        onNotification?.call('OsharePC', appText(_language, 'transferFailed'));
+        if (isSendingFailure) {
+          final requestId = data is Map ? data['requestId']?.toString() : null;
+          final isFirstResult = _sendResultEventTracker.isFirst(requestId);
+          if (shouldShowSendResultDialog(
+            isBackground: isBackground,
+            isWindowVisible: _mainWindowVisible,
+            isDuplicate: !isFirstResult,
+          )) {
+            onSendResult?.call(
+              false,
+              localizedError.isEmpty
+                  ? appText(_language, 'sendFailed')
+                  : localizedError,
+            );
+          } else if (!isBackground && !_mainWindowVisible) {
+            onNotification?.call(
+              'OsharePC',
+              appText(_language, 'transferFailed'),
+            );
+          }
+        }
         _transferState = TransferStateModel(
           active: true,
           isSending: isSendingFailure,
@@ -458,7 +565,11 @@ class BridgeClient extends ChangeNotifier {
           phase: 'failed',
           statusText: appText(_language, 'transferFailed'),
           errorText: localizedError,
+          isBackground: isSendingFailure
+              ? isBackground || !_mainWindowVisible
+              : isBackground,
         );
+        if (isSendingFailure) _backgroundSend = false;
         _pendingIncomingOffer = null;
       } else if (type == 'state' && data is Map) {
         final st = data['state']?.toString() ?? '';
@@ -478,6 +589,7 @@ class BridgeClient extends ChangeNotifier {
               totalBytes: _transferState.totalBytes,
               phase: 'cancelled',
               statusText: 'Transfer cancelled',
+              isBackground: _transferState.isBackground,
             );
           }
         }
@@ -521,6 +633,9 @@ class BridgeClient extends ChangeNotifier {
       fileName: _transferState.fileName,
       fileCount: _transferState.fileCount,
       saveDirectory: _transferState.saveDirectory,
+      isBackground: isSending
+          ? _backgroundSend
+          : _quickSaveMode == QuickSaveMode.on,
     );
   }
 
@@ -539,6 +654,8 @@ class BridgeClient extends ChangeNotifier {
           transferPort: _status.transferPort,
           state: enabled ? 'Active' : 'Paused',
           pendingTransfer: enabled ? _status.pendingTransfer : null,
+          quickSaveMode: _status.quickSaveMode,
+          sendQuiet: _status.sendQuiet,
         );
         if (!enabled) {
           _pendingIncomingOffer = null;
@@ -564,17 +681,27 @@ class BridgeClient extends ChangeNotifier {
     return null;
   }
 
-  Future<bool> sendToDevice(DeviceModel device) async {
+  Future<bool> sendToDevice(
+    DeviceModel device, {
+    bool isBackground = false,
+  }) async {
+    final requestId = _generateBridgeToken();
     try {
+      _backgroundSend = isBackground;
       _transferState = TransferStateModel(
         active: true,
         isSending: true,
         targetDevice: device.name,
         statusText: 'Connecting to ${device.name}...',
+        isBackground: isBackground,
       );
       notifyListeners();
 
-      final resp = await _postJson('/api/send', {'address': device.address});
+      final resp = await _postJson('/api/send', {
+        'address': device.address,
+        'quiet': isBackground,
+        'requestId': requestId,
+      });
       if (resp.statusCode == 202) return true;
       final body = resp.body.isNotEmpty ? jsonDecode(resp.body) : null;
       final error = body is Map ? body['error']?.toString() : null;
@@ -588,6 +715,7 @@ class BridgeClient extends ChangeNotifier {
         phase: 'failed',
         statusText: appText(_language, 'transferFailed'),
         errorText: _localizedTransferError(error, isSending: true),
+        isBackground: isBackground,
       );
       notifyListeners();
       return false;
@@ -600,6 +728,7 @@ class BridgeClient extends ChangeNotifier {
         phase: 'failed',
         statusText: appText(_language, 'transferFailed'),
         errorText: appText(_language, 'sendFailed'),
+        isBackground: isBackground,
       );
       notifyListeners();
       _clearTransferTimer?.cancel();
@@ -630,6 +759,7 @@ class BridgeClient extends ChangeNotifier {
         phase: 'accepted',
         statusText: 'Preparing transfer…',
         saveDirectory: _status.saveDirectory,
+        isBackground: _quickSaveMode == QuickSaveMode.on,
       );
     }
     notifyListeners();
@@ -685,9 +815,13 @@ class BridgeClient extends ChangeNotifier {
           transferPort: _status.transferPort,
           state: _status.state,
           pendingTransfer: _status.pendingTransfer,
+          quickSaveMode: json['quickSaveMode'] is num
+              ? (json['quickSaveMode'] as num).toInt()
+              : _status.quickSaveMode,
+          sendQuiet: _status.sendQuiet,
         );
-      if (_disposed) return false;
-      notifyListeners();
+        if (_disposed) return false;
+        notifyListeners();
         return true;
       }
     } catch (e) {
@@ -717,8 +851,13 @@ class BridgeClient extends ChangeNotifier {
     try {
       await _post('/api/shutdown').timeout(const Duration(seconds: 2));
     } catch (_) {}
-    try { await _backendProcess?.exitCode.timeout(const Duration(seconds: 4)); }
-    catch (_) { try { _backendProcess?.kill(); } catch (_) {} }
+    try {
+      await _backendProcess?.exitCode.timeout(const Duration(seconds: 4));
+    } catch (_) {
+      try {
+        _backendProcess?.kill();
+      } catch (_) {}
+    }
   }
 
   @override

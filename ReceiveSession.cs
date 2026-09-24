@@ -508,7 +508,10 @@ public sealed class ReceiveSession : IDisposable
         for (var i = 0; i < parts.Count; i++)
         {
             var clean = new string(parts[i].Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray());
-            parts[i] = clean is "." or ".." or "" ? "_" : clean;
+            clean = clean.TrimEnd(' ', '.');
+            if (clean is "." or ".." or "" || IsWindowsReservedDeviceName(clean))
+                clean = "_" + clean.TrimStart('.', ' ');
+            parts[i] = clean;
         }
 
         var rootFull = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
@@ -528,6 +531,19 @@ public sealed class ReceiveSession : IDisposable
             if (!File.Exists(alternative)) return alternative;
         }
         throw new IOException("Too many files with the same name");
+    }
+
+    private static bool IsWindowsReservedDeviceName(string name)
+    {
+        var stem = name.Split('.', 2)[0];
+        return stem.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
+               stem.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
+               stem.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
+               stem.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
+               (stem.Length == 4 &&
+                (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
+                 stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
+                stem[3] is >= '1' and <= '9');
     }
 
     private static string FormatSize(long bytes) => bytes switch

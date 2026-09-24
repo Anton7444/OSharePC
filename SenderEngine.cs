@@ -481,47 +481,53 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
                 waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
                 ct: ct);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
-            return;
         }
 
-        var endpoint = link.Endpoints.FirstOrDefault(e => e.IsOShare) ?? link.Endpoints.FirstOrDefault();
-        if (endpoint is null)
-            throw new InvalidOperationException("Phone exposed no compatible GATT endpoint (neither OShare nor Alliance).");
-
-        TransferStateChanged?.Invoke(_staged.TaskId, "starting Wi-Fi hotspot…");
-        // The OShare app parses every WebSocket frame strictly and dies on the raw
-        // 'files' trigger — only stock peers may receive it.
-        Server.PeerLooksStock = !endpoint.IsOShare;
-        if (hotspotPrewarmTask != null)
+        if (resolvedFlow != SendFlow.OConnectLan)
         {
-            await hotspotPrewarmTask;
-        }
-        else
-        {
-            await Hotspot.EnsureStartedAsync();
-        }
-        TransferStateChanged?.Invoke(_staged.TaskId,
-            $"hotspot '{Hotspot.Ssid}' up — the phone will switch Wi-Fi to it");
+            var endpoint = link.Endpoints.FirstOrDefault(e => e.IsOShare) ?? link.Endpoints.FirstOrDefault();
+            if (endpoint is null)
+                throw new InvalidOperationException("Phone exposed no compatible GATT endpoint (neither OShare nor Alliance).");
 
-        Server.ArmTransfer(_staged, string.IsNullOrWhiteSpace(Hotspot.GatewayIp) ? null : Hotspot.GatewayIp);
-        var credentialMode = endpoint.IsOShare
-            ? CredentialMode.OShareLan
-            : CredentialMode.StockAlliance;
-        Log.Info($"BLE: using {(endpoint.IsOShare ? "OShare" : "stock alliance")} 9955 credentials");
-        await link.SendCredentialsAsync(
-            endpoint, credentialMode, endpoint.Status, Lan, Port, _crypto, SenderId,
-            freq: 0,
-            ssidOverride: Hotspot.Ssid,
-            pskOverride: Hotspot.Psk,
-            macOverride: Hotspot.Bssid,
-            ct: ct);
+            TransferStateChanged?.Invoke(_staged.TaskId, "starting Wi-Fi hotspot…");
+            // The OShare app parses every WebSocket frame strictly and dies on the raw
+            // 'files' trigger — only stock peers may receive it.
+            Server.PeerLooksStock = !endpoint.IsOShare;
+            if (hotspotPrewarmTask != null)
+            {
+                await hotspotPrewarmTask;
+            }
+            else
+            {
+                await Hotspot.EnsureStartedAsync();
+            }
+            TransferStateChanged?.Invoke(_staged.TaskId,
+                $"hotspot '{Hotspot.Ssid}' up — the phone will switch Wi-Fi to it");
+
+            Server.ArmTransfer(_staged, string.IsNullOrWhiteSpace(Hotspot.GatewayIp) ? null : Hotspot.GatewayIp);
+            var credentialMode = endpoint.IsOShare
+                ? CredentialMode.OShareLan
+                : CredentialMode.StockAlliance;
+            Log.Info($"BLE: using {(endpoint.IsOShare ? "OShare" : "stock alliance")} 9955 credentials");
+            await link.SendCredentialsAsync(
+                endpoint, credentialMode, endpoint.Status, Lan, Port, _crypto, SenderId,
+                freq: 0,
+                ssidOverride: Hotspot.Ssid,
+                pskOverride: Hotspot.Psk,
+                macOverride: Hotspot.Bssid,
+                ct: ct);
+            TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} — waiting for the phone to connect");
+        }
+
+        // BLE credentials only authorize the phone. Keep the single-flight gate
+        // held until the HTTP/WebSocket session reaches a terminal phone status.
+        await Server.WaitForTransferCompletionAsync(_staged.TaskId, ct);
         }
         finally
         {
             _sendCts = null;
             _sendGate.Release();
         }
-        TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} — waiting for the phone to connect");
     }
 
     public async ValueTask DisposeAsync()

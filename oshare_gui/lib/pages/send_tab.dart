@@ -6,6 +6,7 @@ import '../config/language.dart';
 import '../models/models.dart';
 import '../services/bridge_client.dart';
 import '../services/outgoing_staging_controller.dart';
+import '../services/transfer_presentation.dart';
 import '../widgets/native_drop_zone.dart';
 
 class SendTab extends StatefulWidget {
@@ -53,10 +54,7 @@ class _SendTabState extends State<SendTab> {
   Future<void> _pickFiles() async {
     final files = await FilePicker.pickFiles();
     if (files.isNotEmpty) {
-      final paths = files
-          .map((file) => file.path)
-          .whereType<String>()
-          .toList();
+      final paths = files.map((file) => file.path).whereType<String>().toList();
       await widget.stagingController.addPaths(paths, language: widget.language);
       _checkStagingError();
     }
@@ -74,10 +72,7 @@ class _SendTabState extends State<SendTab> {
     final error = widget.stagingController.stagingError;
     if (error != null && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error),
-          behavior: SnackBarBehavior.floating,
-        ),
+        SnackBar(content: Text(error), behavior: SnackBarBehavior.floating),
       );
     }
   }
@@ -131,7 +126,10 @@ class _SendTabState extends State<SendTab> {
           child: Stack(
             children: [
               ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 28,
+                  vertical: 24,
+                ),
                 children: [
                   // Section 1: Selection Header
                   Text(
@@ -159,7 +157,9 @@ class _SendTabState extends State<SendTab> {
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w700,
-                          color: isDark ? AppColors.darkText : AppColors.lightText,
+                          color: isDark
+                              ? AppColors.darkText
+                              : AppColors.lightText,
                         ),
                       ),
                       const Spacer(),
@@ -212,7 +212,11 @@ class _SendTabState extends State<SendTab> {
               ),
 
               // Section 3: Active Transfer Modal
-              if (transfer.active) _buildTransferModal(context, transfer, isDark),
+              if (shouldShowSendTransferModal(
+                isActive: transfer.active,
+                isBackground: transfer.isBackground,
+              ))
+                _buildTransferModal(context, transfer, isDark),
             ],
           ),
         );
@@ -239,10 +243,7 @@ class _SendTabState extends State<SendTab> {
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: borderColor,
-            width: _isDragging ? 2 : 1,
-          ),
+          border: Border.all(color: borderColor, width: _isDragging ? 2 : 1),
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -337,10 +338,7 @@ class _SendTabState extends State<SendTab> {
       decoration: BoxDecoration(
         color: bgColor,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: borderColor,
-          width: _isDragging ? 2 : 1,
-        ),
+        border: Border.all(color: borderColor, width: _isDragging ? 2 : 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -413,9 +411,7 @@ class _SendTabState extends State<SendTab> {
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: isDark
-                      ? AppColors.darkAccent
-                      : AppColors.lightAccent,
+                  color: isDark ? AppColors.darkAccent : AppColors.lightAccent,
                 ),
               ),
             ),
@@ -474,9 +470,9 @@ class _SendTabState extends State<SendTab> {
                         onPressed: _isTransferActive
                             ? null
                             : () => widget.stagingController.removePath(
-                                  filePath,
-                                  language: widget.language,
-                                ),
+                                filePath,
+                                language: widget.language,
+                              ),
                       ),
                     ],
                   ),

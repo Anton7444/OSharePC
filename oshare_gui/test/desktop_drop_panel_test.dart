@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:oshare_gui/models/models.dart';
 import 'package:oshare_gui/pages/desktop_drop_panel.dart';
 import 'package:oshare_gui/config/language.dart';
@@ -20,7 +21,7 @@ void main() {
           client: client,
           language: AppLanguage.english,
           stagingController: staging,
-          manageNativeWindowGeometry: false,
+          manageNativeDropPanel: false,
           sendToDeviceOverride: (_) async {
             staging.sendCalls++;
             return true;
@@ -87,6 +88,68 @@ void main() {
       ),
       DesktopDropPanelStage.idle,
     );
+  });
+
+  test(
+    'desktop panel native lifecycle activates and restores the hot zone',
+    () async {
+      const channel = MethodChannel('oshare/drag_drop');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+      await DragDropService.instance.activateDesktopDropPanel();
+      await DragDropService.instance.restoreDesktopDropPanel();
+
+      expect(calls.map((call) => call.method), <String>[
+        'activateDesktopDropPanel',
+        'restoreDesktopDropPanel',
+      ]);
+    },
+  );
+
+  test('corner anchor touches the visible work area edge', () async {
+    const channel = MethodChannel('dev.leanflutter.plugins/screen_retriever');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'getPrimaryDisplay');
+      return <String, Object?>{
+        'id': '0',
+        'name': 'primary',
+        'size': <String, double>{'width': 1920, 'height': 1080},
+        'visiblePosition': <String, double>{'dx': 0, 'dy': 0},
+        'visibleSize': <String, double>{'width': 1920, 'height': 1040},
+        'scaleFactor': 1.0,
+      };
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    expect(await resolveCornerAnchor(), const Offset(1920, 1040));
+  });
+
+  test('corner anchor requires work area bounds', () async {
+    const channel = MethodChannel('dev.leanflutter.plugins/screen_retriever');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      return <String, Object?>{
+        'id': '0',
+        'name': 'primary',
+        'size': <String, double>{'width': 1920, 'height': 1080},
+        'visiblePosition': <String, double>{'dx': 0, 'dy': 0},
+        'visibleSize': null,
+        'scaleFactor': 1.0,
+      };
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    await expectLater(resolveCornerAnchor(), throwsA(isA<StateError>()));
   });
 
   test('panel width grows with phones but stays within bounds', () {

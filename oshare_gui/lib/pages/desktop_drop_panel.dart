@@ -13,12 +13,9 @@ import '../services/outgoing_staging_controller.dart';
 import '../services/transfer_presentation.dart';
 import '../widgets/native_drop_zone.dart';
 
-// The panel is a real, always-present native window pinned at the bottom-right
-// corner — that's what lets Windows deliver OLE DragEnter to it the instant a
-// file drag reaches that corner, even before anything is visible. It starts
-// at [panelIdleSize], fully transparent (see [panelInvisibleOpacity]),
-// grows to [panelPreviewSize] while a file is hovering, and only grows to the
-// device picker after a file has actually been dropped.
+// The native OLE hot-zone owns desktop hit-testing. The fixed Flutter window
+// stays hidden at idle, appears for a file drag, and displays the picker after
+// a successful drop.
 const panelDropTargetSize = Size(360, 150);
 const panelExpandedMinWidth = 400.0;
 const panelExpandedHeight = 280.0;
@@ -28,7 +25,7 @@ const desktopDropInstructionMaxLines = 3;
 // Kept as aliases while the state-transition animation is migrated.
 const panelIdleSize = panelDropTargetSize;
 const panelPreviewSize = panelDropTargetSize;
-const _cornerMargin = 16.0;
+const _cornerMargin = 0.0;
 
 enum DesktopDropPanelStage { idle, dragging, staged }
 
@@ -87,13 +84,6 @@ DesktopDropPanelStage panelStageForState({
   return DesktopDropPanelStage.dragging;
 }
 
-// Windows' WindowFromPoint (and therefore OLE drag-and-drop hit-testing)
-// silently skips a layered window at *exactly* opacity 0 — verified
-// empirically: SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA) makes the
-// window untestable, while alpha=1/255 hit-tests correctly and is still
-// visually imperceptible. So "invisible" here means this, not literal 0.
-const panelInvisibleOpacity = 0.01;
-
 double panelWidthForDeviceCount(int count) {
   final safeCount = count.clamp(0, 20);
   return (400 + safeCount * 120).clamp(400, 720).toDouble();
@@ -116,15 +106,18 @@ DeviceModel? resolveSelectedDevice(
 Future<Offset> resolveCornerAnchor({double margin = _cornerMargin}) async {
   try {
     final display = await screenRetriever.getPrimaryDisplay();
-    final position = display.visiblePosition ?? Offset.zero;
-    final size = display.visibleSize ?? display.size;
+    final position = display.visiblePosition;
+    final size = display.visibleSize;
+    if (position == null || size == null) {
+      throw StateError('Primary display work area is unavailable.');
+    }
     return Offset(
       position.dx + size.width - margin,
       position.dy + size.height - margin,
     );
   } catch (error) {
     debugPrint('[DesktopDropPanel] Failed to resolve corner anchor: $error');
-    return const Offset(1904, 1064);
+    rethrow;
   }
 }
 
@@ -244,7 +237,7 @@ class DesktopDropPanelPage extends StatefulWidget {
   final AppLanguage language;
   final OutgoingStagingController? stagingController;
   final Future<bool> Function(DeviceModel)? sendToDeviceOverride;
-  final bool manageNativeWindowGeometry;
+  final bool manageNativeDropPanel;
 
   const DesktopDropPanelPage({
     super.key,
@@ -252,7 +245,7 @@ class DesktopDropPanelPage extends StatefulWidget {
     required this.language,
     this.stagingController,
     this.sendToDeviceOverride,
-    this.manageNativeWindowGeometry = true,
+    this.manageNativeDropPanel = true,
   });
 
   @override
@@ -263,12 +256,15 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     with TickerProviderStateMixin {
   late final OutgoingStagingController _stagingController;
 
-  // The native window changes size only at stage transitions. This controller
-  // is purely Flutter-side: 0 is the idle square target, 0.5 is the compact drag panel,
-  // and 1 is the expanded device picker.
+  // The native window keeps a stable 720x360 surface. This controller animates
+  // only the Flutter visuals: 0 is idle, 0.5 is the compact drag panel, and 1
+  // is the expanded device picker.
   late final AnimationController _visual;
 
-  int _geometryGeneration = 0;
+  // Fades and slides the whole panel out before its window hides, matching
+  // the receive popup. 1 is fully shown.
+  late final AnimationController _exit;
+
   int _collapseGeneration = 0;
   Timer? _collapseTimer;
   Timer? _autoCollapseTimer;
@@ -282,7 +278,6 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   bool _terminalStatusShown = false;
   bool _terminalCleanupAttempted = false;
   bool _selectionSyncPending = false;
-  int _stagedDeviceCount = -1;
 
   @override
   void initState() {
@@ -294,29 +289,11 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       vsync: this,
       duration: const Duration(milliseconds: 220),
     );
-    _initWindow();
-  }
-
-  Future<void> _initWindow() async {
-    await windowManager.setAlwaysOnTop(true);
-  }
-
-  Future<void> _setNativePanelStage(
-    DesktopDropPanelStage stage, {
-    int? deviceCount,
-  }) async {
-    final generation = ++_geometryGeneration;
-    // A newer transition may have superseded this request while the caller
-    // was yielding (for example, a new drop arriving during collapse).
-    await Future<void>.value();
-    if (generation != _geometryGeneration) return;
-    // Keep the HWND and Flutter surface at one stable size. Resizing a
-    // Flutter Windows surface between stages causes the compositor to scale
-    // the old surface, producing the distorted text seen in packaged builds.
-    // Stage-specific sizing is handled inside the fixed surface instead.
-    if (generation == _geometryGeneration) {
-      await windowManager.setAlwaysOnTop(true);
-    }
+    _exit = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+      value: 1,
+    );
   }
 
   bool get _isTransferActive {
@@ -360,13 +337,54 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
     _collapseGeneration++;
-    unawaited(windowManager.setOpacity(1.0));
-    unawaited(_setNativePanelStage(DesktopDropPanelStage.dragging));
+    // A new drag can arrive while the exit animation is still running.
+    _exit.forward();
+    if (widget.manageNativeDropPanel) {
+      unawaited(_showDesktopPanelForDragPreview());
+    }
     _visual.animateTo(0.5, curve: Curves.easeOutCubic);
   }
 
+  Future<void> _showDesktopPanelForDragPreview() async {
+    try {
+      // Never activate/focus the Flutter window while Explorer is inside an
+      // OLE DoDragDrop loop. The native hot-zone remains the real drop target;
+      // this window is only the visual preview until Drop/DragLeave.
+      debugPrint(
+        '[DesktopDropPanel] windowManager.show(inactive: true) for drag preview',
+      );
+      await windowManager.show(inactive: true);
+    } catch (error) {
+      debugPrint('[DesktopDropPanel] Failed to show drag preview: $error');
+    }
+  }
+
+  Future<void> _hideDesktopPanelForIdle() async {
+    try {
+      debugPrint('[DesktopDropPanel] windowManager.hide() for idle');
+      await windowManager.hide();
+      await DragDropService.instance.setDesktopDropPanelHitTestTransparent(
+        false,
+      );
+      await DragDropService.instance.restoreDesktopDropPanel();
+      debugPrint(
+        '[DesktopDropPanel] Flutter panel hidden; idle hot-zone restored',
+      );
+    } catch (error) {
+      debugPrint('[DesktopDropPanel] Failed to hide panel for idle: $error');
+      rethrow;
+    }
+  }
+
   void _onDragExited() {
-    if (_hasStagedDrop) return;
+    if (_hasStagedDrop) {
+      if (widget.manageNativeDropPanel) {
+        unawaited(
+          DragDropService.instance.setDesktopDropPanelHitTestTransparent(false),
+        );
+      }
+      return;
+    }
     _collapseTimer?.cancel();
     _collapseTimer = Timer(const Duration(milliseconds: 200), () {
       if (!mounted || _isDragging) return;
@@ -378,16 +396,37 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     final collapseGeneration = ++_collapseGeneration;
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
-    await _visual.animateTo(0, curve: Curves.easeOutCubic);
     if (!mounted || collapseGeneration != _collapseGeneration || _isDragging) {
       return;
     }
     _hasStagedDrop = false;
-    _stagedDeviceCount = -1;
-    if (collapseGeneration != _collapseGeneration) return;
-    await _setNativePanelStage(DesktopDropPanelStage.idle);
+    if (widget.manageNativeDropPanel) {
+      await _exit.reverse();
+      if (!mounted ||
+          collapseGeneration != _collapseGeneration ||
+          _isDragging) {
+        _exit.forward();
+        return;
+      }
+      try {
+        // Dart owns Flutter visibility; native only restores its hot-zone.
+        await _hideDesktopPanelForIdle();
+      } catch (error) {
+        // Leave the picker visible if native visibility could not be restored.
+        debugPrint(
+          '[DesktopDropPanel] Failed to restore the idle hot zone: $error',
+        );
+        _exit.forward();
+        return;
+      }
+    }
+    if (!mounted || collapseGeneration != _collapseGeneration || _isDragging) {
+      return;
+    }
+    await _visual.animateTo(0, curve: Curves.easeOutCubic);
     if (!mounted || collapseGeneration != _collapseGeneration) return;
-    await windowManager.setOpacity(panelInvisibleOpacity);
+    // The window is hidden now; reset so the next drag appears fully.
+    _exit.value = 1;
   }
 
   void _scheduleAutoCollapse(Duration delay) {
@@ -424,23 +463,6 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     if (!mounted) return;
     _collapseGeneration++;
     setState(() => _hasStagedDrop = true);
-    // Resize the native hit-test window before revealing the expanded picker.
-    // Otherwise Flutter paints the expanded layout into the old compact
-    // window for a few frames, which produces the transient wrong aspect ratio.
-    try {
-      if (widget.manageNativeWindowGeometry) {
-        await _setNativePanelStage(
-          DesktopDropPanelStage.staged,
-          deviceCount: widget.client.devices.length,
-        );
-      }
-    } catch (error) {
-      // The Flutter test host has no native window plugin. The desktop build
-      // still gets the ordered resize above; keep the logical UI usable if a
-      // platform resize is unavailable.
-      debugPrint('[DesktopDropPanel] Failed to resize staged panel: $error');
-    }
-    if (!mounted) return;
     _visual.animateTo(1, curve: Curves.easeOutCubic);
 
     // Dropping only stages the files. Sending is intentionally started by the
@@ -457,7 +479,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     setState(() => _selectedAddress = device.address);
     final sent =
         await (widget.sendToDeviceOverride?.call(device) ??
-            widget.client.sendToDevice(device));
+            widget.client.sendToDevice(device, isBackground: true));
     if (!mounted) return;
 
     setState(() => _clearAfterTransfer = true);
@@ -576,6 +598,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     _collapseTimer?.cancel();
     _autoCollapseTimer?.cancel();
     _visual.dispose();
+    _exit.dispose();
     _stagingController.dispose();
     super.dispose();
   }
@@ -593,67 +616,72 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
         final transfer = widget.client.transferState;
         _maybeClearAfterTransfer(transfer);
 
-        if (_hasStagedDrop && devices.length != _stagedDeviceCount) {
-          _stagedDeviceCount = devices.length;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && _hasStagedDrop) {
-              unawaited(
-                _setNativePanelStage(
-                  DesktopDropPanelStage.staged,
-                  deviceCount: devices.length,
-                ),
-              );
-            }
-          });
-        }
-
         return Scaffold(
           backgroundColor: Colors.transparent,
           body: NativeDropZone(
             enabled: !_isTransferActive,
             onDragStateChanged: _handleDragStateChanged,
             onDropped: _handleDroppedPaths,
-            child: AnimatedBuilder(
-              animation: _visual,
-              builder: (context, _) {
-                final previewT = (_visual.value * 2).clamp(0.0, 1.0);
-                final expansionT = ((_visual.value - 0.5) * 2).clamp(0.0, 1.0);
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    _fadeLayer(
-                      visible: previewT < 0.86 && expansionT < 0.01,
-                      opacity: (1 - previewT * 1.3).clamp(0.0, 1.0),
-                      interactive: false,
-                      child: _buildSquareTarget(isDark, previewT),
-                    ),
-                    _fadeLayer(
-                      visible:
-                          _isDragging && previewT > 0.04 && expansionT < 0.99,
-                      opacity:
-                          ((previewT - 0.04) / 0.7).clamp(0.0, 1.0) *
-                          (1 - expansionT),
-                      interactive: false,
-                      child: _buildCompactPanel(isDark, transfer),
-                    ),
-                    _fadeLayer(
-                      visible: expansionT > 0.001,
-                      opacity: ((expansionT - 0.05) / 0.7).clamp(0.0, 1.0),
-                      interactive: expansionT > 0.9,
-                      child: _buildExpandedPanel(
-                        selected,
-                        devices,
-                        isDark,
-                        transfer,
+            child: _buildExitTransition(
+              AnimatedBuilder(
+                animation: _visual,
+                builder: (context, _) {
+                  final previewT = (_visual.value * 2).clamp(0.0, 1.0);
+                  final expansionT = ((_visual.value - 0.5) * 2).clamp(
+                    0.0,
+                    1.0,
+                  );
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _fadeLayer(
+                        visible: previewT < 0.86 && expansionT < 0.01,
+                        opacity: (1 - previewT * 1.3).clamp(0.0, 1.0),
+                        interactive: false,
+                        child: _buildSquareTarget(isDark, previewT),
                       ),
-                    ),
-                  ],
-                );
-              },
+                      _fadeLayer(
+                        visible:
+                            _isDragging && previewT > 0.04 && expansionT < 0.99,
+                        opacity:
+                            ((previewT - 0.04) / 0.7).clamp(0.0, 1.0) *
+                            (1 - expansionT),
+                        interactive: false,
+                        child: _buildCompactPanel(isDark, transfer),
+                      ),
+                      _fadeLayer(
+                        visible: expansionT > 0.001,
+                        opacity: ((expansionT - 0.05) / 0.7).clamp(0.0, 1.0),
+                        interactive: expansionT > 0.9,
+                        child: _buildExpandedPanel(
+                          selected,
+                          devices,
+                          isDark,
+                          transfer,
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _buildExitTransition(Widget child) {
+    final curve = CurvedAnimation(parent: _exit, curve: Curves.easeOutCubic);
+    return FadeTransition(
+      opacity: curve,
+      child: SlideTransition(
+        position: Tween(
+          begin: const Offset(0, 0.04),
+          end: Offset.zero,
+        ).animate(curve),
+        child: child,
+      ),
     );
   }
 

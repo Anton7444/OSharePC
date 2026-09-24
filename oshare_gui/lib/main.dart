@@ -6,11 +6,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 import 'config/theme.dart';
 import 'config/language.dart';
+import 'models/models.dart';
 import 'pages/desktop_drop_panel.dart';
 import 'pages/home_page.dart';
+import 'pages/receive_popup.dart';
 import 'services/bridge_client.dart';
 import 'services/desktop_drop_panel_service.dart';
+import 'services/receive_popup_service.dart';
 import 'services/tray_service.dart';
+import 'widgets/native_drop_zone.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,20 +27,36 @@ void main() async {
     return;
   }
 
-  final bridgeClient = BridgeClient();
-  final desktopDropPanelService = DesktopDropPanelService(
-    bridgeClient: bridgeClient,
-  );
-  final trayService = TrayService(
-    bridgeClient: bridgeClient,
-    onExitCleanup: desktopDropPanelService.disable,
-  );
-  bridgeClient.onNotification = trayService.showNotification;
-  await trayService.init();
+  if (isReceivePopupProcess(
+    arguments: Platform.executableArguments,
+    environmentValue: Platform.environment[receivePopupEnvironment],
+  )) {
+    await runReceivePopup();
+    return;
+  }
 
   final startup = Platform.executableArguments.contains('--startup');
   final prefs = await SharedPreferences.getInstance();
   final startMinimized = prefs.getBool('start_minimized') ?? false;
+  final quickSaveIndex = prefs.getInt('quick_save_mode') ?? 1;
+  final initiallyVisible = !(startup || startMinimized);
+  final bridgeClient = BridgeClient(
+    initialQuickSaveMode: QuickSaveMode.values[quickSaveIndex.clamp(0, 2)],
+    initialWindowVisible: initiallyVisible,
+  );
+  final desktopDropPanelService = DesktopDropPanelService(
+    bridgeClient: bridgeClient,
+  );
+  final receivePopupService = ReceivePopupService(bridgeClient: bridgeClient);
+  final trayService = TrayService(
+    bridgeClient: bridgeClient,
+    onExitCleanup: () async {
+      await receivePopupService.dispose();
+      await desktopDropPanelService.disable();
+    },
+  );
+  bridgeClient.onNotification = trayService.showNotification;
+  await trayService.init();
 
   AppLanguage initialLanguage = AppLanguage.english;
   final hasSavedLanguage = prefs.containsKey('language');
@@ -93,6 +113,8 @@ Future<void> _runDesktopDropPanel() async {
   final bridgeClient = BridgeClient(
     bridgeToken: Platform.environment['OSHAREPC_BRIDGE_TOKEN'],
     manageBackend: false,
+    manageIncomingTransfers: false,
+    initialWindowVisible: false,
   );
   bridgeClient.setLanguage(initialLanguage);
 
@@ -123,16 +145,14 @@ Future<void> _runDesktopDropPanel() async {
       // after every later setBounds too (see _DesktopDropPanelPageState).
       await windowManager.setBounds(idleRect);
       await windowManager.setAlwaysOnTop(true);
-      // Shown (mapped) but essentially transparent: Windows silently skips
-      // hit-testing a layered window at *exactly* opacity 0 (verified
-      // empirically — WindowFromPoint falls through to whatever is behind
-      // it), so this uses a hair above zero instead, which stays fully
-      // hit-testable and still reads as invisible to the eye. It must
-      // never take focus — that would steal keyboard focus from whatever
-      // app the user is dragging out of.
-      await windowManager.show();
-      await windowManager.setOpacity(panelInvisibleOpacity);
-      await windowManager.setAlwaysOnTop(true);
+      // The native hot-zone remains hidden until this position is established.
+      try {
+        await DragDropService.instance.activateDesktopDropPanel();
+      } catch (error) {
+        debugPrint(
+          '[DesktopDropPanel] Failed to activate native hot zone: $error',
+        );
+      }
     },
   );
 
@@ -167,6 +187,7 @@ class OShareApp extends StatefulWidget {
 }
 
 class _OShareAppState extends State<OShareApp> {
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   ThemeMode _themeMode = ThemeMode.dark;
   AccentPreset _accent = AppColors.accentPresets.first;
   late AppLanguage _language;
@@ -176,6 +197,7 @@ class _OShareAppState extends State<OShareApp> {
   void initState() {
     super.initState();
     _language = widget.initialLanguage;
+    widget.bridgeClient.onSendResult = _showSendResult;
     _loadThemeMode();
     _loadAccent();
     _loadDesktopDropTarget();
@@ -184,6 +206,39 @@ class _OShareAppState extends State<OShareApp> {
         widget.trayService.setStartHidden(true);
       });
     }
+  }
+
+  void _showSendResult(bool success, String message) {
+    _showResultDialog(
+      appText(
+        _language,
+        success ? 'desktopDropTransferCompleted' : 'transferFailed',
+      ),
+      message: success ? null : message,
+    );
+  }
+
+  void _showResultDialog(String title, {String? message}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !widget.bridgeClient.mainWindowVisible) return;
+      final context = _navigatorKey.currentContext;
+      if (context == null) return;
+      showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(title),
+          content: message == null || message.isEmpty ? null : Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(
+                MaterialLocalizations.of(dialogContext).okButtonLabel,
+              ),
+            ),
+          ],
+        ),
+      );
+    });
   }
 
   Future<void> _onLanguageChanged(AppLanguage language) async {
@@ -265,6 +320,7 @@ class _OShareAppState extends State<OShareApp> {
 
   @override
   void dispose() {
+    widget.bridgeClient.onSendResult = null;
     widget.trayService.dispose();
     unawaited(widget.desktopDropPanelService.dispose());
     widget.bridgeClient.dispose();
@@ -277,6 +333,7 @@ class _OShareAppState extends State<OShareApp> {
       listenable: widget.bridgeClient,
       builder: (context, _) {
         return MaterialApp(
+          navigatorKey: _navigatorKey,
           title: 'OsharePC',
           debugShowCheckedModeBanner: false,
           theme: AppTheme.lightTheme,

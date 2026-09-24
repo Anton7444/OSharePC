@@ -9,6 +9,7 @@ namespace OShareSender;
 internal static class WifiJoiner
 {
     private static string? _staticAdapter;
+    private static IPAddress? _staticAddress;
     /// <summary>Deterministic temp-profile name: at most ONE can ever leak (a killed
     /// process skips the finally-delete), and CleanupStaleProfiles removes it on startup.
     /// The previous random per-transfer name left a new dead "OShare-<guid>" network
@@ -87,11 +88,11 @@ internal static class WifiJoiner
                         state($"Wi-Fi associated; DHCP address acquired ({ip.Address})");
                         if (ip.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal))
                         {
-                            SetTemporaryStaticAddress(current.Name, state);
+                            SetTemporaryStaticAddress(current.Name, phoneIp, state);
                             current = NetworkInterface.GetAllNetworkInterfaces().First(n => n.Id == current!.Id);
                         }
-                        // The on-link 10.102.161.0/24 route from DHCP (or the
-                        // static fallback) already beats the Ethernet default
+                        // The on-link phone-hotspot /24 route from DHCP (or the
+                        // phone-derived static fallback) already beats the Ethernet default
                         // route, so the host route is belt-and-braces only and
                         // needs admin rights — never fail the join over it.
                         try { AddHostRoute(hostIp, current); state($"Host route installed via {current.Name}"); }
@@ -111,24 +112,66 @@ internal static class WifiJoiner
 
     public static void RestoreAdapter(Action<string> state)
     {
-        if (_staticAdapter is null) return;
+        if (_staticAdapter is null || _staticAddress is null) return;
+        var adapter = _staticAdapter;
+        var address = _staticAddress;
         try
         {
-            var result = Process.Start(new ProcessStartInfo("netsh", $"interface ipv4 delete address name=\"{_staticAdapter}\" address=10.102.161.1") { CreateNoWindow = true, UseShellExecute = false });
-            result?.WaitForExit(5000);
-            state($"Temporary hotspot address removed from '{_staticAdapter}'");
+            var exitCode = RunElevatedNetsh($"interface ipv4 delete address name=\"{adapter}\" address={address}");
+            if (exitCode == 0)
+                state($"Temporary hotspot address {address} removed from '{adapter}'");
+            else
+                state($"Wi-Fi DHCP restore failed: netsh exited {exitCode}");
         }
         catch (Exception ex) { state($"Wi-Fi DHCP restore failed: {ex.Message}"); }
-        finally { _staticAdapter = null; }
+        finally { _staticAdapter = null; _staticAddress = null; }
     }
 
-    private static void SetTemporaryStaticAddress(string adapter, Action<string> state)
+    internal static IPAddress TemporaryAddressFor(IPAddress phoneIp)
     {
-        using var p = Process.Start(new ProcessStartInfo("netsh", $"interface ipv4 add address name=\"{adapter}\" address=10.102.161.1 mask=255.255.255.0 store=active") { CreateNoWindow = true, UseShellExecute = false });
-        p?.WaitForExit(5000);
-        if (p is null || p.ExitCode != 0) throw new IOException("Could not assign temporary hotspot address 10.102.161.1");
+        if (phoneIp.AddressFamily != AddressFamily.InterNetwork)
+            throw new ArgumentException("The phone hotspot address must be IPv4.", nameof(phoneIp));
+        var bytes = phoneIp.GetAddressBytes();
+        if (bytes[3] is 0 or 255)
+            throw new ArgumentException($"The phone hotspot address {phoneIp} cannot be used as a /24 host.", nameof(phoneIp));
+        bytes[3] = bytes[3] == 254 ? (byte)253 : (byte)(bytes[3] + 1);
+        return new IPAddress(bytes);
+    }
+
+    private static void SetTemporaryStaticAddress(string adapter, IPAddress phoneIp, Action<string> state)
+    {
+        var address = TemporaryAddressFor(phoneIp);
+        var exitCode = RunElevatedNetsh(
+            $"interface ipv4 add address name=\"{adapter}\" address={address} mask=255.255.255.0 store=active");
+        if (exitCode != 0)
+            throw new IOException($"Could not assign temporary hotspot address {address}; netsh exited {exitCode}.");
         _staticAdapter = adapter;
-        state("DHCP unavailable; temporary hotspot address acquired (10.102.161.1/24)");
+        _staticAddress = address;
+        state($"DHCP unavailable; temporary hotspot address acquired ({address}/24)");
+    }
+
+    private static int RunElevatedNetsh(string args)
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("netsh.exe", args)
+            {
+                CreateNoWindow = true,
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+            }) ?? throw new IOException("Could not start elevated netsh.");
+            if (!process.WaitForExit(5000))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                throw new TimeoutException("netsh did not finish within 5 seconds.");
+            }
+            return process.ExitCode;
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            throw new UnauthorizedAccessException("Administrator approval was cancelled.", ex);
+        }
     }
 
     private static async Task<bool> Reachable(IPAddress ip, int port, Action<string> state)

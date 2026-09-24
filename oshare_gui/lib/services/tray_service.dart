@@ -13,7 +13,9 @@ class TrayService with TrayListener, WindowListener {
   TrayService({required this.bridgeClient, this.onExitCleanup});
 
   Future<void> setStartHidden(bool hidden) async {
-    if (hidden) await windowManager.hide();
+    if (!hidden) return;
+    bridgeClient.setMainWindowVisible(false);
+    await windowManager.hide();
   }
 
   Future<void> showNotification(String title, String message) async {
@@ -64,6 +66,7 @@ class TrayService with TrayListener, WindowListener {
   void onTrayIconMouseDown() {
     windowManager.show();
     windowManager.focus();
+    bridgeClient.setMainWindowVisible(true);
   }
 
   @override
@@ -77,6 +80,7 @@ class TrayService with TrayListener, WindowListener {
     if (menuItem.key == 'show') {
       windowManager.show();
       windowManager.focus();
+      bridgeClient.setMainWindowVisible(true);
     } else if (menuItem.key == 'toggle_receive') {
       final current = bridgeClient.status.receiveEnabled;
       bridgeClient.setReceiveEnabled(!current);
@@ -102,6 +106,7 @@ class TrayService with TrayListener, WindowListener {
     final closeToTray = prefs.getBool('close_to_tray') ?? true;
     if (closeToTray) {
       await windowManager.hide();
+      bridgeClient.setMainWindowVisible(false);
     } else {
       await _exitApplication();
     }
@@ -109,11 +114,17 @@ class TrayService with TrayListener, WindowListener {
 
   @override
   void onWindowMinimize() async {
+    bridgeClient.setMainWindowVisible(false);
     final prefs = await SharedPreferences.getInstance();
     final minimizeToTray = prefs.getBool('minimize_to_tray') ?? true;
     if (minimizeToTray) {
       await windowManager.hide();
     }
+  }
+
+  @override
+  void onWindowRestore() {
+    bridgeClient.setMainWindowVisible(true);
   }
 
   void dispose() {

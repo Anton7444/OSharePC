@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 
@@ -16,6 +16,21 @@ class DragDropService {
 
   bool get isDragging => _isDragging;
 
+  Future<void> activateDesktopDropPanel() async {
+    await _channel.invokeMethod<void>('activateDesktopDropPanel');
+  }
+
+  Future<void> restoreDesktopDropPanel() async {
+    await _channel.invokeMethod<void>('restoreDesktopDropPanel');
+  }
+
+  Future<void> setDesktopDropPanelHitTestTransparent(bool transparent) async {
+    await _channel.invokeMethod<void>(
+      'setDesktopDropPanelHitTestTransparent',
+      transparent,
+    );
+  }
+
   void init() {
     if (_initialized) return;
     _initialized = true;
@@ -23,18 +38,21 @@ class DragDropService {
       switch (call.method) {
         case 'entered':
         case 'updated':
+          debugPrint('[DragDropService] Native drag event: ${call.method}');
           _isDragging = true;
           for (final l in List.of(_dragStateListeners)) {
             l(true);
           }
           break;
         case 'exited':
+          debugPrint('[DragDropService] Native drag event: exited');
           _isDragging = false;
           for (final l in List.of(_dragStateListeners)) {
             l(false);
           }
           break;
         case 'dropped':
+          debugPrint('[DragDropService] Native drag event: dropped');
           _isDragging = false;
           for (final l in List.of(_dragStateListeners)) {
             l(false);

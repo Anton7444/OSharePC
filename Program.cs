@@ -529,8 +529,16 @@ internal static class Program
         }
 
         // 4. phone sends final status
+        var completion = server.WaitForTransferCompletionAsync(task.TaskId, cts.Token);
+        await Task.Delay(100, cts.Token);
+        if (completion.IsCompleted)
+        {
+            Log.Error("MOCKPHONE FAIL: transfer completion was signaled before phone status");
+            failures++;
+        }
         await Send(new Envelope { Type = "action", Seq = 99, Method = "status",
             Payload = System.Text.Json.JsonSerializer.SerializeToElement(new { taskId = task.TaskId, type = 1, reason = "ok" }), HasPayload = true });
+        await completion;
 
         File.Delete(tmp1);
         File.Delete(tmp2);
@@ -631,7 +639,38 @@ internal static class Program
         }
         else Log.Info("SELFTEST ok: Path traversal prevention");
 
-        // 9) Stock 互传 Bluetooth discovery name format (length >= 8, flags prefix)
+        var reservedNames = new[] { "NUL", "CON.txt", "COM1.log", "aux." };
+        foreach (var reservedName in reservedNames)
+        {
+            var safeReserved = Path.GetFileName(ReceiveSession.SafePath(safeDir, reservedName));
+            if (string.Equals(safeReserved, reservedName, StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Error($"SELFTEST FAIL: Windows reserved name was not sanitized: {reservedName}");
+                failures++;
+            }
+        }
+        if (reservedNames.All(name => !string.Equals(Path.GetFileName(ReceiveSession.SafePath(safeDir, name)), name, StringComparison.OrdinalIgnoreCase)))
+            Log.Info("SELFTEST ok: Windows reserved device names sanitized");
+
+        // 9) Hotspot fallback address follows the offered phone subnet.
+        var hotspotAddress = WifiJoiner.TemporaryAddressFor(IPAddress.Parse("192.168.43.1"));
+        if (!hotspotAddress.Equals(IPAddress.Parse("192.168.43.2")))
+        {
+            Log.Error($"SELFTEST FAIL: hotspot fallback address was {hotspotAddress}");
+            failures++;
+        }
+        else Log.Info("SELFTEST ok: hotspot fallback address follows phone subnet");
+
+        // 10) Bandwidth probe does not create duplicate listeners for the default port.
+        var defaultProbePorts = ReceiveGattServer.NormalizeBandwidthProbePorts(SenderEngine.DefaultPort);
+        if (!defaultProbePorts.SequenceEqual(new[] { OShareBridgeServer.Port }))
+        {
+            Log.Error($"SELFTEST FAIL: default bandwidth probe ports were [{string.Join(",", defaultProbePorts)}]");
+            failures++;
+        }
+        else Log.Info("SELFTEST ok: default bandwidth probe port is deduplicated");
+
+        // 11) Stock 互传 Bluetooth discovery name format (length >= 8, flags prefix)
         var btName = ReceiveGattServer.BluetoothName();
         if (btName.Length < 8 || !btName.StartsWith("0000001"))
         {

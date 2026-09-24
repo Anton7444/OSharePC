@@ -401,7 +401,7 @@ public sealed class ReceiveGattServer : IDisposable
             // arms a 1 s timer. If the PC connects afterwards the control frame
             // is lost and the phone aborts with check_wlan_band_failed. So:
             // UDP listener first, WebSocket pre-connect second, wlan_accept last.
-            StartBandwidthEcho(portNum);
+            await StartBandwidthEchoAsync(portNum);
 
             ClientWebSocket? preconnected = null;
             if (acceptPayload["wlan_accept"] is true)
@@ -512,49 +512,89 @@ public sealed class ReceiveGattServer : IDisposable
     /// The flood targets the phone's own task port + 1 (the value it stores
     /// per task); 8960 (8959 + 1) is the protocol default and bound as well.
     /// </summary>
-    private void StartBandwidthEcho(int phonePort)
+    private readonly SemaphoreSlim _bandwidthEchoGate = new(1, 1);
+    private CancellationTokenSource? _bandwidthEchoCts;
+    private Task? _bandwidthEchoTask;
+
+    internal static int[] NormalizeBandwidthProbePorts(int phonePort) =>
+        new[] { phonePort < 65535 ? phonePort + 1 : -1, OShareBridgeServer.Port }
+            .Where(port => port is >= 1 and <= 65535)
+            .Distinct()
+            .ToArray();
+
+    private async Task StartBandwidthEchoAsync(int phonePort)
     {
-        _ = Task.Run(async () =>
+        await _bandwidthEchoGate.WaitAsync();
+        try
         {
-            Interlocked.Exchange(ref _bandPackets, 0);
-            Interlocked.Exchange(ref _bandBytes, 0);
-            Interlocked.Exchange(ref _bandStartTicks, DateTime.UtcNow.Ticks);
-            var ports = new[] { phonePort + 1, 8960 };
-            var clients = new List<UdpClient>();
-            using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            try
+            var previousCts = _bandwidthEchoCts;
+            var previousTask = _bandwidthEchoTask;
+            _bandwidthEchoCts = null;
+            _bandwidthEchoTask = null;
+            if (previousCts is not null)
             {
-                foreach (var port in ports.Distinct())
+                previousCts.Cancel();
+                if (previousTask is not null)
                 {
-                    try
-                    {
-                        clients.Add(new UdpClient(port));
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warn($"RX: band echo bind UDP {port} failed: {ex.Message}");
-                    }
+                    try { await previousTask; } catch (Exception ex) { Log.Warn($"RX: previous band echo stopped: {ex.Message}"); }
                 }
-                if (clients.Count == 0) return;
-                State($"Bandwidth probe echo listening on UDP {string.Join("/", clients.Select(c => ((System.Net.IPEndPoint)c.Client.LocalEndPoint!).Port))}");
-                // the phone's check window is ~1 s — if nothing arrives by 3 s the
-                // flood is not reaching us at all (wrong port / firewall / iface)
-                _ = Task.Delay(3000).ContinueWith(_ =>
+                previousCts.Dispose();
+            }
+
+            var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            _bandwidthEchoCts = lifetime;
+            _bandwidthEchoTask = RunBandwidthEchoAsync(NormalizeBandwidthProbePorts(phonePort), lifetime);
+        }
+        finally
+        {
+            _bandwidthEchoGate.Release();
+        }
+    }
+
+    private async Task RunBandwidthEchoAsync(IReadOnlyList<int> ports, CancellationTokenSource lifetime)
+    {
+        Interlocked.Exchange(ref _bandPackets, 0);
+        Interlocked.Exchange(ref _bandBytes, 0);
+        Interlocked.Exchange(ref _bandStartTicks, DateTime.UtcNow.Ticks);
+        var clients = new List<UdpClient>();
+        try
+        {
+            foreach (var port in ports)
+            {
+                try
                 {
-                    if (Interlocked.Read(ref _bandPackets) == 0)
-                        Log.Warn("RX: no band probe packets received within 3 s — the phone's UDP flood is NOT reaching this PC");
-                });
-                await Task.WhenAll(clients.Select(c => EchoLoopAsync(c, lifetime.Token)));
+                    clients.Add(new UdpClient(port));
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"RX: band echo bind UDP {port} failed: {ex.Message}");
+                }
             }
-            catch (Exception ex)
+            if (clients.Count == 0) return;
+            State($"Bandwidth probe echo listening on UDP {string.Join("/", clients.Select(c => ((System.Net.IPEndPoint)c.Client.LocalEndPoint!).Port))}");
+            // the phone's check window is ~1 s — if nothing arrives by 3 s the
+            // flood is not reaching us at all (wrong port / firewall / iface)
+            _ = Task.Delay(3000).ContinueWith(_ =>
             {
+                if (Interlocked.Read(ref _bandPackets) == 0)
+                    Log.Warn("RX: no band probe packets received within 3 s — the phone's UDP flood is NOT reaching this PC");
+            });
+            await Task.WhenAll(clients.Select(c => EchoLoopAsync(c, lifetime.Token)));
+        }
+        catch (Exception ex)
+        {
+            if (!lifetime.IsCancellationRequested)
                 Log.Warn($"RX: band echo failed: {ex.Message}");
-            }
-            finally
+        }
+        finally
+        {
+            foreach (var c in clients) c.Dispose();
+            if (ReferenceEquals(_bandwidthEchoCts, lifetime))
             {
-                foreach (var c in clients) c.Dispose();
+                _bandwidthEchoCts = null;
+                _bandwidthEchoTask = null;
             }
-        });
+        }
     }
 
     private static long _bandPackets;
@@ -646,6 +686,9 @@ public sealed class ReceiveGattServer : IDisposable
 
     public void Stop()
     {
+        _bandwidthEchoCts?.Cancel();
+        _bandwidthEchoCts = null;
+        _bandwidthEchoTask = null;
         try { _beacon?.StopAdvertising(); } catch { }
         try { _service?.StopAdvertising(); } catch { }
         if (_handshake is not null) _handshake.ReadRequested -= OnHandshakeRead;
@@ -662,6 +705,7 @@ public sealed class ReceiveGattServer : IDisposable
     public void Dispose()
     {
         Stop();
+        _bandwidthEchoGate.Dispose();
         _crypto.Dispose();
     }
 }
