@@ -52,7 +52,7 @@ void main() {
 
   test('only staged files expand the panel', () {
     expect(panelDropTargetSize, const Size(360, 150));
-    expect(panelExpandedSize, const Size(400, 280));
+    expect(panelExpandedSize, const Size(364, 280));
     expect(panelSizeForStage(DesktopDropPanelStage.idle), panelDropTargetSize);
     expect(
       panelSizeForStage(DesktopDropPanelStage.dragging),
@@ -61,7 +61,7 @@ void main() {
     expect(panelSizeForStage(DesktopDropPanelStage.staged), panelExpandedSize);
     expect(
       panelSizeForStage(DesktopDropPanelStage.staged, deviceCount: 2),
-      const Size(640, 280),
+      const Size(364, 280),
     );
     expect(panelShouldExpand(isDragging: true, hasStagedFiles: false), isFalse);
     expect(panelShouldExpand(isDragging: false, hasStagedFiles: true), isTrue);
@@ -153,9 +153,10 @@ void main() {
   });
 
   test('panel width grows with phones but stays within bounds', () {
-    expect(panelWidthForDeviceCount(0), 400);
-    expect(panelWidthForDeviceCount(2), greaterThan(560));
-    expect(panelWidthForDeviceCount(20), 720);
+    expect(panelWidthForDeviceCount(0), 364);
+    expect(panelWidthForDeviceCount(1), 364);
+    expect(panelWidthForDeviceCount(3), 528);
+    expect(panelWidthForDeviceCount(20), 528);
   });
 
   test('selected device falls back to the first remaining device', () {

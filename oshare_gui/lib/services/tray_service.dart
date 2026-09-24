@@ -90,11 +90,16 @@ class TrayService with TrayListener, WindowListener {
   }
 
   Future<void> _exitApplication() async {
-    if (onExitCleanup != null) {
-      await onExitCleanup!();
-    }
+    // Disappear immediately; the remaining cleanup runs out of sight.
     try {
-      await bridgeClient.shutdownBackend();
+      await windowManager.hide();
+      await trayManager.destroy();
+    } catch (_) {}
+    try {
+      await Future.wait([
+        if (onExitCleanup != null) onExitCleanup!(),
+        bridgeClient.shutdownBackend(),
+      ]).timeout(const Duration(milliseconds: 1500));
     } catch (_) {}
     await windowManager.destroy();
     exit(0);

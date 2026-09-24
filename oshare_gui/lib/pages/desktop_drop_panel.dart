@@ -17,8 +17,14 @@ import '../widgets/native_drop_zone.dart';
 // stays hidden at idle, appears for a file drag, and displays the picker after
 // a successful drop.
 const panelDropTargetSize = Size(360, 150);
-const panelExpandedMinWidth = 400.0;
+const panelExpandedMinWidth = 364.0; // two phone columns
+// Upper bound only: the staged panel hugs its content vertically.
 const panelExpandedHeight = 280.0;
+const _deviceChipWidth = 156.0;
+const _deviceChipGap = 8.0;
+const _deviceChipHeight = 58.0;
+// SafeArea inset (2 x 8) plus the card's horizontal padding (2 x 14).
+const _panelHorizontalChrome = 44.0;
 const panelExpandedSize = Size(panelExpandedMinWidth, panelExpandedHeight);
 const panelWindowSize = Size(720, 360);
 const desktopDropInstructionMaxLines = 3;
@@ -84,9 +90,15 @@ DesktopDropPanelStage panelStageForState({
   return DesktopDropPanelStage.dragging;
 }
 
+/// Phones are laid out in a grid: two columns for up to two phones, three
+/// columns beyond that. Extra rows scroll instead of widening the panel.
+int panelDeviceColumns(int count) => count <= 2 ? 2 : 3;
+
 double panelWidthForDeviceCount(int count) {
-  final safeCount = count.clamp(0, 20);
-  return (400 + safeCount * 120).clamp(400, 720).toDouble();
+  final columns = panelDeviceColumns(count);
+  return _panelHorizontalChrome +
+      columns * _deviceChipWidth +
+      (columns - 1) * _deviceChipGap;
 }
 
 DeviceModel? resolveSelectedDevice(
@@ -296,9 +308,13 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     );
   }
 
+  // Only outgoing transfers belong to this panel. Receives must not toggle
+  // the native hot-zone: re-showing it raises it above the receive popup in
+  // the same corner and swallows the popup's clicks.
   bool get _isTransferActive {
     final transfer = widget.client.transferState;
     return transfer.active &&
+        transfer.isSending &&
         !const ['completed', 'failed', 'cancelled'].contains(transfer.phase);
   }
 
@@ -768,7 +784,6 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       alignment: Alignment.bottomRight,
       child: SizedBox(
         width: width,
-        height: panelExpandedHeight,
         child: SafeArea(
           minimum: const EdgeInsets.all(8),
           child: ClipRect(
@@ -779,6 +794,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     _buildHeader(selected, isDark),
                     const SizedBox(height: 10),
@@ -786,8 +802,14 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
                       _buildTransferDetails(isDark, transfer),
                       const SizedBox(height: 10),
                     ] else ...[
-                      Expanded(
-                        child: _buildDropArea(selected, isDark, transfer),
+                      SizedBox(
+                        height: 52,
+                        child: _buildDropArea(
+                          selected,
+                          isDark,
+                          transfer,
+                          compact: true,
+                        ),
                       ),
                       const SizedBox(height: 10),
                     ],
@@ -1003,7 +1025,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               fit: BoxFit.scaleDown,
               alignment: Alignment.centerLeft,
               child: Text(
-                selected == null ? title : '$title "${selected.name}"',
+                title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -1022,8 +1044,9 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   Widget _buildDropArea(
     DeviceModel? selected,
     bool isDark,
-    TransferStateModel transfer,
-  ) {
+    TransferStateModel transfer, {
+    bool compact = false,
+  }) {
     final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
     final activeBackground = isDark
         ? AppColors.darkAccentSoft
@@ -1051,61 +1074,98 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
           strokeWidth: _isDragging ? 2 : 1,
         ),
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                _isTransferActive
-                    ? Icons.sync_rounded
-                    : Icons.cloud_upload_rounded,
-                size: 34,
-                color: _isDragging
-                    ? accent
-                    : (isDark
-                          ? AppColors.darkTextMuted
-                          : AppColors.lightTextMuted),
-              ),
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: LayoutBuilder(
-                  builder: (context, constraints) => ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: constraints.maxWidth),
-                    child: Text(
-                      text,
-                      textAlign: TextAlign.center,
-                      maxLines: desktopDropInstructionMaxLines,
-                      softWrap: true,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: isDark
-                            ? AppColors.darkText
-                            : AppColors.lightText,
+        child: compact
+            ? _buildCompactDropContent(text, isDark, accent)
+            : Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _isTransferActive
+                          ? Icons.sync_rounded
+                          : Icons.cloud_upload_rounded,
+                      size: 34,
+                      color: _isDragging
+                          ? accent
+                          : (isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted),
+                    ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) => ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: constraints.maxWidth,
+                          ),
+                          child: Text(
+                            text,
+                            textAlign: TextAlign.center,
+                            maxLines: desktopDropInstructionMaxLines,
+                            softWrap: true,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: isDark
+                                  ? AppColors.darkText
+                                  : AppColors.lightText,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                    if (_isTransferActive &&
+                        transfer.statusText.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        transfer.statusText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isDark
+                              ? AppColors.darkTextMuted
+                              : AppColors.lightTextMuted,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
-              if (_isTransferActive && transfer.statusText.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  transfer.statusText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: isDark
-                        ? AppColors.darkTextMuted
-                        : AppColors.lightTextMuted,
-                  ),
-                ),
-              ],
-            ],
+      ),
+    );
+  }
+
+  // Single-row drop hint for the staged panel, so the picker is not padded
+  // out by the tall drag-state drop area.
+  Widget _buildCompactDropContent(String text, bool isDark, Color accent) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      child: Row(
+        children: [
+          Icon(
+            Icons.cloud_upload_rounded,
+            size: 22,
+            color: _isDragging
+                ? accent
+                : (isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted),
           ),
-        ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: isDark ? AppColors.darkText : AppColors.lightText,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1133,92 +1193,113 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
       );
     }
 
-    return SizedBox(
-      height: 58,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: devices.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final device = devices[index];
-          final isSelected = selected?.address == device.address;
-          final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
-          return InkWell(
-            onTap: () {
-              if (_hasStagedDrop) {
-                unawaited(_sendStagedFilesTo(device));
-              } else {
-                setState(() => _selectedAddress = device.address);
-              }
-            },
-            borderRadius: BorderRadius.circular(12),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width: 156,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? (isDark
-                          ? AppColors.darkAccentSoft
-                          : AppColors.lightAccentSoft)
-                    : (isDark ? AppColors.darkCard : AppColors.lightCard),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isSelected
-                      ? accent
-                      : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
-                  width: isSelected ? 1.5 : 1,
-                ),
-              ),
-              child: Row(
+    // At most two rows are visible; more phones scroll vertically.
+    return ConstrainedBox(
+      constraints: const BoxConstraints(
+        maxHeight: _deviceChipHeight * 2 + _deviceChipGap,
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Chips share the full row: one phone spans it, two split it.
+          final columns = devices.length.clamp(
+            1,
+            panelDeviceColumns(devices.length),
+          );
+          final chipWidth =
+              (constraints.maxWidth - (columns - 1) * _deviceChipGap) / columns;
+          return SingleChildScrollView(
+            child: Wrap(
+              spacing: _deviceChipGap,
+              runSpacing: _deviceChipGap,
+              children: [
+                for (final device in devices)
+                  _buildDeviceChip(device, selected, isDark, chipWidth),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildDeviceChip(
+    DeviceModel device,
+    DeviceModel? selected,
+    bool isDark,
+    double width,
+  ) {
+    final isSelected = selected?.address == device.address;
+    final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
+    return InkWell(
+      onTap: () {
+        if (_hasStagedDrop) {
+          unawaited(_sendStagedFilesTo(device));
+        } else {
+          setState(() => _selectedAddress = device.address);
+        }
+      },
+      borderRadius: BorderRadius.circular(12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: width,
+        height: _deviceChipHeight,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? (isDark ? AppColors.darkAccentSoft : AppColors.lightAccentSoft)
+              : (isDark ? AppColors.darkCard : AppColors.lightCard),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isSelected
+                ? accent
+                : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.smartphone_rounded,
+              size: 22,
+              color: isSelected
+                  ? accent
+                  : (isDark
+                        ? AppColors.darkTextMuted
+                        : AppColors.lightTextMuted),
+            ),
+            const SizedBox(width: 7),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(
-                    Icons.smartphone_rounded,
-                    size: 22,
-                    color: isSelected
-                        ? accent
-                        : (isDark
-                              ? AppColors.darkTextMuted
-                              : AppColors.lightTextMuted),
+                  Text(
+                    device.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: isDark ? AppColors.darkText : AppColors.lightText,
+                    ),
                   ),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          device.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${device.kind} · ${device.rssi} dBm',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                      ],
+                  const SizedBox(height: 2),
+                  Text(
+                    '${device.kind} · ${device.rssi} dBm',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: isDark
+                          ? AppColors.darkTextMuted
+                          : AppColors.lightTextMuted,
                     ),
                   ),
                 ],
               ),
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }

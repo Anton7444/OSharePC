@@ -60,8 +60,10 @@ Future<void> runReceivePopup() async {
       await windowManager.setResizable(false);
       if (bounds != null) await windowManager.setBounds(bounds);
       // setBounds drops topmost on Windows; re-assert it last.
-      await windowManager.setAlwaysOnTop(true);
       await windowManager.show(inactive: true);
+      // Re-assert once visible so the popup lands above other topmost
+      // windows in the same corner, such as the drop target's hot-zone.
+      await windowManager.setAlwaysOnTop(true);
     },
   );
 

@@ -845,19 +845,15 @@ class BridgeClient extends ChangeNotifier {
     }
   }
 
+  /// Asks the backend to shut down without waiting for it to exit. Stopping
+  /// Bluetooth/Wi-Fi can take seconds, and the backend already finishes its
+  /// own shutdown when this (parent) process exits via --parent-pid.
   Future<void> shutdownBackend() async {
     _pollTimer?.cancel();
     _pendingIncomingOffer = null;
     try {
-      await _post('/api/shutdown').timeout(const Duration(seconds: 2));
+      await _post('/api/shutdown').timeout(const Duration(seconds: 1));
     } catch (_) {}
-    try {
-      await _backendProcess?.exitCode.timeout(const Duration(seconds: 4));
-    } catch (_) {
-      try {
-        _backendProcess?.kill();
-      } catch (_) {}
-    }
   }
 
   @override

@@ -54,7 +54,7 @@ String appText(AppLanguage language, String key) {
       'desktopDropTarget': 'Desktop drop target',
       'desktopDropTargetHint':
           'Show a floating file drop panel in the bottom-right corner of the desktop',
-      'desktopDropTitle': 'Drag files here to send them to',
+      'desktopDropTitle': 'Drag files here to send to your phone',
       'desktopDropNoDevices': 'No nearby phones found',
       'desktopDropSelectDevice':
           'Select a phone below to send the dropped files',
@@ -162,7 +162,7 @@ String appText(AppLanguage language, String key) {
       'receiveSuccessNotificationHint': 'OShare 窗口打开时，文件接收完成后显示对话框',
       'desktopDropTarget': '桌面拖放窗口',
       'desktopDropTargetHint': '在桌面右下角显示浮动文件拖放窗口',
-      'desktopDropTitle': '将文件拖到这里以发送给',
+      'desktopDropTitle': '将文件拖到这里以发送到你的手机',
       'desktopDropNoDevices': '未找到附近的手机',
       'desktopDropSelectDevice': '请在下方选择手机以发送拖入的文件',
       'desktopDropReleaseToSend': '松开鼠标以发送文件',
@@ -268,7 +268,7 @@ String appText(AppLanguage language, String key) {
       'receiveSuccessNotificationHint': 'OShare 視窗開啟時，檔案接收完成後顯示對話框',
       'desktopDropTarget': '桌面拖放視窗',
       'desktopDropTargetHint': '在桌面右下角顯示浮動檔案拖放視窗',
-      'desktopDropTitle': '將檔案拖曳到這裡以傳送給',
+      'desktopDropTitle': '將檔案拖曳到這裡以傳送到你的手機',
       'desktopDropNoDevices': '目前沒有找到附近的手機',
       'desktopDropSelectDevice': '請在下方選擇手機以傳送拖入的檔案',
       'desktopDropReleaseToSend': '放開滑鼠以傳送檔案',
