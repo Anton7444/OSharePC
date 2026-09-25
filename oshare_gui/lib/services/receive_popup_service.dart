@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
 import 'bridge_client.dart';
+
+const receivePopupEnabledPref = 'receive_popup_enabled';
 
 const receivePopupArgument = '--receive-popup';
 const receivePopupEnvironment = 'OSHAREPC_RECEIVE_POPUP';
@@ -137,8 +140,18 @@ class ReceivePopupService {
     });
   }
 
+  Future<bool> _isEnabled() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(receivePopupEnabledPref) ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
   Future<void> _launch(ReceivePopupRequest request) async {
     await _close();
+    if (!await _isEnabled()) return;
     try {
       final process = await Process.start(
         Platform.resolvedExecutable,

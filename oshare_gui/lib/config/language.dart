@@ -48,6 +48,9 @@ String appText(AppLanguage language, String key) {
           'Keep the app running in the notification area when closing the window',
       'minimizeTray': 'Minimize to tray',
       'minimizeTrayHint': 'Hide window to the tray icon when clicking minimize',
+      'receivePopup': 'Corner transfer popup',
+      'receivePopupHint':
+          'Show an accept/decline and completion popup in the desktop corner while OShare is closed or minimized',
       'receiveSuccessNotification': 'Receive completion dialog',
       'receiveSuccessNotificationHint':
           'Show a dialog when a file transfer completes while OShare is open',
@@ -158,6 +161,8 @@ String appText(AppLanguage language, String key) {
       'closeTrayHint': '关闭窗口时继续在通知区域运行',
       'minimizeTray': '最小化到系统托盘',
       'minimizeTrayHint': '点击最小化时隐藏到系统托盘',
+      'receivePopup': '角落传输弹窗',
+      'receivePopupHint': '当 OShare 关闭或最小化时，在桌面角落显示接受/拒绝及完成提示弹窗',
       'receiveSuccessNotification': '接收完成对话框',
       'receiveSuccessNotificationHint': 'OShare 窗口打开时，文件接收完成后显示对话框',
       'desktopDropTarget': '桌面拖放窗口',
@@ -264,6 +269,8 @@ String appText(AppLanguage language, String key) {
       'closeTrayHint': '關閉視窗時繼續在通知區域執行',
       'minimizeTray': '最小化至系統匣',
       'minimizeTrayHint': '點擊最小化時隱藏至系統匣',
+      'receivePopup': '角落傳輸彈窗',
+      'receivePopupHint': '當 OShare 關閉或最小化時，在桌面角落顯示接受/拒絕及完成提示彈窗',
       'receiveSuccessNotification': '接收完成對話框',
       'receiveSuccessNotificationHint': 'OShare 視窗開啟時，檔案接收完成後顯示對話框',
       'desktopDropTarget': '桌面拖放視窗',

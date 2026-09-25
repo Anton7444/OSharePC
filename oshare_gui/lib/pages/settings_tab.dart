@@ -6,6 +6,7 @@ import '../config/theme.dart';
 import '../config/language.dart';
 import '../models/models.dart';
 import '../services/bridge_client.dart';
+import '../services/receive_popup_service.dart';
 import '../services/startup_service.dart';
 import '../widgets/custom_segmented_button.dart';
 
@@ -43,6 +44,7 @@ class _SettingsTabState extends State<SettingsTab> {
   bool _closeToTray = true;
   bool _launchAtStartup = false;
   bool _startMinimized = false;
+  bool _receivePopupEnabled = true;
 
   @override
   void initState() {
@@ -82,8 +84,16 @@ class _SettingsTabState extends State<SettingsTab> {
       setState(() {
         _minimizeToTray = prefs.getBool('minimize_to_tray') ?? true;
         _closeToTray = prefs.getBool('close_to_tray') ?? true;
+        _receivePopupEnabled =
+            prefs.getBool(receivePopupEnabledPref) ?? true;
       });
     } catch (_) {}
+  }
+
+  Future<void> _saveReceivePopupEnabled(bool val) async {
+    setState(() => _receivePopupEnabled = val);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(receivePopupEnabledPref, val);
   }
 
   Future<void> _saveMinimizeToTray(bool val) async {
@@ -411,6 +421,34 @@ class _SettingsTabState extends State<SettingsTab> {
                   ? AppColors.darkAccent
                   : AppColors.lightAccent,
               onChanged: _saveMinimizeToTray,
+            ),
+            Divider(
+              height: 1,
+              color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+            ),
+            SwitchListTile(
+              title: Text(
+                appText(widget.currentLanguage, 'receivePopup'),
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+              subtitle: Text(
+                appText(widget.currentLanguage, 'receivePopupHint'),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: isDark
+                      ? AppColors.darkTextMuted
+                      : AppColors.lightTextMuted,
+                ),
+              ),
+              value: _receivePopupEnabled,
+              activeThumbColor: isDark
+                  ? AppColors.darkAccent
+                  : AppColors.lightAccent,
+              onChanged: _saveReceivePopupEnabled,
             ),
             Divider(
               height: 1,
