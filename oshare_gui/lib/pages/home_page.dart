@@ -3,6 +3,8 @@ import '../config/theme.dart';
 import '../config/language.dart';
 import '../services/bridge_client.dart';
 import '../services/outgoing_staging_controller.dart';
+import '../services/transfer_presentation.dart';
+import '../widgets/transfer_overlays.dart';
 import 'receive_tab.dart';
 import 'send_tab.dart';
 import 'settings_tab.dart';
@@ -58,9 +60,14 @@ class _HomePageState extends State<HomePage> {
     final railBg = isDark ? AppColors.darkSurface : AppColors.lightSurface;
     final status = widget.client.status;
 
+    final pendingOffer = widget.client.pendingIncomingOffer;
+    final transfer = widget.client.transferState;
+
     return Scaffold(
-      body: Row(
+      body: Stack(
         children: [
+          Row(
+            children: [
           // 1. Left Sidebar Rail (LocalSend aesthetic)
           Container(
             width: 220,
@@ -231,6 +238,35 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
+        ],
+          ),
+
+          // 3. Incoming Transfer / Status Overlays — rendered above the
+          // IndexedStack so they stay visible on whichever tab is open,
+          // while the main window is on screen. Once the window is closed
+          // or minimized, mainWindowVisible flips false and the corner
+          // popup (ReceivePopupService) takes over instead.
+          if (pendingOffer != null && widget.client.mainWindowVisible)
+            Positioned.fill(
+              child: IncomingTransferModal(
+                client: widget.client,
+                language: widget.currentLanguage,
+                offer: pendingOffer,
+              ),
+            ),
+          if (shouldShowReceiveTransferModal(
+            isActive: transfer.active,
+            phase: transfer.phase,
+            isWindowVisible: widget.client.mainWindowVisible,
+            resultWasHidden: transfer.isBackground,
+          ))
+            Positioned.fill(
+              child: TransferStatusModal(
+                client: widget.client,
+                language: widget.currentLanguage,
+                transfer: transfer,
+              ),
+            ),
         ],
       ),
     );
