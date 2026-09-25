@@ -95,11 +95,18 @@ class TrayService with TrayListener, WindowListener {
       await windowManager.hide();
       await trayManager.destroy();
     } catch (_) {}
+    // Give user-supplied cleanup (e.g. persisting settings) its own generous
+    // timeout so a slow disk write isn't silently truncated by the backend
+    // shutdown's much shorter internal timeout.
     try {
-      await Future.wait([
-        if (onExitCleanup != null) onExitCleanup!(),
-        bridgeClient.shutdownBackend(),
-      ]).timeout(const Duration(milliseconds: 1500));
+      if (onExitCleanup != null) {
+        await onExitCleanup!().timeout(const Duration(seconds: 5));
+      }
+    } catch (e) {
+      debugPrint('Error during exit cleanup: $e');
+    }
+    try {
+      await bridgeClient.shutdownBackend();
     } catch (_) {}
     await windowManager.destroy();
     exit(0);
