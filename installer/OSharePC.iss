@@ -113,6 +113,14 @@ begin
     Exit;
   StringChange(CleanAppDir, '''', '''''');
 
+  // Every window the GUI can spawn (main window, the corner receive popup,
+  // and the desktop drop panel) is the same oshare_gui.exe re-invoked with
+  // different arguments, so a stray popup/panel instance left running from
+  // an earlier session can hold the exe or its DLLs locked during an
+  // in-place upgrade, silently failing that one file's copy while the rest
+  // of the install succeeds. Force-kill every matching process by path, then
+  // actively poll until none remain (instead of a single fixed sleep) so the
+  // file copy that follows never races a process that is still tearing down.
   PowerShellCmd :=
     '$target = ''' + CleanAppDir + '''.TrimEnd(''\''); ' +
     'try { ' +
@@ -123,12 +131,18 @@ begin
       '$res = $wr.GetResponse(); ' +
       '$res.Close(); ' +
     '} catch {}; ' +
-    'Get-Process -Name ''oshare_gui'' -ErrorAction SilentlyContinue | Where-Object { ' +
-      'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
-    '} | ForEach-Object { try { $_.CloseMainWindow() } catch {} }; ' +
-    'Start-Sleep -Milliseconds 1200; ' +
-    'Get-Process -Name ''oshare_gui'', ''OSharePC'' -ErrorAction SilentlyContinue | Where-Object { ' +      'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
-    '} | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} }; ' +
+    'function Get-OShareProcesses { ' +
+      'Get-Process -Name ''oshare_gui'', ''OSharePC'' -ErrorAction SilentlyContinue | Where-Object { ' +
+        'try { $_.Path -and $_.Path.StartsWith($target, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } ' +
+      '} ' +
+    '}; ' +
+    'Get-OShareProcesses | ForEach-Object { try { $_.CloseMainWindow() } catch {} }; ' +
+    'Start-Sleep -Milliseconds 800; ' +
+    'Get-OShareProcesses | ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} }; ' +
+    'for ($i = 0; $i -lt 20; $i++) { ' +
+      'if (-not (Get-OShareProcesses)) { break }; ' +
+      'Start-Sleep -Milliseconds 250; ' +
+    '}; ' +
     'Start-Sleep -Milliseconds 300;';
 
   PowerShellExe := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');

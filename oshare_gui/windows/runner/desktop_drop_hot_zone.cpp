@@ -15,6 +15,8 @@ constexpr int kIdleHeight = 280;
 constexpr int kDragWidth = 400;
 constexpr int kDragHeight = 300;
 constexpr UINT kDispatchQueuedDropMessage = WM_APP + 0x120;
+constexpr UINT_PTR kMouseStateTimerId = 1;
+constexpr UINT kMouseStatePollIntervalMs = 80;
 
 void Log(const std::string& message) {
   const std::string line = message + "\n";
@@ -45,6 +47,7 @@ DesktopDropHotZone::DesktopDropHotZone() = default;
 
 DesktopDropHotZone::~DesktopDropHotZone() {
   if (window_handle_ != nullptr && IsWindow(window_handle_)) {
+    KillTimer(window_handle_, kMouseStateTimerId);
     ShowWindow(window_handle_, SW_HIDE);
     DestroyWindow(window_handle_);
   }
@@ -88,6 +91,10 @@ bool DesktopDropHotZone::Create(HWND owner) {
     return false;
   }
 
+  SetTimer(window_handle_, kMouseStateTimerId, kMouseStatePollIntervalMs,
+           nullptr);
+  UpdateClickThrough();
+
   std::ostringstream message;
   message << "[DesktopDropHotZone] created HWND="
           << static_cast<void*>(window_handle_)
@@ -126,6 +133,7 @@ void DesktopDropHotZone::SetEnabled(bool enabled) {
     visible_ = false;
     drag_active_ = false;
   }
+  UpdateClickThrough();
 }
 
 bool DesktopDropHotZone::BeginDrag() {
@@ -140,8 +148,10 @@ bool DesktopDropHotZone::BeginDrag() {
   // as the Flutter preview appears.
   if (drag_active_) return true;
   drag_active_ = true;
+  UpdateClickThrough();
   if (!PositionHotZone(kDragWidth, kDragHeight, true, "drag 400x300")) {
     drag_active_ = false;
+    UpdateClickThrough();
     return false;
   }
   Log("[DesktopDropHotZone] drag active; expanded to 400x300");
@@ -154,6 +164,7 @@ bool DesktopDropHotZone::HideForStaged() {
   }
   visible_ = false;
   drag_active_ = false;
+  UpdateClickThrough();
   Log("[DesktopDropHotZone] staged hot-zone hidden; Flutter visibility is Dart-controlled");
   return true;
 }
@@ -179,12 +190,14 @@ bool DesktopDropHotZone::RestoreIdle() {
     }
     visible_ = false;
     drag_active_ = false;
+    UpdateClickThrough();
     return true;
   }
   // Always restore the idle geometry. During an active drag the same HWND is
   // expanded to 400x300, so visibility alone is not enough to know that the
   // idle bounds are already correct.
   drag_active_ = false;
+  UpdateClickThrough();
   return PositionHotZone(kIdleWidth, kIdleHeight, true, "idle 280x280");
 }
 
@@ -225,6 +238,28 @@ bool DesktopDropHotZone::PositionHotZone(int logical_width,
   return true;
 }
 
+void DesktopDropHotZone::UpdateClickThrough() {
+  if (window_handle_ == nullptr || !IsWindow(window_handle_)) return;
+
+  const bool button_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+  // Stay hit-testable (catchable by OLE) whenever a drag is already
+  // confirmed, or the mouse button is currently held down and a drag might
+  // be starting. Otherwise become click-through so idle clicks in this
+  // corner reach whatever is actually underneath instead of this invisible
+  // zone.
+  const bool want_click_through = enabled_ && !drag_active_ && !button_down;
+  if (want_click_through == click_through_) return;
+
+  const LONG_PTR ex_style = GetWindowLongPtrW(window_handle_, GWL_EXSTYLE);
+  const LONG_PTR new_style = want_click_through
+                                 ? (ex_style | WS_EX_TRANSPARENT)
+                                 : (ex_style & ~WS_EX_TRANSPARENT);
+  if (new_style != ex_style) {
+    SetWindowLongPtrW(window_handle_, GWL_EXSTYLE, new_style);
+  }
+  click_through_ = want_click_through;
+}
+
 void DesktopDropHotZone::LogWindowRect(const char* label) const {
   const RECT rect = GetWindowRectValue();
   std::ostringstream message;
@@ -244,6 +279,12 @@ LRESULT CALLBACK DesktopDropHotZone::WindowProc(HWND window, UINT message,
   }
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
   if (message == WM_NCHITTEST) return HTCLIENT;
+  if (message == WM_TIMER && wparam == kMouseStateTimerId) {
+    auto* hot_zone = reinterpret_cast<DesktopDropHotZone*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (hot_zone != nullptr) hot_zone->UpdateClickThrough();
+    return 0;
+  }
   if (message == kDispatchQueuedDropMessage) {
     auto* hot_zone = reinterpret_cast<DesktopDropHotZone*>(
         GetWindowLongPtrW(window, GWLP_USERDATA));
