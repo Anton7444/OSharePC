@@ -93,9 +93,9 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          & 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' '/DMyAppVersion=1.0.5' 'installer/OSharePC.iss'
+          & 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' '/DMyAppVersion=1.0.6' 'installer/OSharePC.iss'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $builtInstaller = 'installer-output/OSharePC-Setup-1.0.5.exe'
+          $builtInstaller = 'installer-output/OSharePC-Setup-1.0.6.exe'
           if (-not (Test-Path -LiteralPath $builtInstaller)) { throw "Expected installer output missing: $builtInstaller" }
           Copy-Item -LiteralPath $builtInstaller -Destination 'OSharePC-Setup-win-x64.exe' -Force
       - name: Validate CI packages

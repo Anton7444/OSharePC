@@ -10,8 +10,8 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <AssemblyName>OSharePC</AssemblyName>
-    <Version>1.0.5</Version>
-    <InformationalVersion>1.0.5</InformationalVersion>
+    <Version>1.0.6</Version>
+    <InformationalVersion>1.0.6</InformationalVersion>
     <RootNamespace>OShareSender</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
