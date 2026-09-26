@@ -10,10 +10,10 @@
 namespace {
 
 constexpr wchar_t kHotZoneClassName[] = L"OSHAREPC_DESKTOP_DROP_HOT_ZONE";
-constexpr int kIdleWidth = 280;
-constexpr int kIdleHeight = 280;
-constexpr int kDragWidth = 400;
-constexpr int kDragHeight = 300;
+constexpr int kIdleWidth = 460;
+constexpr int kIdleHeight = 460;
+constexpr int kDragWidth = 620;
+constexpr int kDragHeight = 460;
 constexpr UINT kDispatchQueuedDropMessage = WM_APP + 0x120;
 constexpr UINT_PTR kMouseStateTimerId = 1;
 constexpr UINT kMouseStatePollIntervalMs = 80;
@@ -85,7 +85,7 @@ bool DesktopDropHotZone::Create(HWND owner) {
     return false;
   }
 
-  if (!PositionHotZone(kIdleWidth, kIdleHeight, false, "idle 280x280")) {
+  if (!PositionHotZone(kIdleWidth, kIdleHeight, false, "idle 460x460")) {
     DestroyWindow(window_handle_);
     window_handle_ = nullptr;
     return false;
@@ -149,12 +149,12 @@ bool DesktopDropHotZone::BeginDrag() {
   if (drag_active_) return true;
   drag_active_ = true;
   UpdateClickThrough();
-  if (!PositionHotZone(kDragWidth, kDragHeight, true, "drag 400x300")) {
+  if (!PositionHotZone(kDragWidth, kDragHeight, true, "drag 620x460")) {
     drag_active_ = false;
     UpdateClickThrough();
     return false;
   }
-  Log("[DesktopDropHotZone] drag active; expanded to 400x300");
+  Log("[DesktopDropHotZone] drag active; expanded to 620x460");
   return true;
 }
 
@@ -194,11 +194,11 @@ bool DesktopDropHotZone::RestoreIdle() {
     return true;
   }
   // Always restore the idle geometry. During an active drag the same HWND is
-  // expanded to 400x300, so visibility alone is not enough to know that the
+  // expanded to 620x460, so visibility alone is not enough to know that the
   // idle bounds are already correct.
   drag_active_ = false;
   UpdateClickThrough();
-  return PositionHotZone(kIdleWidth, kIdleHeight, true, "idle 280x280");
+  return PositionHotZone(kIdleWidth, kIdleHeight, true, "idle 460x460");
 }
 
 bool DesktopDropHotZone::PositionHotZone(int logical_width,

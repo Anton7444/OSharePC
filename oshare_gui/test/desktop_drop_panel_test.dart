@@ -51,7 +51,7 @@ void main() {
   });
 
   test('only staged files expand the panel', () {
-    expect(panelDropTargetSize, const Size(360, 150));
+    expect(panelDropTargetSize, const Size(560, 260));
     expect(panelExpandedSize, const Size(364, 280));
     expect(panelSizeForStage(DesktopDropPanelStage.idle), panelDropTargetSize);
     expect(
@@ -246,7 +246,7 @@ void main() {
 
       final renderBox = tester.renderObject<RenderBox>(squareTargetFinder);
       expect(renderBox.size.width, renderBox.size.height);
-      expect(renderBox.size.width, 134.0);
+      expect(renderBox.size.width, 176.0);
 
       client.dispose();
     },
