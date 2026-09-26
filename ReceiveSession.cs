@@ -70,11 +70,12 @@ public sealed class ReceiveSession : IDisposable
     public static async Task<List<string>> PullAsync(
         string phoneIp, int port, string phoneName, string saveDir,
         Action<string> state, Action<long, long>? progress,
-        CancellationToken ct, ClientWebSocket? preconnected, Action<ReceiveMetadata>? metadata = null)
+        CancellationToken ct, ClientWebSocket? preconnected, Action<ReceiveMetadata>? metadata = null,
+        string preconnectedScheme = "ws")
     {
         using var session = new ReceiveSession(saveDir, state, progress, metadata);
         session.SenderName = phoneName;
-        await session.RunAsync(phoneIp, port, ct, preconnected);
+        await session.RunAsync(phoneIp, port, ct, preconnected, preconnectedScheme);
         return session.SavedFiles;
     }
 
@@ -87,7 +88,7 @@ public sealed class ReceiveSession : IDisposable
     /// phone's WebSocket before wlan_accept is sent over GATT. Bounded timeout:
     /// on failure the caller falls back to connect-after-accept.
     /// </summary>
-    internal static async Task<ClientWebSocket?> PreConnectAsync(
+    internal static async Task<(ClientWebSocket? Socket, string Scheme)> PreConnectAsync(
         string host, int port, TimeSpan timeout, Action<string>? state)
     {
         foreach (var scheme in new[] { "ws", "wss" })
@@ -100,7 +101,7 @@ public sealed class ReceiveSession : IDisposable
                 using var cts = new CancellationTokenSource(timeout);
                 await ws.ConnectAsync(new Uri($"{scheme}://{host}:{port}/websocket"), cts.Token);
                 state?.Invoke("WLAN WS connected (pre-connected before wlan_accept)");
-                return ws;
+                return (ws, scheme);
             }
             catch (Exception ex)
             {
@@ -108,16 +109,18 @@ public sealed class ReceiveSession : IDisposable
                 ws.Dispose();
             }
         }
-        return null;
+        return (null, "ws");
     }
 
-    private async Task RunAsync(string phoneIp, int port, CancellationToken ct, ClientWebSocket? preconnected)
+    private async Task RunAsync(string phoneIp, int port, CancellationToken ct, ClientWebSocket? preconnected,
+        string preconnectedScheme = "ws")
     {
         WebSocket? ws = null;
         string activeScheme = "ws";
         if (preconnected is not null)
         {
             _ws = preconnected;
+            activeScheme = preconnectedScheme;
             _state("using pre-connected WLAN WebSocket");
         }
         else
@@ -174,6 +177,14 @@ public sealed class ReceiveSession : IDisposable
         var deadline = DateTime.UtcNow.AddSeconds(30);
         var negotiateBy = DateTime.UtcNow.AddSeconds(5);
 
+        // .NET's ClientWebSocket does not support more than one outstanding ReceiveAsync,
+        // and cancelling a pending receive aborts the socket outright — so a "timeout" here
+        // must never start a second, overlapping receive on the same connection. Instead we
+        // keep a single in-flight receive task alive across loop iterations: on a soft
+        // timeout we just stop waiting on it for now (to send the fallback handshake, etc.)
+        // and pick the SAME task back up next time around, discarding it only once it
+        // actually completes.
+        Task<Envelope?>? pendingReceive = null;
         while (sendRequest is null && !ct.IsCancellationRequested)
         {
             // fallback: the phone never negotiated — send our own handshake
@@ -198,16 +209,19 @@ public sealed class ReceiveSession : IDisposable
                 if (!handshaken && !fallbackSent) continue;   // loop top sends the fallback
                 throw new TimeoutException("timed out waiting for sender's sendRequest");
             }
-            Envelope? env;
-            try
+
+            pendingReceive ??= ReceiveAsync(ct);
+            var completed = await Task.WhenAny(pendingReceive, Task.Delay(remaining, ct));
+            ct.ThrowIfCancellationRequested();
+            if (completed != pendingReceive)
             {
-                env = await ReceiveAsync(ct).WaitAsync(remaining, ct);
-            }
-            catch (TimeoutException)
-            {
+                // soft timeout: the receive is still pending in the background — keep it,
+                // do not start another, and just loop back to re-check state/fallback.
                 if (!handshaken && !fallbackSent && negotiateBy <= DateTime.UtcNow) continue;
                 throw new TimeoutException("timed out waiting for sender's sendRequest");
             }
+            var env = await pendingReceive;
+            pendingReceive = null;
             if (env is null) throw new IOException("sender closed the websocket before sendRequest");
 
             if (env.IsRaw)

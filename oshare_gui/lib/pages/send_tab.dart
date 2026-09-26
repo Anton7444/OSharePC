@@ -103,7 +103,7 @@ class _SendTabState extends State<SendTab> {
     if (_isTransferActive) {
       return;
     }
-    widget.client.sendToDevice(device);
+    widget.client.sendToDevice(device, taskId: widget.stagingController.taskId);
   }
 
   @override

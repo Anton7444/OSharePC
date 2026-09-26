@@ -24,6 +24,11 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     public string SenderId { get; private set; } = "";
 
     private TransferTask? _staged;
+
+    /// <summary>TaskId of the currently staged outgoing transfer, or "" if none.
+    /// Lets a caller (e.g. the bridge server) confirm the slot it staged is still
+    /// the one that will actually be sent before starting a send.</summary>
+    public string StagedTaskId => _staged?.TaskId ?? "";
     private OShareCrypto? _crypto;
     private bool _rxBeaconUp;      // 8881 connectable advert currently on air
     private bool _catAdvertUp;     // 9955 connectable advert currently on air

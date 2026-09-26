@@ -31,6 +31,23 @@ public sealed class ReceiveGattServer : IDisposable
     private string? _padPubKey;
     private (byte[] Key, byte[] Iv)? _session;
     private string _padName = "";
+    /// <summary>True only once the user has explicitly accepted the current offer
+    /// for the current session. State-3 (WLAN/hotspot) commands are refused unless
+    /// this is set, so a rejected or stale session can never trigger a transfer.</summary>
+    private volatile bool _sessionAccepted;
+
+    /// <summary>Invalidates the current session so no queued/replayed state-3 command
+    /// can start a transfer. Called on rejection, disconnect, stop, and before deriving
+    /// a new session for a fresh offer.</summary>
+    private void ClearSession()
+    {
+        _sessionAccepted = false;
+        _session = null;
+        _padPubKey = null;
+        _padName = "";
+        _lanPullCts?.Cancel();
+        _hotspotCts?.Cancel();
+    }
 
     public bool IsRunning { get; private set; }
     public string DeviceName { get; set; } = Environment.MachineName;
@@ -306,6 +323,10 @@ public sealed class ReceiveGattServer : IDisposable
         // State 1 from the phone: file offer
         if (root.TryGetProperty("key", out var keyEl))
         {
+            // A fresh offer invalidates whatever session/acceptance state preceded it —
+            // never let a stale accepted session carry over to a new key exchange.
+            ClearSession();
+
             _padPubKey = keyEl.GetString();
             if (string.IsNullOrEmpty(_padPubKey))
                 throw new InvalidOperationException("State 1 offer has no public key");
@@ -338,6 +359,12 @@ public sealed class ReceiveGattServer : IDisposable
             else
                 accept = true;
 
+            // Only an explicit accept arms the session for state-3 (WLAN/hotspot)
+            // handling below. A rejection (or a session torn down meanwhile, e.g. by
+            // Stop()/a new offer) must never let a later state-3 command start a transfer.
+            _sessionAccepted = accept && _session != null;
+            if (!_sessionAccepted) ClearSession();
+
             // The phone's iPad/PC BLE client (APK d8/j) treats "6" as
             // USE_LAN_NEED_CHECK.  "1" means USE_DEFAULT_ACCESSORY and lets
             // the phone fall back to creating a SoftAP, which is the path that
@@ -356,7 +383,8 @@ public sealed class ReceiveGattServer : IDisposable
         if (root.TryGetProperty("wlan", out _) ||
             (root.TryGetProperty("ip", out _) && root.TryGetProperty("port", out _)))
         {
-            if (_session == null) throw new InvalidOperationException("WLAN offer received without active session");
+            if (_session == null || !_sessionAccepted)
+                throw new InvalidOperationException("WLAN offer received without an accepted session — ignoring (rejected, stale, or replayed)");
             var ip = DecryptField(root, "ip");
             var port = DecryptField(root, "port");
             if (string.IsNullOrEmpty(ip) || !int.TryParse(port, out var portNum))
@@ -404,9 +432,10 @@ public sealed class ReceiveGattServer : IDisposable
             await StartBandwidthEchoAsync(portNum);
 
             ClientWebSocket? preconnected = null;
+            var preconnectedScheme = "ws";
             if (acceptPayload["wlan_accept"] is true)
             {
-                preconnected = await ReceiveSession.PreConnectAsync(ip, portNum, TimeSpan.FromSeconds(2.5), State);
+                (preconnected, preconnectedScheme) = await ReceiveSession.PreConnectAsync(ip, portNum, TimeSpan.FromSeconds(2.5), State);
                 if (preconnected is null)
                     Log.Warn("RX: WLAN WS pre-connect failed — falling back to connect-after-accept");
             }
@@ -430,7 +459,8 @@ public sealed class ReceiveGattServer : IDisposable
                         State,
                         (done, total) => TransferProgress?.Invoke(done, total),
                         lanPullCt, preconnected,
-                        metadata => TransferMetadata?.Invoke(metadata));
+                        metadata => TransferMetadata?.Invoke(metadata),
+                        preconnectedScheme);
 
                     TransferCompleted?.Invoke(_padName, files);
                 }
@@ -686,6 +716,7 @@ public sealed class ReceiveGattServer : IDisposable
 
     public void Stop()
     {
+        ClearSession();
         _bandwidthEchoCts?.Cancel();
         _bandwidthEchoCts = null;
         _bandwidthEchoTask = null;

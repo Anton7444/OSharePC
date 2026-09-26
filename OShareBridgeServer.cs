@@ -23,6 +23,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentlyRejected = new();
     private readonly byte[] _authTokenBytes;
     private long _seq = 0;
+    // Regenerated each process start so a client can tell a fresh backend (event
+    // sequence restarted at 0) from the one it was already polling, and fast-forward
+    // its cursor instead of silently discarding every event as "already seen".
+    private readonly string _instanceId = Guid.NewGuid().ToString("N");
     private WebApplication? _app;
     private string _lastState = "starting";
     private Task? _sendTask;
@@ -155,6 +159,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Json(new
             {
                 seq = Interlocked.Read(ref _seq),
+                instanceId = _instanceId,
                 connected = _engine.Lan is not null,
                 receiveEnabled = _engine.ReceiveEnabled,
                 senderId = _engine.SenderId,
@@ -309,10 +314,17 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 return Reject(StatusCodes.Status400BadRequest, "Expected a BLE address string.");
             var device = _engine.Scanner.Devices.FirstOrDefault(d => d.Address == address);
             if (device is null) return Reject(StatusCodes.Status404NotFound, "Device is no longer visible.");
+            // The staging slot is a single global one shared by the main window and the
+            // desktop drop-panel process. A caller must name the taskId it staged so a
+            // send never goes out against files a different process staged over it.
+            if (string.IsNullOrWhiteSpace(body.TaskId))
+                return Reject(StatusCodes.Status400BadRequest, "Expected the staged taskId.");
             if (!await _sendGate.WaitAsync(0)) return Reject(StatusCodes.Status409Conflict, "A transfer is already running.");
             try
             {
                 if (_sendTask is { IsCompleted: false }) return Reject(StatusCodes.Status409Conflict, "A transfer is already running.");
+                if (!string.Equals(_engine.StagedTaskId, body.TaskId, StringComparison.Ordinal))
+                    return Reject(StatusCodes.Status409Conflict, "Staged files changed — restage before sending.");
                 Interlocked.Exchange(ref _sendRequestId, requestId);
                 Interlocked.Exchange(ref _sendQuiet, body.Quiet ? 1 : 0);
                 Push("sendStarted", new { device = device.Name, quiet, requestId });
@@ -441,5 +453,5 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         bool? MinimizeToTray,
         bool? CloseToTray);
     private sealed record StageRequest(string[]? Files);
-    private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null);
+    private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null, string? TaskId = null);
 }

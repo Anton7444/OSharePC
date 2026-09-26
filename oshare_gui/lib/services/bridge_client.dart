@@ -54,6 +54,7 @@ class BridgeClient extends ChangeNotifier {
   final SendResultEventTracker _sendResultEventTracker =
       SendResultEventTracker();
   int _lastEventSeq = 0;
+  String? _backendInstanceId;
   bool _isConnecting = true;
   Timer? _pollTimer;
   bool _pollInFlight = false;
@@ -209,6 +210,19 @@ class BridgeClient extends ChangeNotifier {
               'cancelled',
             ].contains(_transferState.phase)) {
           _backgroundSend = false;
+        }
+
+        // A backend restart resets its event sequence to 0, so a stale cursor from
+        // the previous process would silently discard every new event (it always
+        // reads as "already seen"). Detect the new instance and treat it like an
+        // initial connect so the cursor fast-forwards instead of going blind.
+        if (_backendInstanceId != null &&
+            _status.instanceId.isNotEmpty &&
+            _status.instanceId != _backendInstanceId) {
+          _lastEventSeq = 0;
+        }
+        if (_status.instanceId.isNotEmpty) {
+          _backendInstanceId = _status.instanceId;
         }
 
         // Fast-forward cursor on initial connect to avoid replaying stale events
@@ -684,6 +698,7 @@ class BridgeClient extends ChangeNotifier {
   Future<bool> sendToDevice(
     DeviceModel device, {
     bool isBackground = false,
+    required String taskId,
   }) async {
     final requestId = _generateBridgeToken();
     try {
@@ -701,6 +716,7 @@ class BridgeClient extends ChangeNotifier {
         'address': device.address,
         'quiet': isBackground,
         'requestId': requestId,
+        'taskId': taskId,
       });
       if (resp.statusCode == 202) return true;
       final body = resp.body.isNotEmpty ? jsonDecode(resp.body) : null;

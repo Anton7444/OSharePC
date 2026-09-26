@@ -495,7 +495,11 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
     setState(() => _selectedAddress = device.address);
     final sent =
         await (widget.sendToDeviceOverride?.call(device) ??
-            widget.client.sendToDevice(device, isBackground: true));
+            widget.client.sendToDevice(
+              device,
+              isBackground: true,
+              taskId: _stagingController.taskId,
+            ));
     if (!mounted) return;
 
     setState(() => _clearAfterTransfer = true);

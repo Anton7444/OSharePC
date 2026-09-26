@@ -31,6 +31,7 @@ class DeviceModel {
 
 class EngineStatus {
   final int seq;
+  final String instanceId;
   final bool connected;
   final bool receiveEnabled;
   final String senderId;
@@ -46,6 +47,7 @@ class EngineStatus {
 
   EngineStatus({
     this.seq = 0,
+    this.instanceId = '',
     required this.connected,
     required this.receiveEnabled,
     required this.senderId,
@@ -63,6 +65,7 @@ class EngineStatus {
   factory EngineStatus.initial() {
     return EngineStatus(
       seq: 0,
+      instanceId: '',
       connected: false,
       receiveEnabled: true,
       senderId: '',
@@ -81,6 +84,7 @@ class EngineStatus {
   factory EngineStatus.fromJson(Map<String, dynamic> json) {
     return EngineStatus(
       seq: json['seq'] is num ? (json['seq'] as num).toInt() : 0,
+      instanceId: json['instanceId']?.toString() ?? '',
       connected: json['connected'] == true,
       receiveEnabled: json['receiveEnabled'] == true,
       senderId: json['senderId']?.toString() ?? '',
