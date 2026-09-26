@@ -254,12 +254,16 @@ class _HomePageState extends State<HomePage> {
                 offer: pendingOffer,
               ),
             ),
-          if (shouldShowReceiveTransferModal(
-            isActive: transfer.active,
-            phase: transfer.phase,
-            isWindowVisible: widget.client.mainWindowVisible,
-            resultWasHidden: transfer.isBackground,
-          ))
+          // This overlay is receive-only: an active send already gets its own
+          // foreground modal from SendTab (shouldShowSendTransferModal). Without
+          // the isSending guard, sending a file popped up both modals at once.
+          if (!transfer.isSending &&
+              shouldShowReceiveTransferModal(
+                isActive: transfer.active,
+                phase: transfer.phase,
+                isWindowVisible: widget.client.mainWindowVisible,
+                resultWasHidden: transfer.isBackground,
+              ))
             Positioned.fill(
               child: TransferStatusModal(
                 client: widget.client,
