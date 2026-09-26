@@ -16,7 +16,7 @@ import '../widgets/native_drop_zone.dart';
 // The native OLE hot-zone owns desktop hit-testing. The fixed Flutter window
 // stays hidden at idle, appears for a file drag, and displays the picker after
 // a successful drop.
-const panelDropTargetSize = Size(560, 260);
+const panelDropTargetSize = Size(420, 190);
 const panelExpandedMinWidth = 364.0; // two phone columns
 // Upper bound only: the staged panel hugs its content vertically.
 const panelExpandedHeight = 280.0;
@@ -720,7 +720,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
 
   Widget _buildSquareTarget(bool isDark, [double previewT = 0.0]) {
     final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
-    const baseSquareSize = 176.0;
+    const baseSquareSize = 150.0;
     final scale = 1.0 + (0.08 * previewT);
     return Center(
       child: Transform.scale(
@@ -741,7 +741,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
               ),
             ],
           ),
-          child: Icon(Icons.file_upload_rounded, color: accent, size: 46),
+          child: Icon(Icons.file_upload_rounded, color: accent, size: 40),
         ),
       ),
     );
