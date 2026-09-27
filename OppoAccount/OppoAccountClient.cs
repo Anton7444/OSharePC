@@ -204,8 +204,11 @@ public sealed class OppoAccountClient : IDisposable
             Content = new StringContent(encryptedBody, Encoding.UTF8),
         };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "UTF-8" };
-        request.Headers.UserAgent.ParseAdd(UserAgent);
-        request.Headers.Accept.ParseAdd("application/json, text/plain, */*");
+        // The captured UA string isn't a valid RFC 7231 product-token list (it embeds
+        // raw "key/value" pairs like "timeZone/Australia/Melbourne"), so the strongly
+        // typed UserAgent.ParseAdd rejects it — send it unvalidated like the rest.
+        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        request.Headers.TryAddWithoutValidation("Accept", "application/json, text/plain, */*");
 
         foreach (var (k, v) in BaseHeaders) request.Headers.TryAddWithoutValidation(k, v);
         if (extraHeaders != null)
