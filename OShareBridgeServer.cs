@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using OShareSender.OppoAccount;
 
 namespace OShareSender;
 
@@ -34,6 +35,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private int _shutdownRequested;
     private int _sendQuiet;
     private string? _sendRequestId;
+    private OppoAccountLoginSession? _oppoLoginSession;
+    private readonly SemaphoreSlim _oppoLoginGate = new(1, 1);
 
     public OShareBridgeServer(string authToken)
     {
@@ -345,6 +348,34 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Accepted(value: new { device = device.Name, address = device.Address, requestId });
         });
 
+        app.MapPost("/api/oppo-account/login/start", async () =>
+        {
+            await _oppoLoginGate.WaitAsync();
+            try
+            {
+                if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
+                _oppoLoginSession = new OppoAccountLoginSession();
+                _oppoLoginSession.Start((type, data) => Push(type, data));
+            }
+            finally { _oppoLoginGate.Release(); }
+            return Results.Ok(new { started = true });
+        });
+
+        app.MapPost("/api/oppo-account/login/cancel", async () =>
+        {
+            await _oppoLoginGate.WaitAsync();
+            try
+            {
+                if (_oppoLoginSession is not null)
+                {
+                    await _oppoLoginSession.DisposeAsync();
+                    _oppoLoginSession = null;
+                }
+            }
+            finally { _oppoLoginGate.Release(); }
+            return Results.Ok(new { cancelled = true });
+        });
+
         _app = app;
         await app.StartAsync();
         Log.Info($"Authenticated Flutter bridge listening on http://127.0.0.1:{Port}");
@@ -424,6 +455,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         ClearPendingTransfers();
+        if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
+        _oppoLoginGate.Dispose();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
         _sendGate.Dispose();

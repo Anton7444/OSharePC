@@ -70,6 +70,12 @@ class BridgeClient extends ChangeNotifier {
   DateTime? _lastProgressTime;
   int _lastProgressBytes = 0;
   String? _connectionIssue;
+  String? _oppoAccountQrUrl;
+  String? _oppoAccountStatus;
+  String? _oppoAccountName;
+  String? _oppoAccountError;
+  List<String>? _oppoAccountMethods;
+  bool _oppoAccountActive = false;
   void Function(String title, String message)? onNotification;
   void Function(bool success, String message)? onSendResult;
   void Function(TransferStateModel transfer)? onReceiveCompleted;
@@ -83,6 +89,12 @@ class BridgeClient extends ChangeNotifier {
   IncomingTransferOffer? get pendingIncomingOffer => _pendingIncomingOffer;
   bool get isConnecting => _isConnecting;
   String? get connectionIssue => _connectionIssue;
+  String? get oppoAccountQrUrl => _oppoAccountQrUrl;
+  String? get oppoAccountStatus => _oppoAccountStatus;
+  String? get oppoAccountName => _oppoAccountName;
+  String? get oppoAccountError => _oppoAccountError;
+  List<String>? get oppoAccountMethods => _oppoAccountMethods;
+  bool get oppoAccountActive => _oppoAccountActive;
 
   BridgeClient({
     String? bridgeToken,
@@ -585,6 +597,26 @@ class BridgeClient extends ChangeNotifier {
         );
         if (isSendingFailure) _backgroundSend = false;
         _pendingIncomingOffer = null;
+      } else if (type == 'oppoAccountQr' && data is Map) {
+        _oppoAccountQrUrl = data['qrcodeUrl']?.toString();
+        _oppoAccountStatus = 'INITIAL';
+      } else if (type == 'oppoAccountStatus' && data is Map) {
+        _oppoAccountStatus = data['status']?.toString();
+        final name = data['accountName']?.toString();
+        if (name != null && name.isNotEmpty) _oppoAccountName = name;
+      } else if (type == 'oppoAccountMethods' && data is Map) {
+        _oppoAccountActive = false;
+        final name = data['accountName']?.toString();
+        if (name != null && name.isNotEmpty) _oppoAccountName = name;
+        final list = data['methods'];
+        _oppoAccountMethods = list is List
+            ? list.map((m) => m.toString()).toList()
+            : <String>[];
+      } else if (type == 'oppoAccountError' && data is Map) {
+        _oppoAccountActive = false;
+        _oppoAccountError = data['error']?.toString() ?? 'Unknown error';
+      } else if (type == 'oppoAccountCancelled') {
+        _oppoAccountActive = false;
       } else if (type == 'state' && data is Map) {
         final st = data['state']?.toString() ?? '';
         if (st.contains('fail') ||
@@ -848,6 +880,46 @@ class BridgeClient extends ChangeNotifier {
 
   void dismissTransferModal() {
     _transferState = TransferStateModel();
+    notifyListeners();
+  }
+
+  /// Starts a "log in to OPPO account" attempt: the backend generates a fresh QR
+  /// code, waits for the phone to scan/confirm it, then fetches the account's
+  /// available 2FA methods. Progress arrives via oppoAccount* events.
+  Future<void> startOppoAccountLogin() async {
+    _oppoAccountQrUrl = null;
+    _oppoAccountStatus = null;
+    _oppoAccountName = null;
+    _oppoAccountError = null;
+    _oppoAccountMethods = null;
+    _oppoAccountActive = true;
+    notifyListeners();
+    try {
+      await _post('/api/oppo-account/login/start');
+    } catch (e) {
+      _oppoAccountActive = false;
+      _oppoAccountError = 'Could not reach the backend: $e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> cancelOppoAccountLogin() async {
+    _oppoAccountActive = false;
+    notifyListeners();
+    try {
+      await _post('/api/oppo-account/login/cancel');
+    } catch (e) {
+      debugPrint('Error cancelling OPPO account login: $e');
+    }
+  }
+
+  void clearOppoAccountState() {
+    _oppoAccountQrUrl = null;
+    _oppoAccountStatus = null;
+    _oppoAccountName = null;
+    _oppoAccountError = null;
+    _oppoAccountMethods = null;
+    _oppoAccountActive = false;
     notifyListeners();
   }
 
