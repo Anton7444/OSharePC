@@ -38,6 +38,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private OppoAccountLoginSession? _oppoLoginSession;
     private readonly SemaphoreSlim _oppoLoginGate = new(1, 1);
     private OppoAccountBleAdvertiser? _oppoBleAdvertiser;
+    private OppoWindowsSenselessAdvertiser? _oppoWindowsAdvertiser;
     private readonly SemaphoreSlim _oppoBleGate = new(1, 1);
 
     public OShareBridgeServer(string authToken)
@@ -398,6 +399,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             {
                 _oppoBleAdvertiser?.Dispose();
                 _oppoBleAdvertiser = null;
+                _oppoWindowsAdvertiser?.Dispose();
+                _oppoWindowsAdvertiser = null;
             }
             finally { _oppoBleGate.Release(); }
             return Results.Ok(new { stopped = true });
@@ -485,6 +488,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
         _oppoLoginGate.Dispose();
         _oppoBleAdvertiser?.Dispose();
+        _oppoWindowsAdvertiser?.Dispose();
         _oppoBleGate.Dispose();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
@@ -551,6 +555,11 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             var name = SettingsStore.Current.DeviceName ?? Environment.MachineName;
             _oppoBleAdvertiser = new OppoAccountBleAdvertiser(deviceId, name);
             _oppoBleAdvertiser.Start(ssoid);
+
+            _oppoWindowsAdvertiser?.Dispose();
+            _oppoWindowsAdvertiser = new OppoWindowsSenselessAdvertiser((byte)deviceId[0]);
+            _oppoWindowsAdvertiser.Start(ssoid);
+
             SettingsStore.Save(oppoSsoid: ssoid);
         }
         finally { _oppoBleGate.Release(); }
