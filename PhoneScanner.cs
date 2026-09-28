@@ -32,6 +32,15 @@ public sealed class PhoneDevice
     public string DeviceIdPart2 { get; set; } = "";
     /// <summary>OShare-style 4-hex sender id from the 27-byte payload.</summary>
     public string SenderId { get; set; } = "";
+    /// <summary>Legacy (0x6666/0x6667) kind only: this device's stable id, taken
+    /// directly from the trailing 12 hex-ASCII characters of the 0x6666 section —
+    /// self-contained, no multi-fragment address-rotation reconstruction needed
+    /// (unlike the Alliance kind's split 6+10 byte deviceId).</summary>
+    public string LegacyDeviceId { get; set; } = "";
+    /// <summary>Legacy kind only: the 3-character "same account" proof from the
+    /// 0x6667 section (com.oplus.oshare.utils.AccountManger#D) — see
+    /// OPPO_ACCOUNT_API_FINDINGS.md section 5f.</summary>
+    public string LegacyAccountId { get; set; } = "";
     public int Version { get; set; }
     public short Rssi { get; set; }
     public DateTimeOffset LastSeen { get; set; }
@@ -55,6 +64,7 @@ public sealed class PhoneDevice
                               DeviceIdPart2.Length == 10 &&
                               DeviceId.Length == 16 &&
                               LastCompleteAdvertisement != default,
+        PhoneKind.Legacy => LegacyDeviceId.Length == 12,
         _ => false,
     };
 
@@ -71,6 +81,7 @@ public sealed class PhoneDevice
     {
         PhoneKind.OShare => "OShare",
         PhoneKind.Alliance => $"Alliance ({BrandFromVender(Vender)})",
+        PhoneKind.Legacy => $"Legacy ({BrandFromVender(Vender)})",
         _ => "Legacy OEM"
     };
 
@@ -269,7 +280,8 @@ public sealed class PhoneScanner : IDisposable
         // by themselves to make a connect candidate.
         static bool IsKnownSectionUuid(ushort u) =>
             u == 0xFFFF || u == 0x01FF ||
-            u == 0x0703 || u == 0x0204 || u == 0x0704;
+            u == 0x0703 || u == 0x0204 || u == 0x0704 ||
+            u == 0x6666 || u == 0x6667;
 
         PhoneDevice device;
         bool shouldPublish;
@@ -278,10 +290,23 @@ public sealed class PhoneScanner : IDisposable
         {
             if (!_devices.TryGetValue(args.BluetoothAddress, out device!))
             {
-                var kind = sections.Any(s => s.Uuid16 is 0xFFFF or 0x01FF) ? PhoneKind.OShare : PhoneKind.Alliance;
+                var kind = sections.Any(s => s.Uuid16 is 0xFFFF or 0x01FF) ? PhoneKind.OShare
+                    : sections.Any(s => s.Uuid16 is 0x6666 or 0x6667) ? PhoneKind.Legacy
+                    : PhoneKind.Alliance;
                 ushort firstUuid = sections.Count > 0 ? sections[0].Uuid16 : (ushort)0;
                 if (!hasAllianceUuid && !IsKnownSectionUuid(firstUuid))
+                {
+                    // DIAGNOSTIC: log advertisements we'd otherwise silently discard,
+                    // so we can see what a phone in "Contacts only" mode actually
+                    // broadcasts (it may not use the legacy Alliance format at all —
+                    // see OPPO_ACCOUNT_API_FINDINGS.md section 5k for the modern
+                    // "senseless"/0xAFAF format this might turn out to match).
+                    if (sections.Count > 0)
+                        Log.Info($"BLE: unrecognized service-data {args.BluetoothAddress:X12} " +
+                                 $"[{string.Join(", ", sections.Select(s => $"{s.Uuid16:X4}:{Convert.ToHexString(s.Payload)}"))}] " +
+                                 $"rssi={args.RawSignalStrengthInDBm} allUuids=[{string.Join(",", adv.ServiceUuids)}]");
                     return;
+                }
                 device = new PhoneDevice { Address = args.BluetoothAddress, AddressType = args.BluetoothAddressType, Kind = kind };
                 _devices[device.Address] = device;
             }
@@ -386,6 +411,41 @@ public sealed class PhoneScanner : IDisposable
                         device.DeviceId = "";
                     }
                 }
+                else if (s.Uuid16 == 0x6666 && payload.Length >= 12)
+                {
+                    // Self-contained: the last 12 bytes are the deviceId written out
+                    // as its own hex-ASCII string (e.g. "F6FBC3C12E1D"), no split-
+                    // fragment reconstruction needed. Whatever precedes it is a UTF-8
+                    // device nickname.
+                    device.Kind = PhoneKind.Legacy;
+                    var idHex = Encoding.ASCII.GetString(payload[^12..]);
+                    if (idHex.All(Uri.IsHexDigit))
+                    {
+                        device.LegacyDeviceId = idHex.ToUpperInvariant();
+                        device.LastCompleteAdvertisement = now;
+                        device.LastIdentityFragmentSeen = now;
+                    }
+                    if (payload.Length > 12)
+                    {
+                        var n = Encoding.UTF8.GetString(payload[..^12]).Trim('\0', ' ');
+                        if (n.Length > 0) device.Name = n;
+                    }
+                }
+                else if (s.Uuid16 == 0x6667 && payload.Length >= 4)
+                {
+                    // advBrandType(1) + accountId(3, ASCII) + accountName(remainder,
+                    // UTF-8, NUL-padded) — see com.oplus.oshare.ble.impl.o#q and
+                    // AccountManger#D (OPPO_ACCOUNT_API_FINDINGS.md section 5f).
+                    device.Kind = PhoneKind.Legacy;
+                    device.Vender = payload[0];
+                    device.LegacyAccountId = Encoding.ASCII.GetString(payload[1..4]).Trim('\0');
+                    if (payload.Length > 4)
+                    {
+                        var accountName = Encoding.UTF8.GetString(payload[4..]).Trim('\0', ' ');
+                        if (accountName.Length > 0 && string.IsNullOrWhiteSpace(device.Name))
+                            device.Name = accountName;
+                    }
+                }
             }
 
             if (string.IsNullOrWhiteSpace(device.Name) && !string.IsNullOrWhiteSpace(adv.LocalName))
@@ -430,6 +490,7 @@ public sealed class PhoneScanner : IDisposable
             if (current.SenderId.Length == 0) current.SenderId = old.SenderId;
             if (current.Vender == 0) current.Vender = old.Vender;
             if (current.BleFlag == 0) current.BleFlag = old.BleFlag;
+            if (current.LegacyAccountId.Length == 0) current.LegacyAccountId = old.LegacyAccountId;
             _devices.Remove(old.Address);
             Log.Info($"BLE: merged rotated address {old.AddressStr} into {current.AddressStr} " +
                      $"identity={StableIdentity(current)}");
@@ -465,6 +526,8 @@ public sealed class PhoneScanner : IDisposable
         if (a.Kind != b.Kind) return false;
         if (a.DeviceId.Length == 16 && b.DeviceId.Length == 16)
             return string.Equals(a.DeviceId, b.DeviceId, StringComparison.OrdinalIgnoreCase);
+        if (a.LegacyDeviceId.Length == 12 && b.LegacyDeviceId.Length == 12)
+            return string.Equals(a.LegacyDeviceId, b.LegacyDeviceId, StringComparison.OrdinalIgnoreCase);
 
         return a.SenderId.Length > 0 &&
                string.Equals(a.SenderId, b.SenderId, StringComparison.OrdinalIgnoreCase) &&
@@ -475,9 +538,11 @@ public sealed class PhoneScanner : IDisposable
     public static string StableIdentity(PhoneDevice device) =>
         device.DeviceId.Length == 16
             ? $"deviceId:{device.DeviceId}"
-            : device.SenderId.Length > 0
-                ? $"senderId:{device.SenderId}"
-                : $"address:{device.AddressStr}";
+            : device.LegacyDeviceId.Length == 12
+                ? $"legacyDeviceId:{device.LegacyDeviceId}"
+                : device.SenderId.Length > 0
+                    ? $"senderId:{device.SenderId}"
+                    : $"address:{device.AddressStr}";
 
     private static DateTimeOffset Min(params DateTimeOffset[] values) =>
         values.Where(value => value != default).DefaultIfEmpty(default).Min();
