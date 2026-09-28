@@ -9,7 +9,9 @@ internal sealed record SavedSettings(
     int? ThemeMode = null,
     int? QuickSaveMode = null,
     bool? MinimizeToTray = null,
-    bool? CloseToTray = null);
+    bool? CloseToTray = null,
+    string? OppoSsoid = null,
+    string? OppoBleDeviceId = null);
 
 /// <summary>Persistent backend settings kept beside sender.log.</summary>
 internal static class SettingsStore
@@ -36,7 +38,9 @@ internal static class SettingsStore
                 ReadInt(root, "themeMode"),
                 ReadInt(root, "quickSaveMode"),
                 ReadBool(root, "minimizeToTray"),
-                ReadBool(root, "closeToTray"));
+                ReadBool(root, "closeToTray"),
+                ReadString(root, "oppoSsoid"),
+                ReadString(root, "oppoBleDeviceId"));
             return Current;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -56,7 +60,9 @@ internal static class SettingsStore
         int? themeMode = null,
         int? quickSaveMode = null,
         bool? minimizeToTray = null,
-        bool? closeToTray = null)
+        bool? closeToTray = null,
+        string? oppoSsoid = null,
+        string? oppoBleDeviceId = null)
     {
         SaveGate.Wait();
         try
@@ -68,7 +74,9 @@ internal static class SettingsStore
                 themeMode ?? Current.ThemeMode,
                 quickSaveMode ?? Current.QuickSaveMode,
                 minimizeToTray ?? Current.MinimizeToTray,
-                closeToTray ?? Current.CloseToTray);
+                closeToTray ?? Current.CloseToTray,
+                oppoSsoid ?? Current.OppoSsoid,
+                oppoBleDeviceId ?? Current.OppoBleDeviceId);
             Directory.CreateDirectory(DirectoryPath);
             var json = JsonSerializer.Serialize(new
             {
@@ -79,6 +87,8 @@ internal static class SettingsStore
                 quickSaveMode = Current.QuickSaveMode,
                 minimizeToTray = Current.MinimizeToTray,
                 closeToTray = Current.CloseToTray,
+                oppoSsoid = Current.OppoSsoid,
+                oppoBleDeviceId = Current.OppoBleDeviceId,
             },
                 new JsonSerializerOptions { WriteIndented = true });
             var tempPath = FilePath + ".tmp";

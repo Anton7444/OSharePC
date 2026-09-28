@@ -28,6 +28,32 @@ Everything past "list the 2FA methods" is still being reverse-engineered:
   `OPPO_ACCOUNT_API_FINDINGS.md` working notes (not in this repo) for the full
   investigation log.
 
+## The BLE "same account" beacon (`OppoAccount/OppoAccountBleAdvertiser.cs`)
+
+Separately from the cloud login above, `OppoAccountBleHash.cs` +
+`OppoAccountBleAdvertiser.cs` implement the actual mechanism OPPO/OnePlus phones use to
+flag a discovered peer as "same account" (skipping the manual accept tap) — reverse
+engineered from a decompiled OnePlus Share Android APK, not the iOS app. See
+`k9/c.java`, `com/oplus/oshare/ble/impl/o.java` (method `q`), `com/oplus/oshare/utils/
+AccountManger.java` (`D`) and `com/oplus/oshare/utils/b0.java` (`j`/`n`) in that
+decompile for the source this was ported from.
+
+The scheme needs a real, logged-in account's **ssoid** (not obtainable yet from this
+repo's own login flow — see above — but confirmed extractable from the real app's own
+iOS Keychain once you've logged in there once; `POST /api/oppo-account/ble-advertise/
+start` takes it as a plain string until this repo's own login flow reaches that far
+independently). Given that ssoid, the advertiser broadcasts two small BLE service-data
+blocks (UUIDs `0x3333`/`0x6667`) containing this PC's own persisted 6-byte device id and
+a 3-character `accountId` value any peer holding the same ssoid can independently
+recompute and match. It does not touch or spoof any other device — it only makes this
+PC broadcast something a genuinely-same-account phone will recognize as such.
+
+Untested against a real phone so far (no live device availed during this pass) — the
+crypto has been cross-checked bit-for-bit against an independent Python re-implementation
+of the same algorithm, but the actual BLE wire format (two separate legacy advertising
+PDUs standing in for what real devices split across ADV_IND + SCAN_RSP) has not been
+verified with a live scanner.
+
 This uses OPPO's private, undocumented API and an app-signing secret extracted from
 their shipped client. It's likely against their ToS and could change or break without
 notice on any app update. Only use with your own account; keep any UI entry point for
