@@ -37,6 +37,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private string? _sendRequestId;
     private OppoAccountLoginSession? _oppoLoginSession;
     private readonly SemaphoreSlim _oppoLoginGate = new(1, 1);
+    private OppoAccountBleAdvertiser? _oppoBleAdvertiser;
+    private readonly SemaphoreSlim _oppoBleGate = new(1, 1);
 
     public OShareBridgeServer(string authToken)
     {
@@ -378,6 +380,43 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Ok(new { cancelled = true });
         });
 
+        app.MapPost("/api/oppo-account/ble-advertise/start", async (OppoBleAdvertiseStartRequest body) =>
+        {
+            if (string.IsNullOrWhiteSpace(body.Ssoid))
+                return Results.BadRequest(new { error = "ssoid is required" });
+
+            await _oppoBleGate.WaitAsync();
+            try
+            {
+                var deviceId = SettingsStore.Current.OppoBleDeviceId;
+                if (string.IsNullOrEmpty(deviceId) || deviceId.Length != 6)
+                {
+                    deviceId = GenerateBleDeviceId();
+                    SettingsStore.Save(oppoBleDeviceId: deviceId);
+                }
+
+                _oppoBleAdvertiser?.Dispose();
+                var name = SettingsStore.Current.DeviceName ?? Environment.MachineName;
+                _oppoBleAdvertiser = new OppoAccountBleAdvertiser(deviceId, name);
+                _oppoBleAdvertiser.Start(body.Ssoid);
+                SettingsStore.Save(oppoSsoid: body.Ssoid);
+            }
+            finally { _oppoBleGate.Release(); }
+            return Results.Ok(new { started = true });
+        });
+
+        app.MapPost("/api/oppo-account/ble-advertise/stop", async () =>
+        {
+            await _oppoBleGate.WaitAsync();
+            try
+            {
+                _oppoBleAdvertiser?.Dispose();
+                _oppoBleAdvertiser = null;
+            }
+            finally { _oppoBleGate.Release(); }
+            return Results.Ok(new { stopped = true });
+        });
+
         _app = app;
         await app.StartAsync();
         Log.Info($"Authenticated Flutter bridge listening on http://127.0.0.1:{Port}");
@@ -459,6 +498,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         ClearPendingTransfers();
         if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
         _oppoLoginGate.Dispose();
+        _oppoBleAdvertiser?.Dispose();
+        _oppoBleGate.Dispose();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
         _sendGate.Dispose();
@@ -490,4 +531,17 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         string? OppoSsoid = null);
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null, string? TaskId = null);
+    private sealed record OppoBleAdvertiseStartRequest(string? Ssoid);
+
+    /// <summary>A random 6-byte identity for the OPPO "same account" BLE scheme,
+    /// generated once and persisted (SettingsStore.OppoBleDeviceId) — see
+    /// OppoAccountBleAdvertiser for how it's used.</summary>
+    private static string GenerateBleDeviceId()
+    {
+        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        var bytes = RandomNumberGenerator.GetBytes(6);
+        var chars = new char[6];
+        for (int i = 0; i < 6; i++) chars[i] = alphabet[bytes[i] % alphabet.Length];
+        return new string(chars);
+    }
 }
