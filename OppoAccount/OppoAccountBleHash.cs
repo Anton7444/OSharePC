@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace OShareSender.OppoAccount;
 
@@ -60,4 +62,57 @@ public static class OppoAccountBleHash
         else if (code.Length > 16) code = code[..16];
         return Encoding.UTF8.GetBytes(code);
     }
+
+    /// <summary>
+    /// The newer, actually-verified "same account" primitive — reverse engineered from
+    /// three decompiled system components (in order of delegation): the OPPO/OnePlus
+    /// Share app's PantaConnect SDK (com.oplus.pantaconnect.account.a#b →
+    /// com.oplus.pantaconnect.connection.processor's DeviceConnectionServerImpl#options,
+    /// which does a plain Arrays.equals on this value with no per-peer key at all),
+    /// the com.heytap.accessory system service it delegates to, and finally
+    /// com.oplus.ndsf (e8/d.java#getAccountHash, backed by p8/a.java#t) which actually
+    /// computes it from the real logged-in ssoid ("userid").
+    ///
+    /// Algorithm (p8.a#t, a NIST-SP-800-56A-style hash-based KDF, truncated):
+    ///   digest = ""
+    ///   for i in 0..ceil(length/32) inclusive:
+    ///     digest = SHA256(digest || ascii(f"0x{i:02X}") || ssoid_utf8)
+    ///     output += digest
+    ///   return output[0:length]
+    /// For length &lt;= 32 (the only case that matters here) this reduces to just the
+    /// first iteration: SHA256("0x00" + ssoid)[0:length].
+    ///
+    /// Confirmed byte-for-byte against a real captured accountId ("39154E") broadcast
+    /// by a real device on the account this was tested with — see
+    /// OPPO_ACCOUNT_API_FINDINGS.md section 5h. This is what the real
+    /// {"method":"iBeacon_advertise",...,"account_id":"..."} JSON's account_id field
+    /// contains, and (separately) what DeviceConnectionServerImpl.options() compares
+    /// via plain byte equality during an actual GATT/RTC connection to decide
+    /// AccountState.SAME_ACCOUNT — no peer-specific key, no encryption, unlike the
+    /// older o.java scheme above.
+    /// </summary>
+    public static byte[] ComputeDsfAccountHash(string ssoid, int length = 3)
+    {
+        if (length <= 0 || length > 32) throw new ArgumentOutOfRangeException(nameof(length));
+        var ssoidBytes = Encoding.UTF8.GetBytes(ssoid);
+        var digest = Array.Empty<byte>();
+        var output = new List<byte>();
+        var iterations = (int)Math.Ceiling(length / 32.0);
+        for (var i = 0; i <= iterations; i++)
+        {
+            using var sha = SHA256.Create();
+            sha.TransformBlock(digest, 0, digest.Length, null, 0);
+            var marker = Encoding.UTF8.GetBytes($"0x{i:X2}");
+            sha.TransformBlock(marker, 0, marker.Length, null, 0);
+            sha.TransformFinalBlock(ssoidBytes, 0, ssoidBytes.Length);
+            digest = sha.Hash!;
+            output.AddRange(digest);
+        }
+        return output.Take(length).ToArray();
+    }
+
+    /// <summary>Uppercase hex of <see cref="ComputeDsfAccountHash"/> — the exact string
+    /// format used in the real "account_id" JSON field (e.g. "39154E").</summary>
+    public static string ComputeDsfAccountIdHex(string ssoid, int length = 3) =>
+        Convert.ToHexString(ComputeDsfAccountHash(ssoid, length));
 }

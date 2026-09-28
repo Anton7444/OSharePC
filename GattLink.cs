@@ -72,6 +72,16 @@ public sealed class GattLink : IDisposable
     public static readonly Guid OConnectNotifyUuid = new("00009898-0000-1000-8000-00805f9b34fb");
     public static readonly Guid CccdUuid = new("00002902-0000-1000-8000-00805f9b34fb");
 
+    /// <summary>com.heytap.accessory's PantaConnect "OSHARE_IBEACON_BUSINESS" GATT
+    /// characteristic (k9.c.C in the decompiled OShare app) — an unencrypted JSON
+    /// write channel where a peer just declares {"is_same_account": true, ...} and
+    /// the receiver takes it at face value (see com.oplus.oshare.ble.impl.w9.b#b /
+    /// #e, and OPPO_ACCOUNT_API_FINDINGS.md section 5g/5h). Only present on the
+    /// phone's GATT table while its own iBeacon/cross-device-link subsystem is
+    /// actively running — writing here is a best-effort opportunistic attempt, not
+    /// something we can rely on being available every session.</summary>
+    public static readonly Guid IBeaconCharUuid = new("00009892-0000-1000-8000-00805f9b34fb");
+
     private BluetoothLEDevice? _device;
     private GattSession? _session;
     private readonly List<Windows.Devices.Bluetooth.GenericAttributeProfile.GattDeviceService> _services = new();
@@ -79,6 +89,7 @@ public sealed class GattLink : IDisposable
     public GattCharacteristic? OConnectReadChar { get; private set; }
     public GattCharacteristic? OConnectWriteChar { get; private set; }
     public GattCharacteristic? OConnectNotifyChar { get; private set; }
+    public GattCharacteristic? IBeaconChar { get; private set; }
 
     public static Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow) =>
         ConnectAsync(bluetoothAddress, flow, retries: 3, status: null, CancellationToken.None);
@@ -197,6 +208,14 @@ public sealed class GattLink : IDisposable
 
                 try
                 {
+                    var allServices = await link._device.GetGattServicesAsync(BluetoothCacheMode.Uncached);
+                    if (allServices.Status == GattCommunicationStatus.Success)
+                        Log.Info($"BLE: full service list: [{string.Join(", ", allServices.Services.Select(s => ShortUuid(s.Uuid)))}]");
+                }
+                catch (Exception ex) { Log.Warn($"BLE: full service dump failed: {ex.Message}"); }
+
+                try
+                {
                     await link.EnumerateAsync(flow, discoveredServices);
                     return link;
                 }
@@ -235,12 +254,15 @@ public sealed class GattLink : IDisposable
                 var charsResult = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
                 if (charsResult.Status == GattCommunicationStatus.Success)
                 {
+                    Log.Info($"BLE: service 9999 full characteristic list: [{string.Join(", ", charsResult.Characteristics.Select(c => ShortUuid(c.Uuid)))}]");
                     foreach (var c in charsResult.Characteristics)
                     {
                         if (c.Uuid == OConnectReadUuid) OConnectReadChar = c;
                         else if (c.Uuid == OConnectWriteUuid) OConnectWriteChar = c;
                         else if (c.Uuid == OConnectNotifyUuid) OConnectNotifyChar = c;
+                        else if (c.Uuid == IBeaconCharUuid) IBeaconChar = c;
                     }
+                    if (IBeaconChar is not null) Log.Info("BLE: 0x9892 iBeacon characteristic IS present this session");
                 }
 
                 // Fallback for drivers that don't return all characteristics in one range query
@@ -452,6 +474,19 @@ public sealed class GattLink : IDisposable
         // 0. Windows negotiates the ATT MTU automatically; read the effective PDU size from the active session
         int maxPdu = _session?.MaxPduSize ?? 247;
         Log.Info($"BLE: effective ATT MTU {maxPdu}");
+
+        // Best-effort, independent of the rest of this flow: if the phone's iBeacon
+        // business characteristic happened to be present this session, declare
+        // same-account membership on it (see TryWriteIBeaconSameAccountAsync). This
+        // cannot make anything worse — the write either succeeds or the
+        // characteristic simply wasn't there, and the pv=1/pv=5 flow below runs
+        // exactly as it would have anyway.
+        if (!string.IsNullOrEmpty(oppoSsoid))
+        {
+            var beaconDeviceId = SettingsStore.Current.OppoBleDeviceId ?? senderName;
+            try { await TryWriteIBeaconSameAccountAsync(oppoSsoid, beaconDeviceId, senderName, ct); }
+            catch (Exception ex) { Log.Warn($"BLE: iBeacon same-account write failed: {ex.Message}"); }
+        }
 
         // 1. subscribe 0x9898 notifications (account challenge + wlan-ip messages).
         //    Every phone->PC message in the iOS-mode flow (account challenge, wlan
@@ -733,6 +768,42 @@ public sealed class GattLink : IDisposable
         var result = await OConnectWriteChar!.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse);
         if (result != GattCommunicationStatus.Success)
             throw new InvalidOperationException($"BLE: 9896 write failed ({result})");
+    }
+
+    /// <summary>Opportunistic write to the iBeacon business characteristic (0x9892),
+    /// declaring same-account membership the way a real iPhone linked to the same
+    /// account does (com.oplus.oshare.ble.impl.w9.b#e, method "iBeacon_advertise").
+    /// The receiver (com.oplus.oshare.ble.impl.w9.b#b) trusts "is_same_account"
+    /// verbatim with no further cryptographic check — see
+    /// OPPO_ACCOUNT_API_FINDINGS.md section 5g/5h. No-op if 0x9892 wasn't found on
+    /// this phone's GATT table this session (its iBeacon subsystem wasn't running).</summary>
+    public async Task<bool> TryWriteIBeaconSameAccountAsync(string oppoSsoid, string deviceId, string deviceName, CancellationToken ct = default)
+    {
+        if (IBeaconChar is null)
+        {
+            Log.Info("BLE: 0x9892 not present this session — skipping iBeacon same-account write");
+            return false;
+        }
+
+        var accountId = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(oppoSsoid);
+        var json = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["method"] = "iBeacon_advertise",
+            ["data"] = new Dictionary<string, object>
+            {
+                ["cpv"] = "A",
+                ["device_id"] = deviceId,
+                ["device_name"] = deviceName,
+                ["is_same_account"] = true,
+                ["device_type"] = "6", // DeviceType.PC isn't in the observed set (4=iPhone); best-effort placeholder
+                ["account_id"] = accountId,
+            },
+        });
+        Log.Info($"BLE: 9892 iBeacon_advertise <- {json}");
+        var payload = System.Text.Encoding.UTF8.GetBytes(json);
+        var result = await IBeaconChar.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse);
+        Log.Info($"BLE: 9892 write result = {result}");
+        return result == GattCommunicationStatus.Success;
     }
 
     private static string ReadString(IBuffer buffer)
