@@ -94,8 +94,7 @@ public sealed class OppoAccountClient : IDisposable
         var result = await CallAsync(QrHost, "/identity/v1/authn/scan-code/generate-qrcode",
             new Dictionary<string, object?> { ["appId"] = "usercenter-sdk" }, traceIdPrefix: "LG_", ct: ct);
 
-        if (result.RootElement.GetProperty("code").GetInt32() != 200)
-            throw new InvalidOperationException($"generate-qrcode failed: {result.RootElement}");
+        EnsureCodeOk(result, "generate-qrcode");
 
         var data = result.RootElement.GetProperty("data");
         return new QrCodeInfo(data.GetProperty("qid").GetString()!, data.GetProperty("qrcodeUrl").GetString()!);
@@ -110,6 +109,8 @@ public sealed class OppoAccountClient : IDisposable
     {
         var result = await CallAsync(QrHost, "/identity/v1/authn/scan-code/check-qrcode",
             new Dictionary<string, object?> { ["qid"] = qid }, traceIdPrefix: "LG_", ct: ct);
+
+        EnsureCodeOk(result, "check-qrcode");
 
         var data = result.RootElement.GetProperty("data");
         return new QrCodeStatus(
@@ -129,6 +130,8 @@ public sealed class OppoAccountClient : IDisposable
         var result = await CallAsync(AuthHost, "/identity/v1/authn/check",
             new Dictionary<string, object?> { ["qid"] = qid }, traceIdPrefix: "WEB_", ct: ct);
 
+        EnsureCodeOk(result, "authn/check");
+
         var data = result.RootElement.GetProperty("data");
         return new AuthnCheckResult(
             data.GetProperty("processToken").GetString()!,
@@ -147,6 +150,8 @@ public sealed class OppoAccountClient : IDisposable
             traceIdPrefix: "WEB_",
             extraHeaders: new Dictionary<string, string> { ["x-validation-method"] = "scan" },
             ct: ct);
+
+        EnsureCodeOk(result, "authn/validate");
 
         var data = result.RootElement.GetProperty("data");
         return new AuthnValidateResult(
@@ -170,6 +175,8 @@ public sealed class OppoAccountClient : IDisposable
                 ["deviceToken"] = new Dictionary<string, object?>(),
             },
             traceIdPrefix: "WEB_", ct: ct);
+
+        EnsureCodeOk(result, "verification/list");
 
         var data = result.RootElement.GetProperty("data");
         var methods = new List<string>();
@@ -220,10 +227,23 @@ public sealed class OppoAccountClient : IDisposable
 
         using var response = await _http.SendAsync(request, ct);
         var bodyText = await response.Content.ReadAsStringAsync(ct);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"{path} HTTP {(int)response.StatusCode}: {bodyText}");
 
         var decrypted = envelope.DecryptBody(bodyText);
         return JsonDocument.Parse(decrypted);
+    }
+
+    /// <summary>Every endpoint here replies {"code":200,"data":{...}} on success. Any
+    /// other shape (rate limiting, validation errors, etc. — all observed in practice)
+    /// has no "data" key, so blindly reading it throws an unhelpful, generic
+    /// KeyNotFoundException ("The given key was not present in the dictionary.") with
+    /// no indication of what actually went wrong. Call this before reading "data".</summary>
+    private static void EnsureCodeOk(JsonDocument result, string endpointLabel)
+    {
+        var code = result.RootElement.TryGetProperty("code", out var c) ? c.GetInt32() : (int?)null;
+        if (code != 200)
+            throw new InvalidOperationException($"{endpointLabel} failed: {result.RootElement}");
     }
 
     public void Dispose() => _http.Dispose();
