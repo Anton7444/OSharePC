@@ -551,10 +551,20 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 SettingsStore.Save(oppoBleDeviceId: deviceId);
             }
 
+            // Windows BLE adapters typically only host one legacy advertising set
+            // at a time, and the receive-side connectable GATT advert (0x8881) is
+            // deliberately kept as the permanent slot winner (see SenderEngine.cs's
+            // UpdateCoordination) since phone->PC quick-save receiving depends on
+            // it. This advertiser therefore usually won't get real airtime while
+            // receive mode is on -- confirmed via a live nRF Connect scan showing
+            // only 0x180A/0x8881 even after isolating it with nothing else running
+            // (see OPPO_ACCOUNT_API_FINDINGS.md section 5k) -- but starting it
+            // anyway is harmless (non-connectable, doesn't fight 8881 for GATT
+            // connections) and lets it pick up the slot on devices/moments where
+            // 8881 isn't actively holding it.
+            _engine.FallbackAdvertiser.Pause();
             _oppoBleAdvertiser?.Dispose();
-            var name = SettingsStore.Current.DeviceName ?? Environment.MachineName;
-            _oppoBleAdvertiser = new OppoAccountBleAdvertiser(deviceId, name);
-            _oppoBleAdvertiser.Start(ssoid);
+            _oppoBleAdvertiser = null;
 
             _oppoWindowsAdvertiser?.Dispose();
             _oppoWindowsAdvertiser = new OppoWindowsSenselessAdvertiser((byte)deviceId[0]);
