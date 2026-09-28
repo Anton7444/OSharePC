@@ -112,6 +112,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             ConfirmViaBridge(offer.SenderId, $"Wi-Fi Direct: {offer.Ssid}", "1", offer.SenderId);
 
         await _engine.StartAsync(SenderEngine.DefaultPort);
+        StartOppoBleAdvertiserIfConfigured();
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
@@ -263,6 +264,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 minimizeToTray: body.MinimizeToTray,
                 closeToTray: body.CloseToTray,
                 oppoSsoid: body.OppoSsoid);
+            if (!string.IsNullOrWhiteSpace(body.OppoSsoid))
+                await StartOppoBleAdvertiserAsync(body.OppoSsoid);
             return Results.Ok(new
             {
                 deviceName = _engine.Advertiser.DeviceName,
@@ -384,24 +387,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         {
             if (string.IsNullOrWhiteSpace(body.Ssoid))
                 return Results.BadRequest(new { error = "ssoid is required" });
-
-            await _oppoBleGate.WaitAsync();
-            try
-            {
-                var deviceId = SettingsStore.Current.OppoBleDeviceId;
-                if (string.IsNullOrEmpty(deviceId) || deviceId.Length != 6)
-                {
-                    deviceId = GenerateBleDeviceId();
-                    SettingsStore.Save(oppoBleDeviceId: deviceId);
-                }
-
-                _oppoBleAdvertiser?.Dispose();
-                var name = SettingsStore.Current.DeviceName ?? Environment.MachineName;
-                _oppoBleAdvertiser = new OppoAccountBleAdvertiser(deviceId, name);
-                _oppoBleAdvertiser.Start(body.Ssoid);
-                SettingsStore.Save(oppoSsoid: body.Ssoid);
-            }
-            finally { _oppoBleGate.Release(); }
+            await StartOppoBleAdvertiserAsync(body.Ssoid);
             return Results.Ok(new { started = true });
         });
 
@@ -543,5 +529,40 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         var chars = new char[6];
         for (int i = 0; i < 6; i++) chars[i] = alphabet[bytes[i] % alphabet.Length];
         return new string(chars);
+    }
+
+    /// <summary>Starts (or restarts) the same-account BLE beacon for the given ssoid,
+    /// generating and persisting a device id on first use. Called both from the manual
+    /// start endpoint and automatically whenever a real ssoid is configured, so no
+    /// dedicated UI action is required to keep the beacon running.</summary>
+    private async Task StartOppoBleAdvertiserAsync(string ssoid)
+    {
+        await _oppoBleGate.WaitAsync();
+        try
+        {
+            var deviceId = SettingsStore.Current.OppoBleDeviceId;
+            if (string.IsNullOrEmpty(deviceId) || deviceId.Length != 6)
+            {
+                deviceId = GenerateBleDeviceId();
+                SettingsStore.Save(oppoBleDeviceId: deviceId);
+            }
+
+            _oppoBleAdvertiser?.Dispose();
+            var name = SettingsStore.Current.DeviceName ?? Environment.MachineName;
+            _oppoBleAdvertiser = new OppoAccountBleAdvertiser(deviceId, name);
+            _oppoBleAdvertiser.Start(ssoid);
+            SettingsStore.Save(oppoSsoid: ssoid);
+        }
+        finally { _oppoBleGate.Release(); }
+    }
+
+    /// <summary>Called on backend startup and whenever settings are saved — starts the
+    /// beacon if a real ssoid is already on file, so it survives process restarts
+    /// without the user re-entering anything.</summary>
+    private void StartOppoBleAdvertiserIfConfigured()
+    {
+        var ssoid = SettingsStore.Current.OppoSsoid;
+        if (!string.IsNullOrWhiteSpace(ssoid))
+            _ = StartOppoBleAdvertiserAsync(ssoid);
     }
 }
