@@ -28,6 +28,38 @@ Everything past "list the 2FA methods" is still being reverse-engineered:
   `OPPO_ACCOUNT_API_FINDINGS.md` working notes (not in this repo) for the full
   investigation log.
 
+## Where the ssoid is actually used today: the PC→phone accept-skip (`GattLink.cs`)
+
+The concrete reason this repo wants a real ssoid at all is **not** phone→PC discovery
+(that direction already has OShare's own accountless "quick save" option) — it's
+**PC→phone**: today, sending files from this PC to a phone always makes the phone show
+a manual "accept" prompt, even between devices on the same real OPPO account.
+
+`GattLink.OConnectLanSendAsync` already implements most of the stock 互传/OPlus-Connect
+BLE protocol's account-challenge exchange (state1/state3 over characteristic `0x9896`,
+an `account_id` notify/response round-trip over `0x9898`), but the response it built
+was wrong: it just decrypted the phone's challenge and re-encrypted the *same* value
+back. Decompiling a OnePlus Share Android APK's own handler for this exact exchange
+(`com.oplus.oshare.ble.impl.w#j`) shows the phone does not compare against what it
+sent — it compares the decrypted response against `AccountManger.y()`, i.e. **its own
+logged-in account's `SHA-256(ssoid)`** (`AccountManger.S`). Echoing the challenge back
+can never match that, so the phone always falls through to the manual-accept path
+(`com.oplus.oshare.ble.impl.w#A`).
+
+Fixed in `GattLink.cs` + new `OppoAccount/OppoSsoidHash.cs`: when a real `ssoid` is
+configured (`SettingsStore.Current.OppoSsoid`, settable via `/api/settings` or the
+Settings page's "OPPO account ssoid (advanced)" field), the response now sends
+`SHA-256(ssoid)` (hex, matching `AccountManger.S`) instead of echoing the challenge.
+This only activates when a real ssoid is present *and* the `0x9898` notification
+subscription actually succeeded this session (`GattLink`'s existing `pv=1` fallback,
+chosen specifically because some builds expose no CCCD there, stays the default
+otherwise — announcing `pv=5` without being able to receive the phone's challenge would
+strand the transfer, so a timeout there now falls back to the manual-accept path
+instead of throwing).
+
+**Not yet verified against a real phone** — the logic matches the decompiled source
+exactly, but no live PC→phone transfer has been run against it yet.
+
 This uses OPPO's private, undocumented API and an app-signing secret extracted from
 their shipped client. It's likely against their ToS and could change or break without
 notice on any app update. Only use with your own account; keep any UI entry point for

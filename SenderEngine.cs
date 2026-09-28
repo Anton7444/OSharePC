@@ -484,7 +484,8 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
                 s => TransferStateChanged?.Invoke(_staged.TaskId, s),
                 phoneConnected: () => Server.WsConnected || _staged.Complete,
                 waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
-                ct: ct);
+                ct: ct,
+                oppoSsoid: SettingsStore.Current.OppoSsoid);
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
         }
 

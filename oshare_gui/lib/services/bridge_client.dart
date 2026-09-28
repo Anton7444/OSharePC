@@ -839,6 +839,7 @@ class BridgeClient extends ChangeNotifier {
     int? quickSaveMode,
     bool? minimizeToTray,
     bool? closeToTray,
+    String? oppoSsoid,
   }) async {
     try {
       final payload = <String, dynamic>{};
@@ -847,6 +848,7 @@ class BridgeClient extends ChangeNotifier {
       if (quickSaveMode != null) payload['quickSaveMode'] = quickSaveMode;
       if (minimizeToTray != null) payload['minimizeToTray'] = minimizeToTray;
       if (closeToTray != null) payload['closeToTray'] = closeToTray;
+      if (oppoSsoid != null) payload['oppoSsoid'] = oppoSsoid;
 
       final resp = await _postJson('/api/settings', payload);
       if (resp.statusCode == 200) {

@@ -442,7 +442,7 @@ public sealed class GattLink : IDisposable
         LanInfo lan, int serverPort, OShareCrypto crypto, string senderName, int fileCount,
         Action<string>? status = null, Func<bool>? phoneConnected = null,
         Func<TimeSpan, CancellationToken, Task<bool>>? waitForPhoneConnectedAsync = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? oppoSsoid = null)
     {
         if (OConnectReadChar is null || OConnectWriteChar is null || OConnectNotifyChar is null)
             throw new InvalidOperationException(
@@ -530,42 +530,72 @@ public sealed class GattLink : IDisposable
             var sessionKey = crypto.DeriveSharedSecret(phonePub);
             var (cbcKey, cbcIv) = OShareCrypto.CbcKeyFromSecret(sessionKey);
 
-            // 3. state-1 (within the 5s timer): pv=5 selects the OConnect account path
+            // 3. state-1 (within the 5s timer): pv=5 selects the OConnect account path.
+            //    Only announce pv=5 when we actually have both a real ssoid to offer AND
+            //    a working 0x9898 notification subscription — otherwise stay on the
+            //    proven pv=1 manual-accept path (see OConnectPv's own comment for why
+            //    pv=5 was avoided by default: some builds expose no CCCD on 0x9898, and
+            //    announcing pv=5 without being able to receive the phone's challenge
+            //    would strand the transfer instead of falling back gracefully).
+            var effectivePv = (!string.IsNullOrEmpty(oppoSsoid) && notificationsSubscribed) ? 5 : OConnectPv;
+            Log.Info($"BLE: OConnect pv={effectivePv} (ssoid configured={!string.IsNullOrEmpty(oppoSsoid)}, notify subscribed={notificationsSubscribed})");
             var name = senderName ?? "PC";
-            while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount)).Length > maxPdu - 3 && name.Length > 4)
+            while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, effectivePv)).Length > maxPdu - 3 && name.Length > 4)
                 name = name[..^2];
-            var state1 = JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount));
+            var state1 = JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, effectivePv));
             Log.Info($"BLE: 9896 state1 <- {state1} ({state1.Length}B, mtu {maxPdu})");
             await WriteOConnectSingle(state1);
 
-            // 4. (pv>=5 only) N=6: the phone notifies {"account_id":<enc>} - decrypt it
-            //    (encrypted with the same session key we hold) and echo it back.
+            // 4. (pv>=5 only) N=6: the phone notifies {"account_id":<enc>}. The phone's
+            //    own handler (decompiled: com.oplus.oshare.ble.impl.w#j) decrypts OUR
+            //    response and compares it against ITS OWN AccountManger.y() — i.e. the
+            //    SHA-256 hex of the logged-in account's ssoid (see
+            //    OPPO_ACCOUNT_API_FINDINGS.md section 5f/5g) — NOT against whatever it
+            //    originally sent. Echoing the phone's own challenge back (the previous
+            //    behavior here) can never match that check; it only silently falls
+            //    through to the manual-accept path (com.oplus.oshare.ble.impl.w#A).
+            //    Sending the real account's ssoid hash is what actually gets the phone
+            //    to skip the manual "accept" tap.
             //    NOTE: the pad DOES send the challenge on the air (HCI log:09:59:46.614
             //    GATTS_HandleValueNotification) but Windows drops it - 0x9898 has no CCCD
             //    in the pad's GATT table so Windows never subscribes. With pv<5 we never
             //    need to receive anything: the card + accept path needs only writes.
-            if (OConnectPv >= 5)
+            if (effectivePv >= 5)
             {
                 status?.Invoke("waiting for phone account validation...");
-                var challengeJson = await accountNotifyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
-                using var challenge = JsonDocument.Parse(challengeJson);
-                var encPhoneAccount = challenge.RootElement.TryGetProperty("account_id", out var ai)
-                    ? ai.GetString() : null;
-                if (string.IsNullOrEmpty(encPhoneAccount))
-                    throw new InvalidOperationException("BLE: account challenge had no account_id");
-                var phoneAccount = OShareCrypto.CbcDecryptFromB64(cbcKey, cbcIv, encPhoneAccount);
-                Log.Info($"BLE: account challenge decrypted (account len {phoneAccount.Length})");
-
-                var accountResp = JsonSerializer.Serialize(new Dictionary<string, object>
+                try
                 {
-                    ["account_id"] = OShareCrypto.CbcEncryptToB64(cbcKey, cbcIv, phoneAccount),
-                });
-                Log.Info($"BLE: 9896 account response <- {accountResp}");
-                await WriteOConnectSingle(accountResp);
+                    var challengeJson = await accountNotifyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+                    using var challenge = JsonDocument.Parse(challengeJson);
+                    var encPhoneAccount = challenge.RootElement.TryGetProperty("account_id", out var ai)
+                        ? ai.GetString() : null;
+                    if (string.IsNullOrEmpty(encPhoneAccount))
+                        throw new InvalidOperationException("account challenge had no account_id");
+                    var phoneAccount = OShareCrypto.CbcDecryptFromB64(cbcKey, cbcIv, encPhoneAccount);
+                    Log.Info($"BLE: account challenge decrypted (account len {phoneAccount.Length})");
 
-                // 5. (pv>=5 only) the phone validates, notifies its wlan offer and moves
-                //    to N=3. We don't need that message - our state3 offer doesn't depend
-                //    on it - so we skip waiting for it entirely.
+                    var proof = OppoAccount.OppoSsoidHash.Hash(oppoSsoid!);
+                    var accountResp = JsonSerializer.Serialize(new Dictionary<string, object>
+                    {
+                        ["account_id"] = OShareCrypto.CbcEncryptToB64(cbcKey, cbcIv, proof),
+                    });
+                    Log.Info($"BLE: 9896 account response <- {accountResp}");
+                    await WriteOConnectSingle(accountResp);
+
+                    // the phone validates, notifies its wlan offer and moves to N=3. We
+                    // don't need that message - our state3 offer doesn't depend on it -
+                    // so we skip waiting for it entirely.
+                }
+                catch (Exception ex) when (ex is TimeoutException or OperationCanceledException && !ct.IsCancellationRequested)
+                {
+                    // The phone announced pv=5 support via our own state1, but never
+                    // actually delivered the 0x9898 challenge in time (e.g. this specific
+                    // build/session still can't reach the notify despite CCCD having
+                    // subscribed OK) — fall through exactly like the pv=1 path rather
+                    // than aborting the whole transfer. The phone likely still shows the
+                    // manual accept prompt in this case.
+                    Log.Warn("BLE: account challenge did not arrive in time — falling back to the manual accept prompt");
+                }
             }
             else
             {
@@ -672,21 +702,24 @@ public sealed class GattLink : IDisposable
     }
 
     /// <summary>
-    /// The OPlus-Connect protocol version we announce in state-1. pv&lt;5 makes the pad
-    /// show the plain receive card (accept button) — the whole flow then needs BLE
-    /// WRITES only. pv&gt;=5 would use the account challenge, whose challenge/wlan-offer
-    /// messages arrive as notifications on 0x9898 — the pad's GATT table has no CCCD
-    /// there, Windows cannot subscribe, and (HCI-verified) Windows drops those
-    /// notifications even though the pad puts them on the air. So we stay on pv=1.
+    /// Default OPlus-Connect protocol version when we announce state-1. pv&lt;5 makes
+    /// the pad show the plain receive card (accept button) — the whole flow then needs
+    /// BLE WRITES only. pv&gt;=5 uses the account challenge, whose challenge/wlan-offer
+    /// messages arrive as notifications on 0x9898 — on some builds the pad's GATT table
+    /// exposes no CCCD there and Windows cannot subscribe (HCI-verified: the pad puts
+    /// the notification on the air but Windows drops it), so pv=5 is only announced
+    /// (OConnectLanSendAsync's effectivePv) when a real ssoid is configured AND the
+    /// 0x9898 subscription actually succeeded this session — otherwise this default
+    /// (proven, manual-accept) value is used.
     /// </summary>
     private static readonly int OConnectPv = 1;
 
-    private static Dictionary<string, object> BuildState1(string pubKey, string dname, int fileCount) => new()
+    private static Dictionary<string, object> BuildState1(string pubKey, string dname, int fileCount, int pv) => new()
     {
         ["key"] = pubKey,
         ["isFast"] = 0,
         ["version"] = "10302",
-        ["pv"] = OConnectPv,
+        ["pv"] = pv,
         ["type"] = "file/*",
         ["number"] = Math.Max(1, fileCount).ToString(),
         ["dname"] = dname,

@@ -259,7 +259,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 themeMode: body.ThemeMode,
                 quickSaveMode: body.QuickSaveMode,
                 minimizeToTray: body.MinimizeToTray,
-                closeToTray: body.CloseToTray);
+                closeToTray: body.CloseToTray,
+                oppoSsoid: body.OppoSsoid);
             return Results.Ok(new
             {
                 deviceName = _engine.Advertiser.DeviceName,
@@ -268,6 +269,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 quickSaveMode = SettingsStore.Current.QuickSaveMode,
                 minimizeToTray = SettingsStore.Current.MinimizeToTray,
                 closeToTray = SettingsStore.Current.CloseToTray,
+                oppoSsoid = SettingsStore.Current.OppoSsoid,
             });
         });
 
@@ -484,7 +486,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         int? ThemeMode,
         int? QuickSaveMode,
         bool? MinimizeToTray,
-        bool? CloseToTray);
+        bool? CloseToTray,
+        string? OppoSsoid = null);
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null, string? TaskId = null);
 }

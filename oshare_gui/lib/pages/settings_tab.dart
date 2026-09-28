@@ -45,12 +45,28 @@ class _SettingsTabState extends State<SettingsTab> {
   bool _launchAtStartup = false;
   bool _startMinimized = false;
   bool _receivePopupEnabled = true;
+  final _oppoSsoidController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _loadTrayPrefs();
     _loadStartupPrefs();
+  }
+
+  Future<void> _saveOppoSsoid() async {
+    final ssoid = _oppoSsoidController.text.trim();
+    final ok = await widget.client.updateSettings(oppoSsoid: ssoid);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? appText(widget.currentLanguage, 'oppoSsoidSaved')
+              : appText(widget.currentLanguage, 'oppoSsoidSaveFailed'),
+        ),
+      ),
+    );
   }
 
   Future<void> _loadStartupPrefs() async {
@@ -137,6 +153,7 @@ class _SettingsTabState extends State<SettingsTab> {
 
   @override
   void dispose() {
+    _oppoSsoidController.dispose();
     super.dispose();
   }
 
@@ -681,6 +698,29 @@ class _SettingsTabState extends State<SettingsTab> {
                         borderRadius: BorderRadius.circular(10),
                       ),
                     ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _oppoSsoidController,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        labelText: appText(widget.currentLanguage, 'oppoSsoidLabel'),
+                        hintText: appText(widget.currentLanguage, 'oppoSsoidHint'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton(
+                    onPressed: _saveOppoSsoid,
+                    child: Text(appText(widget.currentLanguage, 'save')),
                   ),
                 ],
               ),
