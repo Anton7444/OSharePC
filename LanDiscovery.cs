@@ -176,7 +176,7 @@ public sealed class LanDiscovery : IDisposable
         }, ct);
     }
 
-    private static string? ParseHeader(string text, string name)
+    public static string? ParseHeader(string text, string name)
     {
         foreach (var line in text.Split('\n'))
         {

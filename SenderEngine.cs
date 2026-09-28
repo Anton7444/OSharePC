@@ -178,10 +178,16 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         try
         {
             LanDisc = new LanDiscovery(Lan.MacHex12) { LanIp = Lan.IpString, DeviceName = Advertiser.DeviceName };
-            LanDisc.DeviceAnnounced += (ip, _, pdid, _, _) =>
+            if (!string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid))
+                LanDisc.AccountDigest = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid);
+            LanDisc.DeviceAnnounced += (ip, _, pdid, _, raw) =>
             {
                 if (!string.IsNullOrWhiteSpace(pdid))
+                {
                     _lanPeerIps[pdid.Replace(":", "").ToUpperInvariant()] = ip;
+                    var dn = LanDiscovery.ParseHeader(raw, "DN");
+                    Scanner.UpsertLanDevice(pdid, ip, dn ?? "");
+                }
             };
             LanDisc.Start();
         }

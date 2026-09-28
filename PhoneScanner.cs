@@ -12,7 +12,14 @@ public enum PhoneKind
     /// <summary>Stock alliance ROM (OPPO/OnePlus/Xiaomi/vivo/…) — 128-bit 3331 + vender/bleFlag service data.</summary>
     Alliance,
     /// <summary>Legacy OEM variants (0x3333/0x3334, 0x6666/0x6667, 0x8181/0x8182) — display only for now.</summary>
-    Legacy
+    Legacy,
+    /// <summary>Discovered via the SSDP-style LAN ANNOUNCE (LanDiscovery.cs), not BLE
+    /// at all — see OPPO_ACCOUNT_API_FINDINGS.md section 5l. This is the one channel
+    /// confirmed (via a real adb logcat capture) to make a phone report
+    /// accountState=SAME_ACCOUNT for this PC without needing "All" BLE visibility, so
+    /// it's the most promising path for the reverse direction (PC discovering a
+    /// phone in "Contacts only" mode) too.</summary>
+    Lan
 }
 
 public sealed class PhoneDevice
@@ -41,6 +48,10 @@ public sealed class PhoneDevice
     /// 0x6667 section (com.oplus.oshare.utils.AccountManger#D) — see
     /// OPPO_ACCOUNT_API_FINDINGS.md section 5f.</summary>
     public string LegacyAccountId { get; set; } = "";
+    /// <summary>Lan kind only: the phone's "PDID" (protocol device id) from its
+    /// SSDP-style ANNOUNCE, and the IP it announced from.</summary>
+    public string LanPdid { get; set; } = "";
+    public string LanIp { get; set; } = "";
     public int Version { get; set; }
     public short Rssi { get; set; }
     public DateTimeOffset LastSeen { get; set; }
@@ -65,6 +76,7 @@ public sealed class PhoneDevice
                               DeviceId.Length == 16 &&
                               LastCompleteAdvertisement != default,
         PhoneKind.Legacy => LegacyDeviceId.Length == 12,
+        PhoneKind.Lan => LanPdid.Length > 0,
         _ => false,
     };
 
@@ -82,6 +94,7 @@ public sealed class PhoneDevice
         PhoneKind.OShare => "OShare",
         PhoneKind.Alliance => $"Alliance ({BrandFromVender(Vender)})",
         PhoneKind.Legacy => $"Legacy ({BrandFromVender(Vender)})",
+        PhoneKind.Lan => "LAN",
         _ => "Legacy OEM"
     };
 
@@ -119,6 +132,10 @@ public sealed class PhoneScanner : IDisposable
 
     private BluetoothLEAdvertisementWatcher? _watcher;
     private readonly Dictionary<ulong, PhoneDevice> _devices = new();
+    // Keyed by PDID (a string, not a BLE address) since LAN devices arrive over UDP,
+    // not BLE — kept separate from _devices rather than shoehorning a synthetic BLE
+    // address in, and merged into the Devices getter below.
+    private readonly Dictionary<string, PhoneDevice> _lanDevices = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new();
     private readonly object _signalGate = new();
     private TaskCompletionSource _advertisementSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -145,13 +162,53 @@ public sealed class PhoneScanner : IDisposable
             {
                 // Partial records are internal scanner state only. This mirrors the
                 // official common parser returning null for an incomplete ScanRecord.
-                return _devices.Values
+                return _devices.Values.Concat(_lanDevices.Values)
                     .Where(device => device.HasCompleteIdentity)
                     .GroupBy(StableIdentity, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.OrderByDescending(device => device.LastCompleteAdvertisement).First())
                     .ToList();
             }
         }
+    }
+
+    /// <summary>Called from LanDiscovery's DeviceAnnounced event (see SenderEngine.cs)
+    /// whenever the phone's SSDP-style ANNOUNCE arrives — a completely different,
+    /// non-BLE channel that a real adb logcat capture confirmed the phone treats as
+    /// SAME_ACCOUNT-eligible without needing "All" BLE visibility (see
+    /// OPPO_ACCOUNT_API_FINDINGS.md section 5l). Self-contained per announce, no
+    /// fragment reconstruction needed.</summary>
+    public void UpsertLanDevice(string pdid, string ip, string deviceName)
+    {
+        if (string.IsNullOrWhiteSpace(pdid)) return;
+        lock (_gate)
+        {
+            if (!_lanDevices.TryGetValue(pdid, out var device))
+            {
+                device = new PhoneDevice
+                {
+                    Address = SyntheticAddressFromPdid(pdid),
+                    Kind = PhoneKind.Lan,
+                    LanPdid = pdid,
+                };
+                _lanDevices[pdid] = device;
+            }
+            device.LanIp = ip;
+            if (!string.IsNullOrWhiteSpace(deviceName)) device.Name = deviceName;
+            device.LastSeen = DateTimeOffset.UtcNow;
+            device.LastCompleteAdvertisement = device.LastSeen;
+            device.SeenCount++;
+        }
+        PulseAdvertisement();
+    }
+
+    private static ulong SyntheticAddressFromPdid(string pdid)
+    {
+        if (pdid.Length <= 16 && pdid.All(Uri.IsHexDigit) && ulong.TryParse(pdid, System.Globalization.NumberStyles.HexNumber, null, out var direct))
+            return direct;
+        // Non-hex or too-long PDIDs (unexpected, but be defensive): derive a stable
+        // synthetic value instead of colliding everything onto 0.
+        var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(pdid));
+        return BitConverter.ToUInt64(hash, 0);
     }
 
     public bool IsScanning { get; private set; }
