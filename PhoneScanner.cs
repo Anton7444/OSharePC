@@ -337,6 +337,33 @@ public sealed class PhoneScanner : IDisposable
                         var n = DecodeName(payload, 10, 16);
                         if (n.Length > 0) device.Name = n;
                         device.Version = payload[26];
+
+                        // Some phones don't redeliver every AD fragment after a BLE
+                        // address rotation - only the scan-response half (this one)
+                        // shows up again, and the 6-byte primary-advertisement half
+                        // + UUID-list AD never return for the new address, so the
+                        // fresh 3-way correlation below can never succeed and the
+                        // device gets stuck "pending" forever. If this exact 10-byte
+                        // suffix was already fully resolved under a previous address,
+                        // trust that inherited identity instead of waiting for a
+                        // correlation that may never arrive again.
+                        if (device.DeviceIdPart1.Length != 6)
+                        {
+                            var known = _devices.Values.FirstOrDefault(other =>
+                                !ReferenceEquals(other, device) &&
+                                other.DeviceIdPart1.Length == 6 &&
+                                other.DeviceIdPart2 == device.DeviceIdPart2);
+                            if (known is not null)
+                            {
+                                device.DeviceIdPart1 = known.DeviceIdPart1;
+                                device.AllianceUuidSeen = true;
+                                if (string.IsNullOrWhiteSpace(device.Name)) device.Name = known.Name;
+                                if (device.Vender == 0) device.Vender = known.Vender;
+                                if (device.BleFlag == 0) device.BleFlag = known.BleFlag;
+                                device.DeviceId = device.DeviceIdPart1 + device.DeviceIdPart2;
+                                device.LastCompleteAdvertisement = now;
+                            }
+                        }
                     }
 
                     if (device.DeviceIdPart1.Length == 6 && device.DeviceIdPart2.Length == 10)

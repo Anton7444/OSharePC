@@ -262,12 +262,16 @@ class BridgeClient extends ChangeNotifier {
         }
 
         // Fetch devices
-        final devResp = await _get(
-          '/api/devices',
-        ).timeout(const Duration(milliseconds: 1500));
-        if (devResp.statusCode == 200) {
-          final devList = jsonDecode(devResp.body) as List;
-          _devices = devList.map((d) => DeviceModel.fromJson(d)).toList();
+        try {
+          final devResp = await _get(
+            '/api/devices',
+          ).timeout(const Duration(milliseconds: 1500));
+          if (devResp.statusCode == 200) {
+            final devList = jsonDecode(devResp.body) as List;
+            _devices = devList.map((d) => DeviceModel.fromJson(d)).toList();
+          }
+        } catch (_) {
+          // Devices fetch failing shouldn't abort the rest of the poll cycle.
         }
 
         // Fetch incremental events
