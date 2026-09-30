@@ -270,8 +270,14 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 closeToTray: body.CloseToTray,
                 oppoSsoid: body.OppoSsoid,
                 oppoAccountName: body.OppoAccountName);
-            if (!string.IsNullOrWhiteSpace(body.OppoSsoid))
-                await StartOppoBleAdvertiserAsync(body.OppoSsoid);
+            if (body.OppoSsoid is not null)
+            {
+                _engine.SetOppoAccountIdentity(body.OppoSsoid);
+                if (string.IsNullOrWhiteSpace(body.OppoSsoid))
+                    await StopOppoBleAdvertiserAsync();
+                else
+                    await StartOppoBleAdvertiserAsync(body.OppoSsoid);
+            }
             return Results.Ok(new
             {
                 deviceName = _engine.Advertiser.DeviceName,
@@ -445,12 +451,14 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                         verMethod = body.VerMethod,
                         ticket = result.Ticket,
                         needNextRound = result.NeedNextRound,
+                        sessionPending = true,
                     });
                     return Results.Ok(new
                     {
-                        accepted = true,
+                        accepted = false,
                         ticket = result.Ticket,
                         needNextRound = result.NeedNextRound,
+                        sessionPending = true,
                     });
                 }
                 catch (Exception ex)
@@ -476,13 +484,11 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Ok(new { started = true, brand = brand.Name });
         });
 
-        app.MapPost("/api/oppo-account/logout", () =>
+        app.MapPost("/api/oppo-account/logout", async () =>
         {
             SettingsStore.ClearOppoAccount();
-            _oppoBleAdvertiser?.Dispose();
-            _oppoBleAdvertiser = null;
-            _oppoWindowsAdvertiser?.Dispose();
-            _oppoWindowsAdvertiser = null;
+            _engine.SetOppoAccountIdentity(null);
+            await StopOppoBleAdvertiserAsync();
             Log.Info("OppoWebLogin: logged out — cleared account identity and stopped the same-account BLE beacon.");
             Push("oppoAccountLoggedOut", new { });
             return Results.Ok(new { loggedOut = true });
@@ -508,21 +514,15 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         {
             if (string.IsNullOrWhiteSpace(body.Ssoid))
                 return Results.BadRequest(new { error = "ssoid is required" });
+            SettingsStore.Save(oppoSsoid: body.Ssoid);
+            _engine.SetOppoAccountIdentity(body.Ssoid);
             await StartOppoBleAdvertiserAsync(body.Ssoid);
             return Results.Ok(new { started = true });
         });
 
         app.MapPost("/api/oppo-account/ble-advertise/stop", async () =>
         {
-            await _oppoBleGate.WaitAsync();
-            try
-            {
-                _oppoBleAdvertiser?.Dispose();
-                _oppoBleAdvertiser = null;
-                _oppoWindowsAdvertiser?.Dispose();
-                _oppoWindowsAdvertiser = null;
-            }
-            finally { _oppoBleGate.Release(); }
+            await StopOppoBleAdvertiserAsync();
             return Results.Ok(new { stopped = true });
         });
 
@@ -613,7 +613,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 return;
             }
 
-            Log.Info($"OppoWebLogin (bridge): raw result: {result.Msg}");
+            Log.Info($"OppoWebLogin (bridge): callback received ({RedactUrl(result.Msg)})");
 
             var (code, callbackCountryCode) = TryParseCallbackCode(result.Msg);
             if (code is not null)
@@ -629,7 +629,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 {
                     using var exchanged = await OppoAccountExchange.ExchangeCodeAsync(cfg, code, callbackCountryCode);
                     var exchangedText = exchanged.RootElement.ToString();
-                    Log.Info($"OppoWebLogin (bridge): exchange response: {exchangedText}");
+                    var exchangeCode = exchanged.RootElement.TryGetProperty("code", out var exchangeCodeEl)
+                        ? exchangeCodeEl.ToString()
+                        : "unknown";
+                    Log.Info($"OppoWebLogin (bridge): session exchange completed (responseCode={exchangeCode})");
 
                     // Confirmed real shape (seen live): {"code":200,"data":{"accessToken":
                     // "...","expireIn":..,"accessDomain":"...","userDetail":{"userId":
@@ -664,6 +667,12 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                     Log.Info($"OppoWebLogin (bridge): parsed accountName={exAccountName ?? "(none)"}, ssoid={(exSsoid is null ? "(none)" : "(present)")}, avatarUrl={(exAvatarUrl is null ? "(none)" : "(present)")}");
                     if (exAccountName is not null || exSsoid is not null || exAvatarUrl is not null)
                         SettingsStore.Save(oppoSsoid: exSsoid, oppoAccountName: exAccountName, oppoAvatarUrl: exAvatarUrl);
+                    if (exSsoid is not null)
+                    {
+                        _engine.SetOppoAccountIdentity(exSsoid);
+                        if (!string.IsNullOrWhiteSpace(exSsoid)) await StartOppoBleAdvertiserAsync(exSsoid);
+                        else await StopOppoBleAdvertiserAsync();
+                    }
 
                     Push("oppoWebLoginSuccess", new
                     {
@@ -671,10 +680,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                         ssoid = exSsoid,
                         avatarUrl = exAvatarUrl,
                         countryCode = callbackCountryCode,
-                        // Raw exchange response included so its actual shape can be
-                        // inspected the first time this runs live — it wasn't captured
-                        // ahead of time, only the request side of the exchange was.
-                        raw = exchangedText,
                     });
                 }
                 catch (Exception ex)
@@ -692,13 +697,18 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             Log.Info($"OppoWebLogin (bridge): parsed accountName={accountName ?? "(none)"}, ssoid={(ssoid is null ? "(none)" : "(present)")}");
             if (accountName is not null || ssoid is not null)
                 SettingsStore.Save(oppoSsoid: ssoid, oppoAccountName: accountName);
+            if (ssoid is not null)
+            {
+                _engine.SetOppoAccountIdentity(ssoid);
+                if (!string.IsNullOrWhiteSpace(ssoid)) await StartOppoBleAdvertiserAsync(ssoid);
+                else await StopOppoBleAdvertiserAsync();
+            }
 
             Push("oppoWebLoginSuccess", new
             {
                 accountName,
                 ssoid,
                 countryCode = result.CountryCode,
-                raw = result.Msg,
             });
         }
         catch (Exception ex)
@@ -819,8 +829,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         ClearPendingTransfers();
         if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
         _oppoLoginGate.Dispose();
-        _oppoBleAdvertiser?.Dispose();
-        _oppoWindowsAdvertiser?.Dispose();
+        await StopOppoBleAdvertiserAsync();
         _oppoBleGate.Dispose();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
@@ -879,6 +888,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         await _oppoBleGate.WaitAsync();
         try
         {
+            // A startup task may still be queued when logout/account-switch runs.
+            // Do not resurrect an identity that is no longer the persisted one.
+            if (!string.Equals(SettingsStore.Current.OppoSsoid, ssoid, StringComparison.Ordinal))
+                return;
             var deviceId = SettingsStore.Current.OppoBleDeviceId;
             if (string.IsNullOrEmpty(deviceId) || deviceId.Length != 6)
             {
@@ -905,9 +918,34 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             _oppoWindowsAdvertiser = new OppoWindowsSenselessAdvertiser((byte)deviceId[0]);
             _oppoWindowsAdvertiser.Start(ssoid);
 
-            SettingsStore.Save(oppoSsoid: ssoid);
         }
         finally { _oppoBleGate.Release(); }
+    }
+
+    private async Task StopOppoBleAdvertiserAsync()
+    {
+        await _oppoBleGate.WaitAsync();
+        try
+        {
+            _oppoBleAdvertiser?.Dispose();
+            _oppoBleAdvertiser = null;
+            _oppoWindowsAdvertiser?.Dispose();
+            _oppoWindowsAdvertiser = null;
+        }
+        finally { _oppoBleGate.Release(); }
+    }
+
+    private static string RedactUrl(string value)
+    {
+        try
+        {
+            var uri = new Uri(value);
+            return uri.GetLeftPart(UriPartial.Path);
+        }
+        catch
+        {
+            return "non-url login result";
+        }
     }
 
     /// <summary>Called on backend startup and whenever settings are saved — starts the

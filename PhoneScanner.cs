@@ -155,7 +155,7 @@ public sealed class PhoneDevice
     };
 
     public static string FormatAddress(ulong a) =>
-        string.Join(":", Enumerable.Range(0, 6).Select(i => ((byte)(a >> (i * 8))).ToString("x2")));
+        string.Join(":", Enumerable.Range(0, 6).Select(i => ((a >> (40 - i * 8)) & 0xFF).ToString("x2")));
 }
 
 /// <summary>
@@ -217,16 +217,17 @@ public sealed class PhoneScanner : IDisposable
                 // A device whose beacon was heard within LiveBeacon is in Contacts mode right now: always show it,
                 // and drop the LAN-announced twin of the same type (that entry has no Bluetooth address of its
                 // own, so hiding the beacon entry in its favour made the device vanish from the list).
-                // Older beacons are only kept while no real LAN entry of that type exists (Everyone mode).
-                var liveBeaconTypes = _lanDevices.Values
+                // Older beacons are only kept while no matching real LAN entry exists (Everyone mode).
+                var liveBeaconIdentities = _lanDevices.Values
                     .Where(d => d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && now - d.LastSeen < LiveBeacon)
-                    .Select(d => d.LanDeviceType).ToHashSet();
+                    .Select(d => $"{d.LanDeviceType}:{d.Name.Trim().ToUpperInvariant()}").ToHashSet(StringComparer.Ordinal);
                 return _devices.Values.Concat(_lanDevices.Values)
                     .Where(device => !device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
                                      now - device.LastSeen < LiveBeacon ||
                                      (now - device.LastSeen < TimeSpan.FromMinutes(5) && !realSameAccountTypes.Contains(device.LanDeviceType)))
                     .Where(device => device.Kind != PhoneKind.Lan || device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
-                                     !(device.LanSameAccount && liveBeaconTypes.Contains(device.LanDeviceType)))
+                                     !(device.LanSameAccount && liveBeaconIdentities.Contains(
+                                         $"{device.LanDeviceType}:{device.Name.Trim().ToUpperInvariant()}")))
                     .Where(device => device.HasCompleteIdentity && device.IsShareableLanDevice && device.IsSupportedBrand)
                     .GroupBy(StableIdentity, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.OrderByDescending(device => device.LastCompleteAdvertisement).First())
@@ -257,7 +258,7 @@ public sealed class PhoneScanner : IDisposable
                 _lanDevices[pdid] = device;
             }
             device.LanIp = ip;
-            if (sameAccount) device.LanSameAccount = true;
+            device.LanSameAccount = sameAccount;
             if (int.TryParse(deviceType, out var dt)) device.LanDeviceType = dt;
             // If this same 12-hex device id has ever been seen over BLE (e.g. an
             // Alliance scan response from a prior "All"-mode window), borrow its real
@@ -446,6 +447,21 @@ public sealed class PhoneScanner : IDisposable
     /// this digest are same-account devices.</summary>
     public string? ContactsAccountDigest { get; set; }
 
+    /// <summary>Refreshes account-scoped discovery state after login, account change, or logout.</summary>
+    public void ResetContactDiscovery(string? accountDigest)
+    {
+        lock (_gate)
+        {
+            ContactsAccountDigest = string.IsNullOrWhiteSpace(accountDigest) ? null : accountDigest;
+            _contactsBeacons.Clear();
+            foreach (var key in _lanDevices.Keys.Where(k => k.StartsWith("FC70", StringComparison.OrdinalIgnoreCase)).ToArray())
+                _lanDevices.Remove(key);
+            foreach (var device in _lanDevices.Values)
+                device.LanSameAccount = false;
+        }
+        PulseAdvertisement();
+    }
+
     /// <summary>Waits for a Contacts-mode beacon of the given OPPO device type and account digest that is
     /// newer than <paramref name="newerThan"/>. Returns null on timeout.</summary>
     /// <summary>True when a beacon of this type/digest was seen within <paramref name="within"/>.</summary>
@@ -515,6 +531,18 @@ public sealed class PhoneScanner : IDisposable
                 if (DateTimeOffset.Now - dev.LastSeen > TimeSpan.FromSeconds(10)) gone.Add(addr);
             }
             foreach (var addr in gone) _devices.Remove(addr);
+            var beaconCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(2);
+            foreach (var key in _contactsBeacons
+                         .Where(kv => kv.Value.SeenAt < beaconCutoff)
+                         .Select(kv => kv.Key)
+                         .ToArray())
+                _contactsBeacons.Remove(key);
+            var lanCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5);
+            foreach (var key in _lanDevices
+                         .Where(kv => kv.Value.LastSeen < lanCutoff)
+                         .Select(kv => kv.Key)
+                         .ToArray())
+                _lanDevices.Remove(key);
         }
         foreach (var addr in gone) DeviceExpired?.Invoke(addr);
     }

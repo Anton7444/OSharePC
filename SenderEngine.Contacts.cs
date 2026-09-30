@@ -18,6 +18,8 @@ public sealed partial class SenderEngine
     }
     private readonly Dictionary<string, DateTimeOffset> _prewarmedAt = new();
     private readonly Dictionary<string, (GattLink Link, DateTimeOffset At)> _warmLinks = new();
+    private readonly object _prewarmTasksGate = new();
+    private readonly HashSet<Task> _prewarmTasks = new();
 
     private void StoreWarmLink(string key, GattLink link)
     {
@@ -67,8 +69,39 @@ public sealed partial class SenderEngine
         foreach (var d in Scanner.Devices.Where(x => x.Kind == PhoneKind.Lan && x.LanPdid.StartsWith("FC70", StringComparison.Ordinal)).ToList())
         {
             var dev = d;
-            _ = Task.Run(() => PrewarmOneAsync(dev));
+            var task = Task.Run(() => PrewarmOneAsync(dev));
+            lock (_prewarmTasksGate) _prewarmTasks.Add(task);
+            _ = task.ContinueWith(t =>
+            {
+                lock (_prewarmTasksGate) _prewarmTasks.Remove(t);
+                _ = t.Exception;
+            }, TaskScheduler.Default);
         }
+    }
+
+    public async Task StopContactsAsync()
+    {
+        Task[] running;
+        lock (_prewarmTasksGate)
+        {
+            try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
+            running = _prewarmTasks.ToArray();
+        }
+        if (running.Length > 0)
+        {
+            try { await Task.WhenAll(running); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log.Warn($"CONTACTS: prewarm shutdown failed: {ex.Message}"); }
+        }
+        lock (_warmLinks)
+        {
+            foreach (var (_, warm) in _warmLinks)
+            {
+                try { warm.Link.Dispose(); } catch { }
+            }
+            _warmLinks.Clear();
+        }
+        lock (_prewarmedAt) _prewarmedAt.Clear();
     }
 
     private async Task PrewarmOneAsync(PhoneDevice device)

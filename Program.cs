@@ -844,6 +844,26 @@ internal static class Program
         }
         else Log.Info($"SELFTEST ok: Stock 互传 Bluetooth discovery name format ({btName})");
 
+        // 12) Contact identity refresh clears old beacon entries and uses the
+        // same canonical address notation as connected-link diagnostics.
+        if (PhoneDevice.FormatAddress(0x001122334455UL) != "00:11:22:33:44:55")
+        {
+            Log.Error("SELFTEST FAIL: Bluetooth address formatting is not canonical");
+            failures++;
+        }
+        else
+        {
+            using var contactScanner = new PhoneScanner();
+            contactScanner.UpsertLanDevice("FC700A39154E", "", "Tablet", "10", sameAccount: true);
+            contactScanner.ResetContactDiscovery(null);
+            if (contactScanner.Devices.Count != 0)
+            {
+                Log.Error("SELFTEST FAIL: contact discovery state survived account reset");
+                failures++;
+            }
+            else Log.Info("SELFTEST ok: contact discovery account reset");
+        }
+
         Log.Info(failures == 0 ? "SELFTEST PASSED" : $"SELFTEST FAILED ({failures})");
         return failures == 0 ? 0 : 1;
     }

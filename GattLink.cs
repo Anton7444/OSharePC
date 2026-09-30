@@ -749,21 +749,10 @@ public sealed partial class GattLink : IDisposable
         int maxPdu = _session?.MaxPduSize ?? 247;
         Log.Info($"BLE: effective ATT MTU {maxPdu}");
 
-        // Best-effort, independent of the rest of this flow: if the phone's iBeacon
-        // business characteristic happened to be present this session, declare
-        // same-account membership on it (see TryWriteIBeaconSameAccountAsync). This
-        // cannot make anything worse — the write either succeeds or the
-        // characteristic simply wasn't there, and the pv=1/pv=5 flow below runs
-        // exactly as it would have anyway.
-        // OFF by default: the pv=5 account proof below already makes the phone skip the
-        // confirm card, and an unanswered 0x9892 write (the tablet's iBeacon handler only
-        // answers while its share panel is active) blocks the whole ATT queue for 30 s.
-        if (!string.IsNullOrEmpty(oppoSsoid) && Environment.GetEnvironmentVariable("OSHAREPC_IBEACON_WRITE") == "1")
-        {
-            var beaconDeviceId = SettingsStore.Current.OppoBleDeviceId ?? senderName;
-            try { await TryWriteIBeaconSameAccountAsync(oppoSsoid, beaconDeviceId, senderName, ct); }
-            catch (Exception ex) { Log.Warn($"BLE: iBeacon same-account write failed: {ex.Message}"); }
-        }
+        // Do not write the legacy iBeacon JSON claim here. That characteristic accepts
+        // an unauthenticated is_same_account=true flag, so it cannot be used as proof
+        // of account membership. The encrypted pv=5 exchange below is the only
+        // account validation path.
 
         // 1. subscribe 0x9898 notifications (account challenge + wlan-ip messages).
         //    Every phone->PC message in the iOS-mode flow (account challenge, wlan
@@ -796,7 +785,8 @@ public sealed partial class GattLink : IDisposable
         try
         {
             var sub = await OConnectNotifyChar.WriteClientCharacteristicConfigurationDescriptorAsync(
-                GattClientCharacteristicConfigurationDescriptorValue.Notify);
+                GattClientCharacteristicConfigurationDescriptorValue.Notify)
+                .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
             notificationsSubscribed = sub == GattCommunicationStatus.Success;
             Log.Info($"BLE: 9898 notification subscription via WinRT = {sub}");
         }
@@ -807,19 +797,29 @@ public sealed partial class GattLink : IDisposable
 
         if (!notificationsSubscribed)
         {
-            var cccd = (await OConnectNotifyChar.GetDescriptorsAsync(BluetoothCacheMode.Uncached)).Descriptors
-                .FirstOrDefault(d => d.Uuid == CccdUuid);
-            Log.Info($"BLE: 0x9898 descriptors: [{string.Join(", ",
-                (await OConnectNotifyChar.GetDescriptorsAsync()).Descriptors.Select(d => ShortUuid(d.Uuid)))}]");
-            if (cccd is not null)
+            try
             {
-                var w = await cccd.WriteValueAsync(ToBuffer(BitConverter.GetBytes((ushort)1)));
-                notificationsSubscribed = w == GattCommunicationStatus.Success;
-                Log.Info($"BLE: CCCD(9898) compatibility subscription = {w}");
+                var descriptors = await OConnectNotifyChar.GetDescriptorsAsync(BluetoothCacheMode.Uncached)
+                    .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+                Log.Info($"BLE: 0x9898 descriptors: [{string.Join(", ", descriptors.Descriptors.Select(d => ShortUuid(d.Uuid)))}]");
+                var cccd = descriptors.Descriptors.FirstOrDefault(d => d.Uuid == CccdUuid);
+                if (cccd is not null)
+                {
+                    var w = await cccd.WriteValueAsync(ToBuffer(BitConverter.GetBytes((ushort)1)))
+                        .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+                    notificationsSubscribed = w == GattCommunicationStatus.Success;
+                    Log.Info($"BLE: CCCD(9898) compatibility subscription = {w}");
+                }
+                else
+                    Log.Warn("BLE: 0x9898 exposes no enumerable CCCD; official notify-driven flow unavailable on this Windows stack");
             }
-            else
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                Log.Warn("BLE: 0x9898 exposes no enumerable CCCD; official notify-driven flow unavailable on this Windows stack");
+                Log.Warn("BLE: 0x9898 descriptor discovery timed out; continuing with manual-accept flow");
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                Log.Warn($"BLE: 0x9898 descriptor discovery failed; continuing with manual-accept flow: {ex.Message}");
             }
         }
 
@@ -831,7 +831,10 @@ public sealed partial class GattLink : IDisposable
             {
                 // A healthy receiver answers in well under a second. A listed-but-dead 9999 service (its app-side
                 // server already closed) never answers; fail after 6s instead of the OS default of ~30s.
-                read = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+                using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                readCts.CancelAfter(TimeSpan.FromSeconds(4));
+                read = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached)
+                    .AsTask(readCts.Token).WaitAsync(TimeSpan.FromSeconds(4), ct);
             }
             catch (TimeoutException)
             {
@@ -885,7 +888,7 @@ public sealed partial class GattLink : IDisposable
             //    pv=5 was avoided by default: some builds expose no CCCD on 0x9898, and
             //    announcing pv=5 without being able to receive the phone's challenge
             //    would strand the transfer instead of falling back gracefully).
-            var effectivePv = !string.IsNullOrEmpty(oppoSsoid) ? 5 : OConnectPv;
+            var effectivePv = !string.IsNullOrEmpty(oppoSsoid) && notificationsSubscribed ? 5 : OConnectPv;
             Log.Info($"BLE: OConnect pv={effectivePv} (ssoid configured={!string.IsNullOrEmpty(oppoSsoid)}, notify subscribed={notificationsSubscribed})");
             var name = senderName ?? "PC";
             while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, effectivePv)).Length > maxPdu - 3 && name.Length > 4)
@@ -928,7 +931,7 @@ public sealed partial class GattLink : IDisposable
                     {
                         ["account_id"] = OShareCrypto.CbcEncryptToB64(cbcKey, cbcIv, proof),
                     });
-                    Log.Info($"BLE: 9896 account response <- {accountResp}");
+                    Log.Info("BLE: 9896 account proof response prepared");
                     await WriteOConnectSingle(accountResp);
                     await Task.Delay(300, ct);
                 }

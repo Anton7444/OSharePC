@@ -106,7 +106,15 @@ public sealed class OppoWebLoginForm : Form
         // Logged for every navigation, matched or not — this is the actual trail of
         // where the widget takes the page, which is the main thing worth having on
         // record if a login attempt gets stuck somewhere unexpected.
-        Log.Info($"OppoWebLogin: navigating to {e.Uri}");
+        try
+        {
+            var uri = new Uri(e.Uri);
+            Log.Info($"OppoWebLogin: navigating to {uri.GetLeftPart(UriPartial.Path)}");
+        }
+        catch
+        {
+            Log.Info("OppoWebLogin: navigating to an invalid or redacted URL");
+        }
 
         // Match on the actual navigation TARGET's own host+path, not on whether the
         // words "logonback"/"pcassistant" appear anywhere in the URL text — the auth
@@ -135,7 +143,7 @@ public sealed class OppoWebLoginForm : Form
             // hands back. The exact shape wasn't known ahead of time (see
             // OShareBridgeServer.TryParseOppoWebLoginMsg for the parsing side), so
             // nothing is dropped here.
-            Log.Info($"OppoWebLogin: intercepted callback navigation, treating as result: {e.Uri}");
+            Log.Info("OppoWebLogin: intercepted callback navigation");
             Result = new OppoWebLoginResult(e.Uri, null);
         }
         catch (Exception ex)

@@ -177,11 +177,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         try
         {
             LanDisc = new LanDiscovery(Lan.MacHex12) { LanIp = Lan.IpString, DeviceName = Advertiser.DeviceName };
-            if (!string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid))
-            {
-                LanDisc.AccountDigest = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid);
-                Scanner.ContactsAccountDigest = LanDisc.AccountDigest;
-            }
+            SetOppoAccountIdentity(SettingsStore.Current.OppoSsoid);
             LanDisc.DeviceAnnounced += (ip, _, pdid, dt, raw) =>
             {
                 if (!string.IsNullOrWhiteSpace(pdid))
@@ -276,6 +272,17 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         TransferStateChanged?.Invoke(_staged?.TaskId ?? "", "transfer cancelled");
     }
 
+    /// <summary>Synchronizes all runtime discovery consumers with the persisted OPPO identity.</summary>
+    public void SetOppoAccountIdentity(string? ssoid)
+    {
+        var digest = string.IsNullOrWhiteSpace(ssoid)
+            ? null
+            : OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(ssoid);
+        if (LanDisc is not null)
+            LanDisc.AccountDigest = digest ?? "";
+        Scanner.ResetContactDiscovery(digest);
+    }
+
     public void UpdateSaveDirectory(string dir)
     {
         if (string.IsNullOrWhiteSpace(dir)) return;
@@ -285,6 +292,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
 
     public async Task StopAsync()
     {
+        await StopContactsAsync();
         _devicePruneCts?.Cancel();
         _devicePruneCts?.Dispose();
         _devicePruneCts = null;

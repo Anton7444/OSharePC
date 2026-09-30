@@ -47,22 +47,23 @@ public sealed partial class GattLink
         if (OConnectReadChar is null) return false;
         try
         {
-            var r = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
+            using var readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            readCts.CancelAfter(TimeSpan.FromSeconds(3));
+            var r = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached)
+                .AsTask(readCts.Token).WaitAsync(TimeSpan.FromSeconds(3), ct);
             if (r.Status != GattCommunicationStatus.Success) return false;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { return false; }
         try
         {
-            if (OConnectWifiChar is not null && OConnectCancelChar is not null)
-            {
-                await OConnectWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
-                await OConnectCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
-                await Task.Delay(800, ct); // let the receiver finish clearing the task before the next 9897 read
-            }
+            if (OConnectWifiChar is null || OConnectCancelChar is null) return false;
+            await OConnectWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await OConnectCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await Task.Delay(800, ct); // let the receiver finish clearing the task before the next 9897 read
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch { }
+        catch { return false; }
         return true;
     }
 }

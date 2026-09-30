@@ -1110,12 +1110,15 @@ class BridgeClient extends ChangeNotifier {
       _oppoAccountVerificationTicket =
           body is Map ? body['ticket']?.toString() : null;
       final needNextRound = body is Map && body['needNextRound'] == true;
-      _oppoAccountVerificationComplete = !needNextRound;
+      final sessionPending = body is Map && body['sessionPending'] == true;
+      _oppoAccountVerificationComplete = !needNextRound && !sessionPending;
       _oppoAccountVerificationError = needNextRound
           ? 'OPPO requested another verification round. Start the login again.'
-          : null;
+          : sessionPending
+              ? 'Verification passed, but OPPO did not return a session. Use web login to enable Contacts sharing.'
+              : null;
       notifyListeners();
-      return true;
+      return !needNextRound && !sessionPending;
     } catch (e) {
       _oppoAccountVerificationError = 'Could not verify the code: $e';
       notifyListeners();
