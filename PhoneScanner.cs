@@ -609,7 +609,11 @@ public sealed class PhoneScanner : IDisposable
                 {
                     var dtName = ContactNames.Get(sec.Payload[4], digest) ??
                                  (sec.Payload[4] switch { 10 => "Tablet", 8 => "Phone", 6 => "PC", _ => $"Device type {sec.Payload[4]}" });
-                    UpsertLanDevice($"FC70{sec.Payload[4]:X2}{digest}", "", dtName, sec.Payload[4].ToString());
+                    var beaconPdid = $"FC70{sec.Payload[4]:X2}{digest}";
+                    UpsertLanDevice(beaconPdid, "", dtName, sec.Payload[4].ToString());
+                    lock (_gate)
+                        if (_lanDevices.TryGetValue(beaconPdid, out var beaconDevice))
+                            beaconDevice.Rssi = args.RawSignalStrengthInDBm;
                     if (ContactNames.Get(sec.Payload[4], digest) is null)
                         Task.Run(() => TryResolveContactNameAsync(args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest));
                 }

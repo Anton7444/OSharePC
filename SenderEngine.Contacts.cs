@@ -7,6 +7,15 @@ public sealed partial class SenderEngine
 {
     // Contacts-mode (聯絡人) send support: pre-warmed links, beacon-driven connect and wake/retry.
     private readonly SemaphoreSlim _contactsGate = new(1, 1);
+    private CancellationTokenSource? _prewarmCts;
+
+    /// <summary>Stops a running pre-warm and waits until it has released the gate, so a send never runs
+    /// concurrently with one (its wake read makes the receiver restart and drop the send's link).</summary>
+    private async Task<bool> TakeContactsGateAsync(CancellationToken ct)
+    {
+        try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
+        return await _contactsGate.WaitAsync(TimeSpan.FromSeconds(15), ct);
+    }
     private readonly Dictionary<string, DateTimeOffset> _prewarmedAt = new();
     private readonly Dictionary<string, (GattLink Link, DateTimeOffset At)> _warmLinks = new();
 
@@ -74,6 +83,7 @@ public sealed partial class SenderEngine
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(75));
+                _prewarmCts = cts;
                 var ct = cts.Token;
                 var digest = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid!);
                 var since = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(6);
@@ -114,7 +124,7 @@ public sealed partial class SenderEngine
                     await Task.Delay(1500, ct);
                 }
             }
-            finally { _contactsGate.Release(); }
+            finally { _prewarmCts = null; _contactsGate.Release(); }
         }
         catch (Exception ex) { Log.Info($"PREWARM: {device.Name}: {ex.Message}"); }
     }

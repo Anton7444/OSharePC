@@ -630,7 +630,7 @@ class _SendTabState extends State<SendTab> {
                         ),
                         const SizedBox(width: 4),
                         Text(
-                          '${device.rssi} dBm',
+                          device.rssi == 0 ? '—' : '${device.rssi} dBm',
                           style: TextStyle(
                             fontSize: 11,
                             color: isDark

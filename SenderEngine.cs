@@ -406,7 +406,9 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                            Scanner.HasRecentContactsBeacon((byte)device.LanDeviceType, digest0, TimeSpan.FromSeconds(120));
             if (contactsPath)
             {
-                var gotContactsGate = await _contactsGate.WaitAsync(TimeSpan.FromSeconds(30), ct);
+                var gotContactsGate = await TakeContactsGateAsync(ct);
+                if (!gotContactsGate)
+                    throw new InvalidOperationException($"{device.Name} is still being prepared. Try again in a moment.");
                 try
                 {
                     connectedLink = TakeWarmLink(device.LanPdid);
@@ -415,7 +417,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                     else
                         connectedLink = await TryContactsBeaconConnectAsync(device, ct);
                 }
-                finally { if (gotContactsGate) _contactsGate.Release(); }
+                finally { _contactsGate.Release(); }
                 if (connectedLink is null && device.LanPdid.StartsWith("FC70", StringComparison.Ordinal))
                 {
                     // Listed only through its Contacts beacon: the old Alliance-style retry loop can never

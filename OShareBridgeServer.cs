@@ -351,9 +351,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             finally { _sendGate.Release(); }
             _ = _sendTask.ContinueWith(t =>
             {
-                if (t.IsFaulted)
+                if (t.IsFaulted || t.IsCanceled)
                 {
-                    var error = t.Exception?.GetBaseException().Message ?? "send failed";
+                    // A cancelled task (link dropped mid-send) must still tell the UI, or it waits forever.
+                    var error = t.IsCanceled ? "The transfer was interrupted." : t.Exception?.GetBaseException().Message ?? "send failed";
                     Log.Warn($"send failed: {error}");
                     Push("sendFailed", new { error, quiet, requestId });
                     Interlocked.CompareExchange(ref _sendRequestId, null, requestId);
