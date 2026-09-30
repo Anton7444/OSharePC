@@ -100,8 +100,8 @@ public sealed class PhoneDevice
     public string KindLabel => Kind switch
     {
         PhoneKind.OShare => "OShare",
-        PhoneKind.Alliance => $"Alliance ({BrandFromVender(Vender)})",
-        PhoneKind.Legacy => $"Legacy ({BrandFromVender(Vender)})",
+        PhoneKind.Alliance => BrandLabel("Alliance"),
+        PhoneKind.Legacy => BrandLabel("Legacy"),
         PhoneKind.Lan => LanPdid.StartsWith("FC70", StringComparison.Ordinal) ? "Contacts" : "LAN",
         _ => "Legacy OEM"
     };
@@ -111,6 +111,11 @@ public sealed class PhoneDevice
     /// one of these types are filtered out of the shareable device list — matching what
     /// OShare's own nearby-share UI does (it doesn't list your earbuds either).</summary>
     private static readonly HashSet<int> AccessoryDeviceTypes = new() { 1, 3, 4, 7, 15, 16 };
+
+    /// <summary>OShare only works between OPPO, OnePlus and realme phones; BLE adverts from other brands
+    /// (the Alliance/Legacy formats are shared with other vendors) are not listed.</summary>
+    public bool IsSupportedBrand => Kind is not (PhoneKind.Alliance or PhoneKind.Legacy) ||
+                                    BrandFromVender(Vender) is "OPPO/realme" or "OnePlus";
 
     public bool IsShareableLanDevice => Kind != PhoneKind.Lan ||
                                          LanDeviceType < 0 ||
@@ -129,6 +134,10 @@ public sealed class PhoneDevice
         51 => "NAS",
         _ => "Device",
     };
+
+    /// <summary>"Alliance (OnePlus)" for a known brand, plain "Alliance" when the vender code is unknown.</summary>
+    private string BrandLabel(string kind) =>
+        BrandFromVender(Vender) is { } brand && !brand.StartsWith("vender ", StringComparison.Ordinal) ? $"{kind} ({brand})" : kind;
 
     public static string BrandFromVender(int v) => v switch
     {
@@ -218,7 +227,7 @@ public sealed class PhoneScanner : IDisposable
                                      (now - device.LastSeen < TimeSpan.FromMinutes(5) && !realSameAccountTypes.Contains(device.LanDeviceType)))
                     .Where(device => device.Kind != PhoneKind.Lan || device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
                                      !(device.LanSameAccount && liveBeaconTypes.Contains(device.LanDeviceType)))
-                    .Where(device => device.HasCompleteIdentity && device.IsShareableLanDevice)
+                    .Where(device => device.HasCompleteIdentity && device.IsShareableLanDevice && device.IsSupportedBrand)
                     .GroupBy(StableIdentity, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.OrderByDescending(device => device.LastCompleteAdvertisement).First())
                     .ToList();
