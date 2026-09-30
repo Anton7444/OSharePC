@@ -58,6 +58,7 @@ public sealed partial class GattLink
             {
                 await OConnectWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
                 await OConnectCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
+                await Task.Delay(800, ct); // let the receiver finish clearing the task before the next 9897 read
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }

@@ -577,15 +577,16 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                                                             (ex.Message.Contains("phone busy", StringComparison.OrdinalIgnoreCase) ||
                                                              ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase)))
                 {
-                    if (ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase) && _lastContactsBeacon is { } stale)
+                    if (ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase))
                     {
+                        // The unanswered read is still queued on this link and blocks every further request on it;
+                        // if it were left open every reconnect would see "link already established" and fail.
+                        if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
+                        try { link.Dispose(); } catch { }
+                        if (_lastContactsBeacon is not { } stale) throw;
                         // The receive service is listed but dead (typically after its idle timeout): wake it again.
                         Log.Warn("CONTACTS: receive service is listed but not answering; waking it");
                         TransferStateChanged?.Invoke(_staged.TaskId, "restarting the receive service…");
-                        // The unanswered read is still queued on this link and blocks every further request on it,
-                        // so drop the link first and wake the receiver over a fresh connection.
-                        if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
-                        try { link.Dispose(); } catch { }
                         await Task.Delay(500, ct);
                         await GattLink.WakeContactsReceiverAsync(stale.Address, stale.AddressType, ct);
                         await Task.Delay(1500, ct);

@@ -88,6 +88,7 @@ public sealed partial class SenderEngine
                     try
                     {
                         link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, null, ct, beacon.AddressType, fast: true);
+                        _lastContactsBeacon = beacon; // lets the send path re-wake the receiver if this link dies
                         if (await link.ProbeReceiverAsync(ct))
                         {
                             lock (_prewarmedAt) _prewarmedAt[device.LanPdid] = DateTimeOffset.UtcNow;
