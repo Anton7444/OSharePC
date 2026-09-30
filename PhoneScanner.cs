@@ -161,6 +161,8 @@ public sealed class PhoneScanner : IDisposable
 {
     public static readonly Guid AllianceServiceUuid = new("00003331-0000-1000-8000-008123456789");
     private static readonly TimeSpan AllianceMergeWindow = TimeSpan.FromSeconds(3);
+    /// <summary>Contacts beacons arrive every ~25 s; a device heard within this window is in Contacts mode now.</summary>
+    private static readonly TimeSpan LiveBeacon = TimeSpan.FromSeconds(90);
 
     private BluetoothLEAdvertisementWatcher? _watcher;
     private readonly Dictionary<ulong, PhoneDevice> _devices = new();
@@ -202,17 +204,20 @@ public sealed class PhoneScanner : IDisposable
                     .Where(d => !d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && d.LanSameAccount &&
                                 now - d.LastSeen < TimeSpan.FromMinutes(5))
                     .Select(d => d.LanDeviceType).ToHashSet();
-                // A Contacts-beacon entry and a LAN-announced entry can be the same physical device. When a fresh
-                // beacon entry has the same device type and name as a LAN entry, show only the beacon entry.
-                var freshBeaconKeys = _lanDevices.Values
-                    .Where(d => d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && now - d.LastSeen < TimeSpan.FromMinutes(5) &&
-                                !string.IsNullOrWhiteSpace(d.Name))
-                    .Select(d => (d.LanDeviceType, d.Name.Trim().ToLowerInvariant())).ToHashSet();
+                // A Contacts-beacon entry and a LAN-announced entry can be the same physical device.
+                // A device whose beacon was heard within LiveBeacon is in Contacts mode right now: always show it,
+                // and drop the LAN-announced twin of the same type (that entry has no Bluetooth address of its
+                // own, so hiding the beacon entry in its favour made the device vanish from the list).
+                // Older beacons are only kept while no real LAN entry of that type exists (Everyone mode).
+                var liveBeaconTypes = _lanDevices.Values
+                    .Where(d => d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && now - d.LastSeen < LiveBeacon)
+                    .Select(d => d.LanDeviceType).ToHashSet();
                 return _devices.Values.Concat(_lanDevices.Values)
                     .Where(device => !device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     now - device.LastSeen < LiveBeacon ||
                                      (now - device.LastSeen < TimeSpan.FromMinutes(5) && !realSameAccountTypes.Contains(device.LanDeviceType)))
                     .Where(device => device.Kind != PhoneKind.Lan || device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
-                                     !freshBeaconKeys.Contains((device.LanDeviceType, (device.Name ?? "").Trim().ToLowerInvariant())))
+                                     !(device.LanSameAccount && liveBeaconTypes.Contains(device.LanDeviceType)))
                     .Where(device => device.HasCompleteIdentity && device.IsShareableLanDevice)
                     .GroupBy(StableIdentity, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.OrderByDescending(device => device.LastCompleteAdvertisement).First())
