@@ -316,6 +316,14 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Ok(new { taskId = task.TaskId, fileCount = task.FileCount, totalSize = task.TotalSize });
         });
 
+        // The GUI calls this when its window is focused or a file is dragged over it, so nearby Contacts devices are
+        // connected and their receive service started before the user picks a target.
+        app.MapPost("/api/contacts/prewarm", () =>
+        {
+            _engine.PrewarmContactsDevices();
+            return Results.Ok(new { started = true });
+        });
+
         app.MapPost("/api/send", async (SendRequest body) =>
         {
             var requestId = string.IsNullOrWhiteSpace(body.RequestId)

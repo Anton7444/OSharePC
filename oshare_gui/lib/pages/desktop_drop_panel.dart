@@ -347,6 +347,8 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   }
 
   void _onDragEntered() {
+    // Start connecting to Contacts devices while the file is still being dragged.
+    widget.client.prewarmContacts();
     // A second drag can enter while the device picker is staged. Preserve the
     // expanded stage until that staged selection is explicitly cleared.
     if (_hasStagedDrop) return;

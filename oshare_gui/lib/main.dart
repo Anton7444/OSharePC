@@ -187,7 +187,7 @@ class OShareApp extends StatefulWidget {
   State<OShareApp> createState() => _OShareAppState();
 }
 
-class _OShareAppState extends State<OShareApp> {
+class _OShareAppState extends State<OShareApp> with WidgetsBindingObserver {
   final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
   ThemeMode _themeMode = ThemeMode.dark;
   AccentPreset _accent = AppColors.accentPresets.first;
@@ -199,6 +199,10 @@ class _OShareAppState extends State<OShareApp> {
     super.initState();
     _language = widget.initialLanguage;
     widget.bridgeClient.onSendResult = _showSendResult;
+    // Get Contacts devices ready while the user is still picking files: when the
+    // window is focused or a file is dragged over it.
+    WidgetsBinding.instance.addObserver(this);
+    DragDropService.instance.addDragStateListener(_onDragStateChanged);
     _loadThemeMode();
     _loadAccent();
     _loadDesktopDropTarget();
@@ -320,7 +324,20 @@ class _OShareAppState extends State<OShareApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      widget.bridgeClient.prewarmContacts();
+    }
+  }
+
+  void _onDragStateChanged(bool isDragging) {
+    if (isDragging) widget.bridgeClient.prewarmContacts();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    DragDropService.instance.removeDragStateListener(_onDragStateChanged);
     widget.bridgeClient.onSendResult = null;
     widget.trayService.dispose();
     unawaited(widget.desktopDropPanelService.dispose());

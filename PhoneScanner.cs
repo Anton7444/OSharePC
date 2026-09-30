@@ -474,6 +474,28 @@ public sealed class PhoneScanner : IDisposable
     public sealed record ContactsBeacon(ulong Address, BluetoothAddressType AddressType, byte DeviceType, string AccountDigest, DateTimeOffset SeenAt);
 
     private readonly Dictionary<ulong, ContactsBeacon> _contactsBeacons = new();
+    /// <summary>Recent Contacts beacon packets per device (type + digest), for cadence diagnostics.</summary>
+    private readonly Dictionary<string, Queue<(DateTimeOffset At, ulong Address)>> _contactsBeaconHistory = new();
+
+    /// <summary>One-line cadence summary of a device's Contacts beacons over the last 60 s: packet count, the
+    /// longest silence, how long ago the last one was heard and how many addresses it rotated through.</summary>
+    public string DescribeContactsBeacons(byte deviceType, string accountDigestHex)
+    {
+        var key = $"{deviceType:X2}{accountDigestHex.ToUpperInvariant()}";
+        var now = DateTimeOffset.UtcNow;
+        lock (_gate)
+        {
+            if (!_contactsBeaconHistory.TryGetValue(key, out var history))
+                return "no beacon heard in the last 60s";
+            var times = history.Where(h => now - h.At <= TimeSpan.FromSeconds(60)).ToList();
+            if (times.Count == 0) return "no beacon heard in the last 60s";
+            var maxGap = TimeSpan.Zero;
+            for (var i = 1; i < times.Count; i++)
+                if (times[i].At - times[i - 1].At > maxGap) maxGap = times[i].At - times[i - 1].At;
+            var addresses = times.Select(t => t.Address).Distinct().Count();
+            return $"{times.Count} packets/60s, max gap {maxGap.TotalSeconds:0.0}s, last {(now - times[^1].At).TotalSeconds:0.0}s ago, {addresses} address(es)";
+        }
+    }
 
     /// <summary>Uppercase hex of our own DSF account digest (e.g. "39154E"); Contacts-mode beacons with
     /// this digest are same-account devices.</summary>
@@ -486,6 +508,7 @@ public sealed class PhoneScanner : IDisposable
         {
             ContactsAccountDigest = string.IsNullOrWhiteSpace(accountDigest) ? null : accountDigest;
             _contactsBeacons.Clear();
+            _contactsBeaconHistory.Clear();
             foreach (var key in _lanDevices.Keys.Where(k => k.StartsWith("FC70", StringComparison.OrdinalIgnoreCase)).ToArray())
                 _lanDevices.Remove(key);
             foreach (var device in _lanDevices.Values)
@@ -505,7 +528,8 @@ public sealed class PhoneScanner : IDisposable
                 string.Equals(b.AccountDigest, accountDigestHex, StringComparison.OrdinalIgnoreCase));
     }
 
-    public async Task<ContactsBeacon?> WaitForContactsBeaconAsync(byte deviceType, string accountDigestHex, DateTimeOffset newerThan, TimeSpan timeout, CancellationToken ct)
+    public async Task<ContactsBeacon?> WaitForContactsBeaconAsync(byte deviceType, string accountDigestHex, DateTimeOffset newerThan, TimeSpan timeout, CancellationToken ct,
+        Func<ulong, bool>? exclude = null)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)
@@ -518,38 +542,89 @@ public sealed class PhoneScanner : IDisposable
                 {
                     if (b.DeviceType == deviceType &&
                         string.Equals(b.AccountDigest, accountDigestHex, StringComparison.OrdinalIgnoreCase) &&
-                        b.SeenAt > newerThan && (best is null || b.SeenAt > best.SeenAt))
+                        b.SeenAt > newerThan && (best is null || b.SeenAt > best.SeenAt) &&
+                        exclude?.Invoke(b.Address) != true)
                         best = b;
                 }
             }
             if (best is not null) return best;
-            await Task.Delay(150, ct);
+            await Task.Delay(100, ct);
         }
         return null;
     }
 
     public void Start()
     {
-        if (IsScanning) return;
-        _watcher = new BluetoothLEAdvertisementWatcher
+        lock (_watcherGate)
         {
-            ScanningMode = BluetoothLEScanningMode.Active,
+            if (IsScanning) return;
+            _watcher = CreateWatcher(_passiveScanRequests > 0 ? BluetoothLEScanningMode.Passive : BluetoothLEScanningMode.Active);
+            IsScanning = true;
+        }
+    }
+
+    private BluetoothLEAdvertisementWatcher CreateWatcher(BluetoothLEScanningMode mode)
+    {
+        var watcher = new BluetoothLEAdvertisementWatcher
+        {
+            ScanningMode = mode,
             // The tablet's always-on beacon (service data 0xFC70) is an extended advertisement.
             AllowExtendedAdvertisements = true
         };
-        _watcher.Received += OnReceived;
-        _watcher.Stopped += (_, e) => Log.Info($"BLE: scanner stopped (error={e.Error})");
-        _watcher.Start();
-        IsScanning = true;
+        watcher.Received += OnReceived;
+        watcher.Stopped += (_, e) => Log.Info($"BLE: scanner stopped (error={e.Error})");
+        watcher.Start();
+        return watcher;
     }
 
     public void Stop()
     {
-        if (!IsScanning) return;
-        try { _watcher?.Stop(); } catch { }
-        _watcher = null;
-        IsScanning = false;
+        lock (_watcherGate)
+        {
+            if (!IsScanning) return;
+            try { _watcher?.Stop(); } catch { }
+            _watcher = null;
+            IsScanning = false;
+        }
         PulseAdvertisement();
+    }
+
+    private readonly object _watcherGate = new();
+    private int _passiveScanRequests;
+
+    /// <summary>Switches the watcher to passive scanning until disposed. Active scanning sends a scan request to
+    /// every advertiser it hears, which competes for the radio with the connection being set up; the Contacts
+    /// beacon is carried in the advertisement itself, so passive scanning still sees it.</summary>
+    public IDisposable UsePassiveScanning()
+    {
+        lock (_watcherGate)
+            if (++_passiveScanRequests == 1) SwitchWatcherMode(BluetoothLEScanningMode.Passive);
+        return new PassiveScanLease(this);
+    }
+
+    private void SwitchWatcherMode(BluetoothLEScanningMode mode)
+    {
+        if (!IsScanning || _watcher is null || _watcher.ScanningMode == mode) return;
+        try
+        {
+            var old = _watcher;
+            old.Received -= OnReceived;
+            try { old.Stop(); } catch { }
+            _watcher = CreateWatcher(mode);
+            Log.Info($"BLE: scanner switched to {mode} scanning");
+        }
+        catch (Exception ex) { Log.Warn($"BLE: scanner switch to {mode} failed: {ex.Message}"); }
+    }
+
+    private sealed class PassiveScanLease(PhoneScanner owner) : IDisposable
+    {
+        private int _released;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) != 0) return;
+            lock (owner._watcherGate)
+                if (--owner._passiveScanRequests == 0) owner.SwitchWatcherMode(BluetoothLEScanningMode.Active);
+        }
     }
 
     /// <summary>Forget devices not seen in the last 10 seconds.</summary>
@@ -671,10 +746,22 @@ public sealed class PhoneScanner : IDisposable
                 sec.Payload[5] == 0x37)
             {
                 var digest = Convert.ToHexString(sec.Payload, 6, 3);
-                lock (_gate)
+                // -127 dBm is Windows replaying a cached advertisement, not a packet heard now: that address may be
+                // off the air already, so it must not count as a fresh (connectable) beacon.
+                if (args.RawSignalStrengthInDBm > -127)
                 {
-                    _contactsBeacons[args.BluetoothAddress] = new ContactsBeacon(
-                        args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest, DateTimeOffset.UtcNow);
+                    var now = DateTimeOffset.UtcNow;
+                    lock (_gate)
+                    {
+                        _contactsBeacons[args.BluetoothAddress] = new ContactsBeacon(
+                            args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest, now);
+                        var historyKey = $"{sec.Payload[4]:X2}{digest}";
+                        if (!_contactsBeaconHistory.TryGetValue(historyKey, out var history))
+                            _contactsBeaconHistory[historyKey] = history = new Queue<(DateTimeOffset, ulong)>();
+                        history.Enqueue((now, args.BluetoothAddress));
+                        while (history.Count > 0 && (history.Count > 512 || now - history.Peek().At > TimeSpan.FromSeconds(60)))
+                            history.Dequeue();
+                    }
                 }
                 // A same-account device in Contacts-only visibility: list it (keyed by type+digest, since the
                 // beacon's address rotates) so it can be picked as a send target.

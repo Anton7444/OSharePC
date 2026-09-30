@@ -355,6 +355,10 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (!await _sendGate.WaitAsync(0))
             throw new InvalidOperationException("A transfer is already running.");
+        var wasContactsSend = false;
+        GattLink? sendLink = null;
+        var sendSucceeded = false;
+        using var timeline = SendTimeline.Start($"send -> {device.Name}");
         try
         {
         if (_staged is null)
@@ -429,16 +433,26 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                             Scanner.HasRecentContactsBeacon((byte)device.LanDeviceType, digest0, TimeSpan.FromSeconds(120)));
             if (contactsPath)
             {
-                var gotContactsGate = await TakeContactsGateAsync(ct);
+                wasContactsSend = true;
+                // A receiver that finished a transfer a moment ago may still swallow the next offer; give it a beat.
+                var sinceLast = DateTimeOffset.UtcNow - _lastContactsSendEnded;
+                if (sinceLast < ContactsSendSettle)
+                    await Task.Delay(ContactsSendSettle - sinceLast, ct);
+                var gotContactsGate = await TakeContactsGateAsync(ct, device.LanPdid);
                 if (!gotContactsGate)
                     throw new InvalidOperationException($"{device.Name} is still being prepared. Try again in a moment.");
+                SendTimeline.Mark("contacts-gate");
                 try
                 {
                     connectedLink = TakeWarmLink(device.LanPdid);
                     if (connectedLink is not null)
+                    {
                         Log.Info($"CONTACTS: using the pre-warmed link to {device.Name}");
+                        SendTimeline.Mark("warm-link");
+                    }
                     else
-                        connectedLink = await TryContactsBeaconConnectAsync(device, ct);
+                        connectedLink = await ConnectContactsAsync(device, s => TransferStateChanged?.Invoke(_staged!.TaskId, s),
+                            TimeSpan.FromSeconds(75), forceWake: false, ct);
                 }
                 finally { _contactsGate.Release(); }
                 if (connectedLink is null && device.LanPdid.StartsWith("FC70", StringComparison.Ordinal))
@@ -551,7 +565,8 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                 $"BLE: phone never exposed a connectable GATT session after fresh advertisements — {lastConnectError?.Message}");
         }
 
-        using var link = connectedLink;
+        var link = connectedLink;
+        sendLink = link;
         _crypto ??= new OShareCrypto();
 
         var resolvedFlow = flow switch
@@ -597,37 +612,43 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                             phoneConnected: () => Server.WsConnected || _staged.Complete,
                             waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
                             ct: ct,
-                            oppoSsoid: SettingsStore.Current.OppoSsoid);
+                            oppoSsoid: SettingsStore.Current.OppoSsoid,
+                            stallAfter: contactsPath && busyTry == 1 ? TimeSpan.FromSeconds(4) : null);
+                        SendTimeline.Mark("phone-connected");
+                        sendLink = activeLink; // the link that worked (a retry may have replaced the first one)
                         break;
                     }
-                    catch (InvalidOperationException ex) when (contactsPath && busyTry < 3 &&
-                                                                (ex.Message.Contains("phone busy", StringComparison.OrdinalIgnoreCase) ||
-                                                                 ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase)))
+                    // Any handshake failure on a Contacts link is retried on a fresh one (a warm link's receiver may have
+                    // gone away since, which surfaces as assorted GATT errors) — except when the phone already took the
+                    // offer and simply never connected over the LAN.
+                    catch (Exception ex) when (contactsPath && busyTry < 3 && !ct.IsCancellationRequested &&
+                                               ex is not OperationCanceledException &&
+                                               !ex.Message.Contains("did not establish", StringComparison.OrdinalIgnoreCase))
                     {
-                        // Close the failed link before reconnecting: BLE allows one link per address pair, and one
-                        // left open (in the not-responding case, with the unanswered read still queued on it) makes
-                        // every reconnect see "link already established" and fail. Dispose is idempotent, so the
-                        // original link's using block and the finally below stay safe.
-                        try { activeLink.Dispose(); } catch { }
-                        if (ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase))
+                        // Release the failed link without waiting: closing one with an unanswered request queued on it
+                        // blocks until the 30 s ATT timeout (observed). BLE allows one link per address pair, so a
+                        // link that stopped answering also rules out its address for a while.
+                        var failed = activeLink;
+                        failed.DisposeInBackground();
+                        var restart = false;
+                        if (ex is LinkNotRespondingException nr)
                         {
-                            // The receive service is listed but dead (typically after its idle timeout): wake it again.
-                            Log.Warn("CONTACTS: receive service is listed but not answering; waking it");
-                            TransferStateChanged?.Invoke(_staged.TaskId, "restarting the receive service…");
-                            await Task.Delay(500, ct);
-                            if (!await WakeContactsDeviceAsync(device, ct)) throw;
-                            await Task.Delay(1500, ct);
-                            var revived = await TryContactsBeaconConnectAsync(device, ct);
-                            if (revived is null) throw;
-                            activeLink = revived;
-                            continue;
+                            // The receive service is listed but dead (typically after its idle timeout): restart it.
+                            Log.Warn($"CONTACTS: receiver not answering ({ex.Message}); restarting its receive service");
+                            AvoidAddress(nr.Address, TimeSpan.FromSeconds(35));
+                            restart = true;
                         }
-                        // Right after waking a Contacts receiver it can still hold a pending receive task; the
-                        // clear inside the link usually fixes it, but on some phones only after a reconnect.
-                        Log.Warn($"CONTACTS: receiver busy (try {busyTry}); reconnecting and retrying");
-                        TransferStateChanged?.Invoke(_staged.TaskId, "phone was busy — retrying…");
-                        await Task.Delay(1000, ct);
-                        var again = await TryContactsBeaconConnectAsync(device, ct);
+                        else
+                            Log.Warn($"CONTACTS: handshake failed (try {busyTry}: {ex.GetType().Name} {ex.Message}); reconnecting and retrying");
+                        TransferStateChanged?.Invoke(_staged.TaskId, restart ? "restarting the receive service…" : "retrying…");
+                        if (!await TakeContactsGateAsync(ct)) throw;
+                        GattLink? again;
+                        try
+                        {
+                            again = await ConnectContactsAsync(device, s => TransferStateChanged?.Invoke(_staged!.TaskId, s),
+                                TimeSpan.FromSeconds(30), forceWake: restart, ct);
+                        }
+                        finally { _contactsGate.Release(); }
                         if (again is null) throw;
                         activeLink = again;
                     }
@@ -636,7 +657,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
             finally
             {
                 // Also on failure: a reconnected link left open would keep the phone connected to this PC.
-                if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
+                if (!ReferenceEquals(activeLink, sendLink)) activeLink.DisposeInBackground();
             }
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
         }
@@ -680,9 +701,25 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         // BLE credentials only authorize the phone. Keep the single-flight gate
         // held until the HTTP/WebSocket session reaches a terminal phone status.
         await Server.WaitForTransferCompletionAsync(_staged.TaskId, ct);
+        SendTimeline.Mark("transfer-complete");
+        timeline.Succeeded();
+        sendSucceeded = true;
         }
         finally
         {
+            // A Contacts receiver keeps its 9999 service up after a transfer, so the link that just worked is kept
+            // as the warm link for the next send. Closing it and reconnecting a second later collided with the
+            // closing link and made the receiver refuse new connections for up to 16 s (observed).
+            if (wasContactsSend && sendSucceeded && sendLink is { IsConnected: true })
+                StoreWarmLink(device.LanPdid, sendLink);
+            else
+                sendLink?.DisposeInBackground();
+            if (wasContactsSend)
+            {
+                // The receiver drops back to its idle state after every transfer; get it ready for the next one.
+                _lastContactsSendEnded = DateTimeOffset.UtcNow;
+                PrewarmContactsDevices();
+            }
             Receiver.ResumeAdvertising();
             _sendCts = null;
             _sendGate.Release();

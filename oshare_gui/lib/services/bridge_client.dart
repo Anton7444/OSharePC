@@ -799,6 +799,26 @@ class BridgeClient extends ChangeNotifier {
     return false;
   }
 
+  DateTime _lastContactsPrewarm = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Asks the backend to connect to nearby Contacts devices and start their
+  /// receive service now, before any file is staged, so the first send after a
+  /// long pause does not pay for the connection. Safe to call often (throttled
+  /// here, and the backend only keeps devices warm for a few minutes).
+  void prewarmContacts() {
+    final now = DateTime.now();
+    if (now.difference(_lastContactsPrewarm) < const Duration(seconds: 20)) {
+      return;
+    }
+    _lastContactsPrewarm = now;
+    unawaited(
+      _post('/api/contacts/prewarm').then(
+        (_) {},
+        onError: (Object e) => debugPrint('Error pre-warming contacts: $e'),
+      ),
+    );
+  }
+
   Future<Map<String, dynamic>?> stageFiles(List<String> files) async {
     try {
       final resp = await _postJson('/api/stage', {'files': files});
