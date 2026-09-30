@@ -337,7 +337,7 @@ public sealed partial class GattLink : IDisposable
                     {
                         if (d.ConnectionStatus != BluetoothConnectionStatus.Connected) return;
                         if (Interlocked.Exchange(ref linkUpMarked, 1) == 0) timeline?.Add("link-up");
-                        if (parameters.Request is null)
+                        if (parameters.Request is null && !parameters.Idle)
                         {
                             parameters.Request = RequestFastConnectionParameters(dev);
                             if (parameters.Request is not null) Log.Info("BLE: fast connection parameters granted");
@@ -1334,6 +1334,33 @@ public sealed partial class GattLink : IDisposable
         _device = null;
     }
 
+    /// <summary>Parks the link between sends: releases the fast (15 ms) connection interval so Windows goes back to
+    /// its default. Held for minutes, the fast interval wakes the phone's radio ~67 times a second for nothing.</summary>
+    public void RelaxConnectionParameters()
+    {
+        if (_connectionParameters is null || _device is null) return;
+        _connectionParameters.Idle = true;
+        if (_connectionParameters.Request is null) return;
+        _connectionParameters.Dispose();
+        Log.Info("BLE: link parked — fast connection parameters released");
+        var device = _device;
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(2000);
+            if (Volatile.Read(ref _disposed) == 0) LogConnectionParameters(device);
+        });
+    }
+
+    /// <summary>Asks for the fast interval again before a parked link is used for a send.</summary>
+    public void UseFastConnectionParameters()
+    {
+        if (_connectionParameters is null || _device is null) return;
+        _connectionParameters.Idle = false;
+        if (_connectionParameters.Request is not null) return;
+        _connectionParameters.Request = RequestFastConnectionParameters(_device);
+        SendTimeline.Mark("fast-parameters");
+    }
+
     /// <summary>Releases the link without waiting. Closing a link that still has an unanswered ATT request
     /// blocks until Windows' 30 s ATT timeout; the send must not stall on that.</summary>
     public void DisposeInBackground()
@@ -1351,6 +1378,8 @@ public sealed partial class GattLink : IDisposable
 internal sealed class ConnectionParametersHolder : IDisposable
 {
     public BluetoothLEPreferredConnectionParametersRequest? Request;
+    /// <summary>The link is parked between sends: do not re-request the fast interval on reconnects.</summary>
+    public bool Idle;
     public void Dispose()
     {
         try { Request?.Dispose(); } catch { }

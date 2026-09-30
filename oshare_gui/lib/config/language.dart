@@ -14,6 +14,18 @@ extension AppLanguageInfo on AppLanguage {
     }
   }
 
+  /// BCP-47 tag handed to web content, e.g. OPPO's account-login page.
+  String get webLanguageTag {
+    switch (this) {
+      case AppLanguage.english:
+        return 'en-US';
+      case AppLanguage.simplifiedChinese:
+        return 'zh-CN';
+      case AppLanguage.traditionalChinese:
+        return 'zh-TW';
+    }
+  }
+
   String get label {
     switch (this) {
       case AppLanguage.english:

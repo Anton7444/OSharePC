@@ -53,8 +53,7 @@ public sealed class ReceiveGattServer : IDisposable
     public string DeviceName { get; set; } = Environment.MachineName;
 
     /// <summary>Directory where incoming files will be saved.</summary>
-    public string SaveDirectory { get; set; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "OShare");
+    public string SaveDirectory { get; set; } = DownloadsFolder.DefaultSaveDirectory;
 
     /// <summary>
     /// Raised when a remote phone offers files. Return true to accept or false to reject.

@@ -486,9 +486,15 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 ? OppoBrand.OneplusOversea
                 : OppoBrand.Oppo;
 
+            // Show OPPO's login page in the app's own language (the GUI sends en-US / zh-CN / zh-TW).
+            var language = body?.Language switch
+            {
+                "zh-CN" or "zh-TW" or "en-US" => body.Language,
+                _ => "en-US",
+            };
             _oppoWebLoginRunning = true;
             Push("oppoWebLoginStarted", new { brand = brand.Name });
-            _ = RunOppoWebLoginAsync(brand);
+            _ = RunOppoWebLoginAsync(brand, language);
             return Results.Ok(new { started = true, brand = brand.Name });
         });
 
@@ -609,11 +615,11 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     /// flow above, which OPPO's server rejected for reasons documented in
     /// docs/oppo-account-login-notes.md.
     /// </summary>
-    private async Task RunOppoWebLoginAsync(OppoBrand brand)
+    private async Task RunOppoWebLoginAsync(OppoBrand brand, string language)
     {
         try
         {
-            var result = await OppoWebLogin.ShowAsync(brand);
+            var result = await OppoWebLogin.ShowAsync(brand, language);
             if (result is null)
             {
                 Log.Info("OppoWebLogin (bridge): login window closed without a result — treating as cancelled.");
@@ -871,7 +877,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         string? OppoAccountName = null);
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null, string? TaskId = null);
-    private sealed record OppoWebLoginStartRequest(string? Brand);
+    private sealed record OppoWebLoginStartRequest(string? Brand, string? Language = null);
     private sealed record OppoBleAdvertiseStartRequest(string? Ssoid);
     private sealed record OppoVerificationRequest(string? VerMethod, string? ValidateData = null);
 

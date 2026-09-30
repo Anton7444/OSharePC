@@ -1023,7 +1023,10 @@ class BridgeClient extends ChangeNotifier {
     _oppoWebLoginSuccess = false;
     notifyListeners();
     try {
-      await _postJson('/api/oppo-account/weblogin/start', {'brand': brand});
+      await _postJson('/api/oppo-account/weblogin/start', {
+        'brand': brand,
+        'language': _language.webLanguageTag,
+      });
     } catch (e) {
       _oppoWebLoginActive = false;
       _oppoWebLoginError = 'Could not reach the backend: $e';

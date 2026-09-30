@@ -30,13 +30,16 @@ public sealed partial class SenderEngine
     private string? _prewarmDeviceKey;
 
     /// <summary>How long a pre-warmed link is trusted before it is replaced by a fresh one.</summary>
-    private static readonly TimeSpan WarmLinkLifetime = TimeSpan.FromMinutes(10);
-    /// <summary>How long after files were staged (or a send ended) the Contacts devices are kept warm.</summary>
-    private static readonly TimeSpan KeepWarmWindow = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan WarmLinkLifetime = TimeSpan.FromMinutes(5);
+    /// <summary>How long after files were staged (or a send ended, or the GUI asked) the Contacts devices are kept
+    /// warm. Short on purpose: each kept link costs the phone a little battery.</summary>
+    private static readonly TimeSpan KeepWarmWindow = TimeSpan.FromMinutes(5);
     private readonly Dictionary<string, (GattLink Link, DateTimeOffset At)> _warmLinks = new();
 
     private void StoreWarmLink(string key, GattLink link)
     {
+        // A parked link does not need the fast interval; it is requested again when a send takes the link.
+        link.RelaxConnectionParameters();
         lock (_warmLinks)
         {
             if (_warmLinks.TryGetValue(key, out var old) && !ReferenceEquals(old.Link, link)) old.Link.DisposeInBackground();
@@ -51,7 +54,11 @@ public sealed partial class SenderEngine
         {
             if (!_warmLinks.TryGetValue(key, out var w)) return null;
             _warmLinks.Remove(key);
-            if (DateTimeOffset.UtcNow - w.At < WarmLinkLifetime && w.Link.IsConnected) return w.Link;
+            if (DateTimeOffset.UtcNow - w.At < WarmLinkLifetime && w.Link.IsConnected)
+            {
+                w.Link.UseFastConnectionParameters();
+                return w.Link;
+            }
             w.Link.DisposeInBackground();
             return null;
         }

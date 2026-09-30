@@ -55,7 +55,9 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
     public SenderEngine()
     {
         var saved = SettingsStore.Load();
-        if (!string.IsNullOrWhiteSpace(saved.SaveDirectory) && Directory.Exists(saved.SaveDirectory))
+        // The old default (Downloads\OShare) was written to settings like a user choice; move it to Downloads itself.
+        if (!string.IsNullOrWhiteSpace(saved.SaveDirectory) && Directory.Exists(saved.SaveDirectory) &&
+            !string.Equals(Path.TrimEndingDirectorySeparator(saved.SaveDirectory), DownloadsFolder.LegacySaveDirectory, StringComparison.OrdinalIgnoreCase))
             Receiver.SaveDirectory = saved.SaveDirectory;
         if (saved.ReceiveEnabled.HasValue)
             ReceiveEnabled = saved.ReceiveEnabled.Value;

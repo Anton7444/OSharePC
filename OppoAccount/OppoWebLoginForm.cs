@@ -54,6 +54,7 @@ public sealed class OppoWebLoginForm : Form
 
     private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
     private readonly OppoBrand _brand;
+    private readonly string _language;
     private readonly string _html;
 
     /// <summary>Set once the widget reports success, cancellation, or an error — read
@@ -64,7 +65,13 @@ public sealed class OppoWebLoginForm : Form
     public OppoWebLoginForm(OppoBrand brand, string language = "en-US")
     {
         _brand = brand;
-        Text = "Log in to OPPO account";
+        _language = language;
+        Text = language switch
+        {
+            "zh-CN" => "登录 OPPO 账号",
+            "zh-TW" => "登入 OPPO 帳號",
+            _ => "Log in to OPPO account",
+        };
         Size = new Size(480, 720);
         MinimumSize = new Size(420, 600);
         StartPosition = FormStartPosition.CenterScreen;
@@ -78,7 +85,11 @@ public sealed class OppoWebLoginForm : Form
         try
         {
             Log.Info($"OppoWebLogin: initializing WebView2 (brand={_brand.Name}, sdk={_brand.SdkScriptUrl}, bizAppKey={_brand.BizAppKey}, callbackUrl={_brand.CallbackUrl})");
-            var env = await CoreWebView2Environment.CreateAsync(userDataFolder: UserDataFolder);
+            // The browser language (Accept-Language, navigator.language) follows the app too, so OPPO pages that
+            // pick their language from the browser rather than the widget's `language` option match as well.
+            var env = await CoreWebView2Environment.CreateAsync(
+                userDataFolder: UserDataFolder,
+                options: new CoreWebView2EnvironmentOptions { Language = _language });
             await _webView.EnsureCoreWebView2Async(env);
             Log.Info($"OppoWebLogin: WebView2 runtime version {_webView.CoreWebView2.Environment.BrowserVersionString}");
             _webView.CoreWebView2.WebMessageReceived += OnMessage;
@@ -304,7 +315,7 @@ public static class OppoWebLogin
         Log.Info("OppoWebLogin: cleared the login widget's browser profile.");
     }
 
-    public static Task<OppoWebLoginResult?> ShowAsync(OppoBrand brand, CancellationToken ct = default)
+    public static Task<OppoWebLoginResult?> ShowAsync(OppoBrand brand, string language = "en-US", CancellationToken ct = default)
     {
         var tcs = new TaskCompletionSource<OppoWebLoginResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
@@ -312,7 +323,7 @@ public static class OppoWebLogin
             try
             {
                 EnsureAppConfigured();
-                using var form = new OppoWebLoginForm(brand);
+                using var form = new OppoWebLoginForm(brand, language);
                 Application.Run(form);
                 Log.Info(form.Error is not null
                     ? $"OppoWebLogin: finished with an error: {form.Error.Message}"

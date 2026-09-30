@@ -279,7 +279,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         const SizedBox(height: 4),
                         Text(
                           status.saveDirectory.isEmpty
-                              ? 'Downloads\\OShare'
+                              ? 'Downloads'
                               : status.saveDirectory,
                           style: TextStyle(
                             fontSize: 12,
