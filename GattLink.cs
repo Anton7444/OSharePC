@@ -888,7 +888,11 @@ public sealed partial class GattLink : IDisposable
             //    pv=5 was avoided by default: some builds expose no CCCD on 0x9898, and
             //    announcing pv=5 without being able to receive the phone's challenge
             //    would strand the transfer instead of falling back gracefully).
-            var effectivePv = !string.IsNullOrEmpty(oppoSsoid) && notificationsSubscribed ? 5 : OConnectPv;
+            // pv=5 is announced whenever an ssoid is configured, NOT only when the 9898 subscription worked: the tablet
+            // and phone expose no CCCD on 9898 to Windows (so notifications never subscribe), yet the account proof
+            // written below does not depend on their challenge. Requiring the subscription forced pv=1 every time,
+            // which always shows the receiver's confirm dialog.
+            var effectivePv = !string.IsNullOrEmpty(oppoSsoid) ? 5 : OConnectPv;
             Log.Info($"BLE: OConnect pv={effectivePv} (ssoid configured={!string.IsNullOrEmpty(oppoSsoid)}, notify subscribed={notificationsSubscribed})");
             var name = senderName ?? "PC";
             while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, effectivePv)).Length > maxPdu - 3 && name.Length > 4)
