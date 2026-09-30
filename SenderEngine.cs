@@ -188,7 +188,10 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                     var sameAccount = !string.IsNullOrWhiteSpace(ad) &&
                                        string.Equals(ad, LanDisc.AccountDigest, StringComparison.OrdinalIgnoreCase);
                     Scanner.UpsertLanDevice(pdid, ip, dn ?? "", dt, sameAccount);
-                    if (sameAccount && int.TryParse(dt, out var dtNum) && !string.IsNullOrWhiteSpace(dn))
+                    // Beacon names are stored per device type; with two same-account devices of this type the
+                    // name would flip between them, so only learn it when this device is the only one.
+                    if (sameAccount && int.TryParse(dt, out var dtNum) && !string.IsNullOrWhiteSpace(dn) &&
+                        Scanner.CountSameAccountLanDevices(dtNum, TimeSpan.FromMinutes(5)) == 1)
                         Scanner.RememberContactName(dtNum, LanDisc.AccountDigest!, dn);
                 }
             };
@@ -281,7 +284,14 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         if (LanDisc is not null)
             LanDisc.AccountDigest = digest ?? "";
         Scanner.ResetContactDiscovery(digest);
+        if (!string.Equals(digest, _contactsDigest, StringComparison.OrdinalIgnoreCase))
+        {
+            _contactsDigest = digest;
+            ResetContactsForAccountChange();
+        }
     }
+
+    private string? _contactsDigest;
 
     public void UpdateSaveDirectory(string dir)
     {
@@ -355,6 +365,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
 
         using var transferCts = new CancellationTokenSource();
         _sendCts = transferCts;
+        using var contactNamePause = Scanner.PauseContactNameLookups();
         var ct = transferCts.Token;
         // OnePlus Share only promotes a peer after its common BLE parser has a
         // complete ScanRecord. Windows splits ADV + SCAN_RSP, so wait for our
@@ -408,10 +419,14 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         {
             // A Contacts-listed device (pseudo pdid FC70…) always goes this way; a normal LAN-announced
             // device only if it is also currently emitting the Contacts beacon (otherwise it is in "Everyone"
-            // mode and the regular path below is used without any extra waiting).
+            // mode and the regular path below is used without any extra waiting). The beacon carries only
+            // device type + account digest, so it is attributed to this LAN device only when it is the sole
+            // same-account device of that type; otherwise the send could reach a different device.
             var digest0 = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid!);
             contactsPath = device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
-                           Scanner.HasRecentContactsBeacon((byte)device.LanDeviceType, digest0, TimeSpan.FromSeconds(120));
+                           (device.LanSameAccount &&
+                            Scanner.CountSameAccountLanDevices(device.LanDeviceType, TimeSpan.FromMinutes(5)) == 1 &&
+                            Scanner.HasRecentContactsBeacon((byte)device.LanDeviceType, digest0, TimeSpan.FromSeconds(120)));
             if (contactsPath)
             {
                 var gotContactsGate = await TakeContactsGateAsync(ct);
@@ -566,57 +581,63 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
             Server.ArmTransfer(_staged, Lan.IpString, expectedPeerIp);
 
             var activeLink = link;
-            for (var busyTry = 1; ; busyTry++)
+            try
             {
-                try
+                for (var busyTry = 1; ; busyTry++)
                 {
-                    await activeLink.OConnectLanSendAsync(
-                        Lan,
-                        Port,
-                        _crypto,
-                        Advertiser.DeviceName,
-                        _staged.FileCount,
-                        s => TransferStateChanged?.Invoke(_staged.TaskId, s),
-                        phoneConnected: () => Server.WsConnected || _staged.Complete,
-                        waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
-                        ct: ct,
-                        oppoSsoid: SettingsStore.Current.OppoSsoid);
-                    break;
-                }
-                catch (InvalidOperationException ex) when (contactsPath && busyTry < 3 &&
-                                                            (ex.Message.Contains("phone busy", StringComparison.OrdinalIgnoreCase) ||
-                                                             ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase)))
-                {
-                    if (ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase))
+                    try
                     {
-                        // The unanswered read is still queued on this link and blocks every further request on it;
-                        // if it were left open every reconnect would see "link already established" and fail.
-                        if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
-                        try { link.Dispose(); } catch { }
-                        if (_lastContactsBeacon is not { } stale) throw;
-                        // The receive service is listed but dead (typically after its idle timeout): wake it again.
-                        Log.Warn("CONTACTS: receive service is listed but not answering; waking it");
-                        TransferStateChanged?.Invoke(_staged.TaskId, "restarting the receive service…");
-                        await Task.Delay(500, ct);
-                        await GattLink.WakeContactsReceiverAsync(stale.Address, stale.AddressType, ct);
-                        await Task.Delay(1500, ct);
-                        var revived = await TryContactsBeaconConnectAsync(device, ct);
-                        if (revived is null) throw;
-                        activeLink = revived;
-                        continue;
+                        await activeLink.OConnectLanSendAsync(
+                            Lan,
+                            Port,
+                            _crypto,
+                            Advertiser.DeviceName,
+                            _staged.FileCount,
+                            s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                            phoneConnected: () => Server.WsConnected || _staged.Complete,
+                            waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
+                            ct: ct,
+                            oppoSsoid: SettingsStore.Current.OppoSsoid);
+                        break;
                     }
-                    // Right after waking a Contacts receiver it can still hold a pending receive task; the
-                    // clear inside the link usually fixes it, but on some phones only after a reconnect.
-                    Log.Warn($"CONTACTS: receiver busy (try {busyTry}); reconnecting and retrying");
-                    TransferStateChanged?.Invoke(_staged.TaskId, "phone was busy — retrying…");
-                    if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
-                    await Task.Delay(1000, ct);
-                    var again = await TryContactsBeaconConnectAsync(device, ct);
-                    if (again is null) throw;
-                    activeLink = again;
+                    catch (InvalidOperationException ex) when (contactsPath && busyTry < 3 &&
+                                                                (ex.Message.Contains("phone busy", StringComparison.OrdinalIgnoreCase) ||
+                                                                 ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        // Close the failed link before reconnecting: BLE allows one link per address pair, and one
+                        // left open (in the not-responding case, with the unanswered read still queued on it) makes
+                        // every reconnect see "link already established" and fail. Dispose is idempotent, so the
+                        // original link's using block and the finally below stay safe.
+                        try { activeLink.Dispose(); } catch { }
+                        if (ex.Message.Contains("not responding", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // The receive service is listed but dead (typically after its idle timeout): wake it again.
+                            Log.Warn("CONTACTS: receive service is listed but not answering; waking it");
+                            TransferStateChanged?.Invoke(_staged.TaskId, "restarting the receive service…");
+                            await Task.Delay(500, ct);
+                            if (!await WakeContactsDeviceAsync(device, ct)) throw;
+                            await Task.Delay(1500, ct);
+                            var revived = await TryContactsBeaconConnectAsync(device, ct);
+                            if (revived is null) throw;
+                            activeLink = revived;
+                            continue;
+                        }
+                        // Right after waking a Contacts receiver it can still hold a pending receive task; the
+                        // clear inside the link usually fixes it, but on some phones only after a reconnect.
+                        Log.Warn($"CONTACTS: receiver busy (try {busyTry}); reconnecting and retrying");
+                        TransferStateChanged?.Invoke(_staged.TaskId, "phone was busy — retrying…");
+                        await Task.Delay(1000, ct);
+                        var again = await TryContactsBeaconConnectAsync(device, ct);
+                        if (again is null) throw;
+                        activeLink = again;
+                    }
                 }
             }
-            if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
+            finally
+            {
+                // Also on failure: a reconnected link left open would keep the phone connected to this PC.
+                if (!ReferenceEquals(activeLink, link)) { try { activeLink.Dispose(); } catch { } }
+            }
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
         }
 

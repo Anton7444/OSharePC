@@ -405,6 +405,7 @@ public sealed class PhoneScanner : IDisposable
     private async Task TryResolveContactNameAsync(ulong address, BluetoothAddressType type, int deviceType, string digest)
     {
         var key = $"{deviceType:X2}{digest}";
+        if (ContactNameLookupsPaused) return; // do not spend a try while a send/pre-warm owns the link
         lock (_gate)
         {
             _nameResolveState.TryGetValue(key, out var st);
@@ -429,6 +430,37 @@ public sealed class PhoneScanner : IDisposable
             RememberContactName(deviceType, digest, Encoding.UTF8.GetString(bytes));
         }
         catch (Exception ex) { Log.Info($"NAMES: name read for type {deviceType} did not work this time ({ex.GetType().Name})"); }
+    }
+
+    private int _nameLookupPauses;
+    private bool ContactNameLookupsPaused => Volatile.Read(ref _nameLookupPauses) > 0;
+
+    /// <summary>Stops the background GAP name reads until disposed. They open their own BLE connection to the
+    /// beacon address, which must not run alongside a send or pre-warm to the same device.</summary>
+    public IDisposable PauseContactNameLookups()
+    {
+        Interlocked.Increment(ref _nameLookupPauses);
+        return new NameLookupPause(this);
+    }
+
+    private sealed class NameLookupPause(PhoneScanner owner) : IDisposable
+    {
+        private int _released;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) Interlocked.Decrement(ref owner._nameLookupPauses);
+        }
+    }
+
+    /// <summary>Number of same-account LAN-announced (non-beacon) devices of this type seen within
+    /// <paramref name="within"/>. A Contacts beacon carries only type + account digest, so it can be tied
+    /// to a LAN device only when this is exactly one.</summary>
+    public int CountSameAccountLanDevices(int deviceType, TimeSpan within)
+    {
+        var cutoff = DateTimeOffset.UtcNow - within;
+        lock (_gate)
+            return _lanDevices.Values.Count(d => !d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) &&
+                                                 d.LanSameAccount && d.LanDeviceType == deviceType && d.LastSeen > cutoff);
     }
 
     /// <summary>Saves a real device name and refreshes the listed entry.</summary>
@@ -656,7 +688,7 @@ public sealed class PhoneScanner : IDisposable
                     lock (_gate)
                         if (_lanDevices.TryGetValue(beaconPdid, out var beaconDevice))
                             beaconDevice.Rssi = args.RawSignalStrengthInDBm;
-                    if (ContactNames.Get(sec.Payload[4], digest) is null)
+                    if (ContactNames.Get(sec.Payload[4], digest) is null && !ContactNameLookupsPaused)
                         Task.Run(() => TryResolveContactNameAsync(args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest));
                 }
             }

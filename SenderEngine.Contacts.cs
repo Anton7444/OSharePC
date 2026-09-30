@@ -16,6 +16,8 @@ public sealed partial class SenderEngine
         try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
         return await _contactsGate.WaitAsync(TimeSpan.FromSeconds(15), ct);
     }
+    /// <summary>How long a pre-warmed link (and a successful pre-warm check) is trusted.</summary>
+    private static readonly TimeSpan WarmLinkLifetime = TimeSpan.FromSeconds(230);
     private readonly Dictionary<string, DateTimeOffset> _prewarmedAt = new();
     private readonly Dictionary<string, (GattLink Link, DateTimeOffset At)> _warmLinks = new();
     private readonly object _prewarmTasksGate = new();
@@ -31,7 +33,7 @@ public sealed partial class SenderEngine
         // let go of it after ~4 min if nobody used it
         _ = Task.Run(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(240));
+            await Task.Delay(WarmLinkLifetime);
             lock (_warmLinks)
             {
                 if (_warmLinks.TryGetValue(key, out var cur) && ReferenceEquals(cur.Link, link))
@@ -50,7 +52,7 @@ public sealed partial class SenderEngine
         {
             if (!_warmLinks.TryGetValue(key, out var w)) return null;
             _warmLinks.Remove(key);
-            if (DateTimeOffset.UtcNow - w.At < TimeSpan.FromSeconds(240) && w.Link.IsConnected) return w.Link;
+            if (DateTimeOffset.UtcNow - w.At < WarmLinkLifetime && w.Link.IsConnected) return w.Link;
             try { w.Link.Dispose(); } catch { }
             return null;
         }
@@ -58,7 +60,7 @@ public sealed partial class SenderEngine
 
     private bool HasWarmLink(string key)
     {
-        lock (_warmLinks) return _warmLinks.TryGetValue(key, out var w) && w.Link.IsConnected && DateTimeOffset.UtcNow - w.At < TimeSpan.FromSeconds(230);
+        lock (_warmLinks) return _warmLinks.TryGetValue(key, out var w) && w.Link.IsConnected && DateTimeOffset.UtcNow - w.At < WarmLinkLifetime;
     }
 
     /// <summary>Called when files get staged: quietly checks each nearby Contacts device and wakes any whose receive
@@ -93,6 +95,12 @@ public sealed partial class SenderEngine
             catch (OperationCanceledException) { }
             catch (Exception ex) { Log.Warn($"CONTACTS: prewarm shutdown failed: {ex.Message}"); }
         }
+        DropWarmLinks();
+    }
+
+    /// <summary>Closes every pre-warmed link and forgets which devices were checked.</summary>
+    private void DropWarmLinks()
+    {
         lock (_warmLinks)
         {
             foreach (var (_, warm) in _warmLinks)
@@ -103,6 +111,19 @@ public sealed partial class SenderEngine
         }
         lock (_prewarmedAt) _prewarmedAt.Clear();
     }
+
+    /// <summary>Called when the OPPO account changes (login, switch, logout): links and checks made for the
+    /// previous account must not be reused, and must not keep the devices connected.</summary>
+    private void ResetContactsForAccountChange()
+    {
+        try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
+        DropWarmLinks();
+    }
+
+    private static string? CurrentContactsDigest() =>
+        string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid)
+            ? null
+            : OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid);
 
     private async Task PrewarmOneAsync(PhoneDevice device)
     {
@@ -115,6 +136,7 @@ public sealed partial class SenderEngine
             if (!await _contactsGate.WaitAsync(0)) return;
             try
             {
+                using var namePause = Scanner.PauseContactNameLookups();
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(75));
                 _prewarmCts = cts;
                 var ct = cts.Token;
@@ -131,9 +153,10 @@ public sealed partial class SenderEngine
                     try
                     {
                         link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, null, ct, beacon.AddressType, fast: true);
-                        _lastContactsBeacon = beacon; // lets the send path re-wake the receiver if this link dies
                         if (await link.ProbeReceiverAsync(ct))
                         {
+                            // The account may have changed while this ran; a link for the old account is useless.
+                            if (!string.Equals(CurrentContactsDigest(), digest, StringComparison.OrdinalIgnoreCase)) return;
                             lock (_prewarmedAt) _prewarmedAt[device.LanPdid] = DateTimeOffset.UtcNow;
                             Scanner.RememberContactName(device.LanDeviceType, digest, link.DeviceName);
                             Log.Info($"PREWARM: {device.Name} receive service is ready (link kept open for a quick send)");
@@ -159,10 +182,25 @@ public sealed partial class SenderEngine
             }
             finally { _prewarmCts = null; _contactsGate.Release(); }
         }
+        catch (OperationCanceledException) { Log.Info($"PREWARM: {device.Name}: stopped"); }
         catch (Exception ex) { Log.Info($"PREWARM: {device.Name}: {ex.Message}"); }
     }
 
-    private PhoneScanner.ContactsBeacon? _lastContactsBeacon;
+    /// <summary>Restarts this device's receive service through a beacon it sent just now. Beacon addresses
+    /// rotate, and any earlier beacon may belong to another same-account device, so never reuse an old one.</summary>
+    private async Task<bool> WakeContactsDeviceAsync(PhoneDevice device, CancellationToken ct)
+    {
+        var digest = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid!);
+        var beacon = await Scanner.WaitForContactsBeaconAsync((byte)device.LanDeviceType, digest,
+            DateTimeOffset.UtcNow - TimeSpan.FromSeconds(6), TimeSpan.FromSeconds(30), ct);
+        if (beacon is null)
+        {
+            Log.Info($"CONTACTS: no fresh {device.Name} beacon to wake its receive service");
+            return false;
+        }
+        await GattLink.WakeContactsReceiverAsync(beacon.Address, beacon.AddressType, ct);
+        return true;
+    }
 
     private async Task<GattLink?> TryContactsBeaconConnectAsync(PhoneDevice device, CancellationToken ct)
     {
@@ -183,7 +221,6 @@ public sealed partial class SenderEngine
                 return null;
             }
             since = beacon.SeenAt;
-            _lastContactsBeacon = beacon;
             Log.Info($"CONTACTS: connecting to {device.Name} beacon {PhoneDevice.FormatAddress(beacon.Address)} (attempt {attempt}, beacon {(DateTimeOffset.UtcNow - beacon.SeenAt).TotalSeconds:0.0}s old)");
             for (var inner = 1; inner <= 2; inner++)
             {
