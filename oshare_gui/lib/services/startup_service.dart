@@ -2,7 +2,7 @@ import 'dart:io';
 
 class StartupService {
   static const _runKey = r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run';
-  static const _valueName = 'OsharePC';
+  static const _valueName = 'OSharePC';
 
   static bool get isInstalledBuild =>
       Platform.isWindows &&

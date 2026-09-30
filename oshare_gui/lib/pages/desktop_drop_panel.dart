@@ -229,7 +229,7 @@ class _DesktopDropPanelAppState extends State<DesktopDropPanelApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OsharePC Drop Target',
+      title: 'OSharePC Drop Target',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,

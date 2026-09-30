@@ -619,24 +619,26 @@ class _SendTabState extends State<SendTab> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      Icon(
-                        Icons.network_wifi_rounded,
-                        size: 14,
-                        color: isDark
-                            ? AppColors.darkTextMuted
-                            : AppColors.lightTextMuted,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${device.rssi} dBm',
-                        style: TextStyle(
-                          fontSize: 11,
+                      if (device.kind != 'LAN' && device.kind != 'Contacts') ...[
+                        const SizedBox(width: 8),
+                        Icon(
+                          Icons.network_wifi_rounded,
+                          size: 14,
                           color: isDark
                               ? AppColors.darkTextMuted
                               : AppColors.lightTextMuted,
                         ),
-                      ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${device.rssi} dBm',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ],

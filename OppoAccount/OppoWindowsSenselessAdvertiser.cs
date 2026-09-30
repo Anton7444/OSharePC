@@ -96,7 +96,14 @@ public sealed class OppoWindowsSenselessAdvertiser : IDisposable
         buf[7] = 0x00; // flags byte, unconfirmed semantics -- cleared
         buf[8] = ServiceAdvTypeAbility;
         buf[9] = AbilityAdvTypeSenseless;
-        buf[10] = 0x00; // AbilityAuthorizeType + flags -- best-effort default
+        // AbilityAuthorizeType lives in bits 5-7 (com.oplus.pantaconnect.discovery.model.
+        // AbilityAuthorizeType: 1=NO_ACCOUNT, 2=SAME_ACCOUNT, 3=FAMILY_ACCOUNT_GROUP; 0 is
+        // not a valid enum value -- confirmed live via adb logcat, real devices reject our
+        // old buf[10]=0x00 with "toSenselessDiscoveryPacket error. Unknown AbilityAuthorizeType 0"
+        // and silently drop the whole advertisement, which very likely also hid us from
+        // their connectable-device list. We always advertise our OPPO account's digest here,
+        // so SAME_ACCOUNT(2) is the correct value: 2 << 5 = 0x40.
+        buf[10] = 0x40;
         // buf[11..15) ability-set bitmask -- best-effort default (zeroed)
         buf[15] = 0x00; // unconfirmed 1-byte field
         Array.Copy(accountDigest, 0, buf, 16, 3);

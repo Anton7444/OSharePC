@@ -343,7 +343,7 @@ public sealed class NavRail : ThemedControl
         g.Clear(scheme.CardColor);
 
         using (var headerBrush = new SolidBrush(scheme.OnSurface))
-            g.DrawString("OsharePC", Theme.HeaderFont, headerBrush, 20, 26);
+            g.DrawString("OSharePC", Theme.HeaderFont, headerBrush, 20, 26);
 
         for (var i = 0; i < ItemGlyphs.Length; i++)
         {

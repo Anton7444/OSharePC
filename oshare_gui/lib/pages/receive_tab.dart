@@ -206,7 +206,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                     // 3. Device Name (Big & friendly font)
                     Text(
                       status.deviceName.isEmpty
-                          ? 'OsharePC'
+                          ? 'OSharePC'
                           : status.deviceName,
                       textAlign: TextAlign.center,
                       style: TextStyle(

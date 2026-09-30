@@ -31,7 +31,7 @@ internal static class Program
         {
             Log.Warn("another OSharePC instance is already running — exiting");
             ApplicationConfiguration.Initialize();
-            AppDialog.Show(null, "OsharePC", Lang.T("Dialog.AlreadyRunning"), Ui.DialogKind.Info);
+            AppDialog.Show(null, "OSharePC", Lang.T("Dialog.AlreadyRunning"), Ui.DialogKind.Info);
             return 0;
         }
 
@@ -46,6 +46,12 @@ internal static class Program
             if (args.Contains("--mockphone"))
             {
                 var rc = RunMockPhone().GetAwaiter().GetResult();
+                mutex.ReleaseMutex();
+                return rc;
+            }
+            if (args.Contains("--mockreceive"))
+            {
+                var rc = RunMockReceive().GetAwaiter().GetResult();
                 mutex.ReleaseMutex();
                 return rc;
             }
@@ -545,6 +551,165 @@ internal static class Program
         await server.StopAsync();
         Log.Info(failures == 0 ? "MOCKPHONE PASSED" : $"MOCKPHONE FAILED ({failures})");
         return failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// Reverse of RunMockPhone: plays the PHONE-AS-SENDER role (a tiny HttpListener
+    /// serving /websocket + /download) against our real ReceiveSession.PullAsync
+    /// client, so the receive-side WebSocket/HTTP code (the part that will run once
+    /// the real BLE handshake hands it a phone ip:port) can be validated end-to-end
+    /// without any real device or BLE hardware.
+    /// </summary>
+    private static async Task<int> RunMockReceive()
+    {
+        int failures = 0;
+        const int port = 18959;
+        var saveDir = Path.Combine(Path.GetTempPath(), "oshare-mockreceive-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(saveDir);
+
+        var tmp1Name = "mockreceive-selftest.txt";
+        var tmp1Bytes = System.Text.Encoding.UTF8.GetBytes("hello from oshare receive selftest");
+        var taskId = Guid.NewGuid().ToString("N");
+
+        byte[] zipBytes;
+        using (var ms = new MemoryStream())
+        {
+            using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+            {
+                var entry = zip.CreateEntry(tmp1Name, System.IO.Compression.CompressionLevel.NoCompression);
+                await using var es = entry.Open();
+                await es.WriteAsync(tmp1Bytes);
+            }
+            zipBytes = ms.ToArray();
+        }
+
+        var listener = new HttpListener();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Start();
+        Log.Info($"MOCKRECEIVE: listening on http://127.0.0.1:{port}/");
+
+        var serverDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var serverTask = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    var ctx = await listener.GetContextAsync();
+                    if (ctx.Request.Url!.AbsolutePath == "/websocket" && ctx.Request.IsWebSocketRequest)
+                    {
+                        _ = Task.Run(() => HandleMockWebSocketAsync(ctx, taskId, tmp1Name, tmp1Bytes.Length, serverDone));
+                    }
+                    else if (ctx.Request.Url.AbsolutePath == "/download")
+                    {
+                        ctx.Response.ContentType = "application/zip";
+                        ctx.Response.ContentLength64 = zipBytes.Length;
+                        await ctx.Response.OutputStream.WriteAsync(zipBytes);
+                        ctx.Response.OutputStream.Close();
+                        Log.Info("MOCKRECEIVE: served /download");
+                    }
+                    else
+                    {
+                        ctx.Response.StatusCode = 404;
+                        ctx.Response.Close();
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException) { /* listener stopped */ }
+        });
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var saved = await ReceiveSession.PullAsync(
+                "127.0.0.1", port, "MockPhoneSender", saveDir,
+                s => Log.Info($"MOCKRECEIVE: {s}"), null, cts.Token);
+
+            if (saved.Count != 1) { Log.Error($"MOCKRECEIVE FAIL: expected 1 saved file, got {saved.Count}"); failures++; }
+            else
+            {
+                var savedBytes = await File.ReadAllBytesAsync(saved[0]);
+                if (!savedBytes.SequenceEqual(tmp1Bytes))
+                { Log.Error("MOCKRECEIVE FAIL: saved file content mismatch"); failures++; }
+                else Log.Info($"MOCKRECEIVE: content verified for '{Path.GetFileName(saved[0])}'");
+            }
+
+            try { await serverDone.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TimeoutException) { Log.Error("MOCKRECEIVE FAIL: never received final status from PC"); failures++; }
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"MOCKRECEIVE FAIL: {ex}");
+            failures++;
+        }
+        finally
+        {
+            listener.Stop();
+            try { await serverTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            try { Directory.Delete(saveDir, recursive: true); } catch { }
+        }
+
+        Log.Info(failures == 0 ? "MOCKRECEIVE PASSED" : $"MOCKRECEIVE FAILED ({failures})");
+        return failures == 0 ? 0 : 1;
+    }
+
+    private static async Task HandleMockWebSocketAsync(HttpListenerContext ctx, string taskId, string fileName, long fileSize, TaskCompletionSource<bool> serverDone)
+    {
+        var wsCtx = await ctx.AcceptWebSocketAsync(null);
+        var ws = wsCtx.WebSocket;
+        Log.Info("MOCKRECEIVE: phone-side ws accepted");
+        var buf = new byte[8192];
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        async Task<Envelope?> Recv()
+        {
+            var total = 0;
+            while (true)
+            {
+                var r = await ws.ReceiveAsync(buf.AsMemory(total), cts.Token);
+                if (r.MessageType == System.Net.WebSockets.WebSocketMessageType.Close) return null;
+                total += r.Count;
+                if (!r.EndOfMessage) continue;
+                var env = Envelope.Parse(System.Text.Encoding.UTF8.GetString(buf, 0, total));
+                return env;
+            }
+        }
+        async Task Send(string text)
+        {
+            Log.Info($"MOCKRECEIVE: phone -> {text}");
+            await ws.SendAsync(System.Text.Encoding.UTF8.GetBytes(text), System.Net.WebSockets.WebSocketMessageType.Text, true, cts.Token);
+        }
+
+        try
+        {
+            // Real phone initiates versionNegotiation itself.
+            await Send(Envelope.Build("action", 0, "versionNegotiation", new { versions = new[] { 1 } }));
+            var ack = await Recv();
+            Log.Info($"MOCKRECEIVE: phone <- {ack}");
+
+            await Send(Envelope.Build("action", 1, "sendRequest", new
+            {
+                taskId,
+                id = taskId,
+                fileName,
+                totalSize = fileSize,
+                fileCount = 1,
+                mimeType = "file/*",
+                senderName = "MockPhoneSender",
+            }));
+            var srAck = await Recv();
+            Log.Info($"MOCKRECEIVE: phone <- {srAck}");
+
+            // Wait for the PC's final completion status after it downloads via HTTP.
+            var final = await Recv();
+            Log.Info($"MOCKRECEIVE: phone <- {final} (final status)");
+            serverDone.TrySetResult(final is { Method: "status" });
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"MOCKRECEIVE: phone-side ws error: {ex.Message}");
+            serverDone.TrySetResult(false);
+        }
     }
 
     /// <summary>Offline verification of the crypto + advertisement layout, no UI/BLE needed.</summary>

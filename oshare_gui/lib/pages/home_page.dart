@@ -90,7 +90,7 @@ class _HomePageState extends State<HomePage> {
                   child: Row(
                     children: [
                       Text(
-                        'OsharePC',
+                        'OSharePC',
                         style: TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.w800,

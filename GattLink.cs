@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
+using Windows.Devices.Enumeration;
 using Windows.Storage.Streams;
 
 namespace OShareSender;
@@ -55,7 +56,7 @@ public enum CredentialMode
 /// read-0x9998 → write-0x9896 state machine supports a pure-LAN flow:
 /// state 4 {"ip","port"} makes the phone connect wss://ip:port directly.
 /// </summary>
-public sealed class GattLink : IDisposable
+public sealed partial class GattLink : IDisposable
 {
     public static readonly Guid ServiceUuid = new("00009955-0000-1000-8000-00805f9b34fb");
     public static readonly Guid CharStatusUuid = new("00009954-0000-1000-8000-00805f9b34fb");
@@ -90,15 +91,142 @@ public sealed class GattLink : IDisposable
     public GattCharacteristic? OConnectWriteChar { get; private set; }
     public GattCharacteristic? OConnectNotifyChar { get; private set; }
     public GattCharacteristic? IBeaconChar { get; private set; }
+    /// <summary>True while the underlying LE link is still up.</summary>
+    public bool IsConnected => _device?.ConnectionStatus == BluetoothConnectionStatus.Connected;
+    /// <summary>The peer GAP device name as reported by Windows (may be empty).</summary>
+    public string DeviceName => _device?.Name ?? "";
+    /// <summary>0x9996 (receiver status/public key) and 0x9995 (cancel) of the 9999 service — used to
+    /// clear a stale receive task on the phone.</summary>
+    public GattCharacteristic? OConnectWifiChar { get; private set; }
+    public GattCharacteristic? OConnectCancelChar { get; private set; }
+
+    /// <summary>One-time best-effort LE bond with the peer. Contacts (聯絡人)-mode
+    /// receivers require an encrypted link before their OShare GATT server responds;
+    /// Everyone mode serves pairless/plain. Returns true when the device ends up
+    /// paired (already paired, or the pairing completed).
+    /// NOTE: a pre-existing CLASSIC bond (IsPaired=true) does NOT carry LE keys when
+    /// it was created as BR/EDR-only (manual Windows pairing bonds audio only) — the
+    /// peer's stack still tries and fails to encrypt, and GATT stays silent. So when
+    /// paired we unpair first and re-pair to force fresh keys with cross-transport
+    /// derivation.</summary>
+    private static async Task<bool> TryPairOnceAsync(BluetoothLEDevice device, Action<string>? status)
+    {
+        try
+        {
+            var pairing = device.DeviceInformation.Pairing;
+            if (pairing.IsPaired)
+            {
+                // A paired LE node is a usable bond (BR/EDR pairing with cross-transport key
+                // derivation yields LE keys). Unpairing it destroys the only working link key.
+                Log.Info("BLE: device already paired — keeping the existing bond");
+                return true;
+            }
+            if (!pairing.CanPair)
+            {
+                Log.Info("BLE: peer reports CanPair=false — skipping pairing fallback");
+                return false;
+            }
+            Log.Info("BLE: service discovery failed — attempting LE pairing (not used on the Contacts beacon path)");
+            status?.Invoke("pairing for encrypted link…");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            DevicePairingResult? result = null;
+            foreach (var attempt in new Func<Task<DevicePairingResult>>[]
+                     {
+                         () => pairing.PairAsync().AsTask(cts.Token),
+                         () => pairing.PairAsync(DevicePairingProtectionLevel.None).AsTask(cts.Token),
+                     })
+            {
+                try
+                {
+                    result = await attempt();
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+                {
+                    Log.Warn("BLE: this pairing protection level is not supported — trying the next");
+                    continue;
+                }
+                Log.Info($"BLE: pairing finished with status {result.Status} (protection used: {result.ProtectionLevelUsed})");
+                if (result.Status is DevicePairingResultStatus.Paired or DevicePairingResultStatus.AlreadyPaired)
+                    return true;
+                // a plain "Failed" may mean the chosen protection level was refused —
+                // fall through to the next level before giving up
+            }
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"BLE: pairing attempt failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>Waits for the device to advertise, via a live DeviceInformation watcher,
+    /// then opens the BluetoothLEDevice from the reported id. FromBluetoothAddressAsync
+    /// resolves from the system cache only, and raw advertiser beacons (the tablet's
+    /// connectable 0x3339/0x686b senseless advertisements in Contacts mode) never enter
+    /// that cache on their own — but an UNFILTERED BLE AEP enumeration forces the system
+    /// to materialize AEPs for currently-advertising devices, whose ids FromIdAsync
+    /// accepts directly. The address is matched against both byte orders because the
+    /// AEP id embeds the peer address little-endian.</summary>
+    private static async Task<BluetoothLEDevice?> WaitForAdvertisementDeviceAsync(
+        ulong bluetoothAddress, BluetoothAddressType addressType, TimeSpan timeout, CancellationToken ct)
+    {
+        var normalHex = bluetoothAddress.ToString("X12");
+        var reversedHex = string.Create(12, bluetoothAddress, (span, addr) =>
+        {
+            for (var i = 0; i < 6; i++)
+            {
+                var b = (byte)(addr >> (8 * i));
+                span[i * 2] = (char)((b >> 4) < 10 ? '0' + (b >> 4) : 'A' + (b >> 4) - 10);
+                span[i * 2 + 1] = (char)((b & 0xF) < 10 ? '0' + (b & 0xF) : 'A' + (b & 0xF) - 10);
+            }
+        });
+        Log.Info($"BLE: cache lookup missed {PhoneDevice.FormatAddress(bluetoothAddress)} — running unfiltered AEP enumeration to catch its current advertisement");
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var watcher = DeviceInformation.CreateWatcher(BluetoothLEDevice.GetDeviceSelector());
+        void OnAdded(DeviceWatcher sender, DeviceInformation info)
+        {
+            if (info is null) return;
+            var tail = info.Id.Substring(info.Id.LastIndexOf('-') + 1).Replace(":", "").ToUpperInvariant();
+            if (tail == normalHex || tail == reversedHex)
+                tcs.TrySetResult(info.Id);
+        }
+        watcher.Added += OnAdded;
+        watcher.Stopped += (_, _) => tcs.TrySetCanceled();
+        try
+        {
+            watcher.Start();
+            string deviceId;
+            try
+            {
+                deviceId = await tcs.Task.WaitAsync(timeout, ct);
+            }
+            catch (TimeoutException)
+            {
+                Log.Warn($"BLE: no advertisement from {PhoneDevice.FormatAddress(bluetoothAddress)} within {timeout.TotalSeconds:0}s (AEP enumeration)");
+                return null;
+            }
+            Log.Info($"BLE: AEP enumeration caught {PhoneDevice.FormatAddress(bluetoothAddress)} — opening device");
+            using var openCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var openLinked = CancellationTokenSource.CreateLinkedTokenSource(ct, openCts.Token);
+            return await BluetoothLEDevice.FromIdAsync(deviceId).AsTask(openLinked.Token);
+        }
+        finally
+        {
+            watcher.Added -= OnAdded;
+            try { watcher.Stop(); } catch { }
+        }
+    }
 
     public static Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow) =>
         ConnectAsync(bluetoothAddress, flow, retries: 3, status: null, CancellationToken.None);
 
     /// <summary>Connect with retries — 'Unreachable' from GetGattServicesAsync is
     /// usually transient (address rotation, advertisement timing, RF).</summary>
-    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified)
+    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified, bool fast = false)
     {
         Exception? last = null;
+        var sawPreExistingLink = false;
         for (int attempt = 1; attempt <= retries; attempt++)
         {
             ct.ThrowIfCancellationRequested();
@@ -107,21 +235,72 @@ public sealed class GattLink : IDisposable
             GattSession? session = null;
             try
             {
-                device = addressType == BluetoothAddressType.Unspecified
-                    ? await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress)
-                    : await BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress, addressType);
+                // FromBluetoothAddressAsync has no built-in timeout and is known to hang
+                // indefinitely on some adapters/driver states when the target never
+                // responds (observed live: "attempt 1/1" stuck forever with zero further
+                // log output) — wrap it so a bad attempt surfaces as a failure the retry
+                // loop can act on, instead of hanging the whole send forever.
+                using var connectTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(fast ? 7 : 8));
+                using var connectLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, connectTimeoutCts.Token);
+                var fromAddressTask = addressType == BluetoothAddressType.Unspecified
+                    ? BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress).AsTask(connectLinkedCts.Token)
+                    : BluetoothLEDevice.FromBluetoothAddressAsync(bluetoothAddress, addressType).AsTask(connectLinkedCts.Token);
+                try
+                {
+                    device = await fromAddressTask;
+                }
+                catch (OperationCanceledException) when (connectTimeoutCts.IsCancellationRequested)
+                {
+                    throw new InvalidOperationException("FromBluetoothAddressAsync timed out after 8s — device not found — is the phone still advertising?");
+                }
                 if (device is null)
-                    throw new InvalidOperationException("device not found — is the phone still advertising?");
+                {
+                    // FromBluetoothAddressAsync resolves from the SYSTEM CACHE only, and
+                    // raw BLE advertisements (e.g. the tablet's connectable 0xFCF1
+                    // senseless beacon in Contacts mode) never enter that cache — so it
+                    // returns null even while the device is actively advertising.
+                    // Fallback: a live DeviceInformation watcher for exactly this address;
+                    // it fires Added on the next advertisement, and FromIdAsync connects.
+                    device = await WaitForAdvertisementDeviceAsync(bluetoothAddress, addressType, TimeSpan.FromSeconds(fast ? 3 : 8), ct)
+                             ?? throw new InvalidOperationException("device not found — is the phone still advertising?");
+                }
 
                 // Match the stock Android client lifecycle: establish a real LE/GATT
                 // session first, then perform protocol service discovery. Do not race
                 // a full uncached database walk against the physical link coming up.
                 try
                 {
-                    session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId);
+                    // Another unguarded WinRT call observed hanging well past any
+                    // reasonable link-establishment time on a flaky attempt — same
+                    // fix as FromBluetoothAddressAsync above.
+                    using var sessionTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(fast ? 4 : 8));
+                    using var sessionLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, sessionTimeoutCts.Token);
+                    try
+                    {
+                        session = await GattSession.FromDeviceIdAsync(device.BluetoothDeviceId).AsTask(sessionLinkedCts.Token);
+                    }
+                    catch (OperationCanceledException) when (sessionTimeoutCts.IsCancellationRequested)
+                    {
+                        Log.Warn("BLE: GattSession.FromDeviceIdAsync timed out after 8s");
+                        session = null;
+                    }
                     if (session is not null)
                     {
                         Log.Info($"BLE: GATT session created status={session.SessionStatus} pdu={session.MaxPduSize} canMaintain={session.CanMaintainConnection}");
+                        // pdu > 23 at creation means an ATT MTU exchange already happened on
+                        // this pair — i.e. an established link existed BEFORE this attempt.
+                        // Either the phone connected inbound to our receive GATT server (its
+                        // senseless flow), or a prior attempt's link hasn't dropped. BLE
+                        // forbids a second link between the same address pair in the opposite
+                        // role, so outbound discovery against such a peer just times out.
+                        if (session.SessionStatus == GattSessionStatus.Active && session.MaxPduSize > 23)
+                        {
+                            sawPreExistingLink = true;
+                            Log.Warn("BLE: link to this device was ALREADY established before connecting " +
+                                     $"(mtu={session.MaxPduSize}) — the phone likely connected inbound to our " +
+                                     "receive GATT server, or a previous attempt's link hasn't dropped; " +
+                                     "outbound discovery may be refused by the peer");
+                        }
                         if (session.CanMaintainConnection)
                         {
                             session.MaintainConnection = true;
@@ -159,10 +338,32 @@ public sealed class GattLink : IDisposable
                 GattCommunicationStatus discoveryStatus;
                 string discoveryLabel;
 
+                // GetGattServicesForUuidAsync has been observed hanging up to ~45s
+                // before finally failing with "Unreachable" (a known WinRT GATT
+                // caching quirk) — cap each discovery call so one bad attempt doesn't
+                // eat the whole retry budget, and treat a timeout the same as an
+                // Unreachable status so the outer retry loop moves on to a fresh
+                // attempt/candidate quickly instead of stalling the entire send.
+                async Task<(GattCommunicationStatus Status, IReadOnlyList<GattDeviceService> Services)> DiscoverUuidAsync(Guid uuid)
+                {
+                    using var discoTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(fast ? 5 : 10));
+                    using var discoLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, discoTimeoutCts.Token);
+                    try
+                    {
+                        var result = await device!.GetGattServicesForUuidAsync(uuid, BluetoothCacheMode.Uncached).AsTask(discoLinkedCts.Token);
+                        return (result.Status, result.Services);
+                    }
+                    catch (OperationCanceledException) when (discoTimeoutCts.IsCancellationRequested)
+                    {
+                        Log.Warn($"BLE: GetGattServicesForUuidAsync({uuid}) timed out after 10s — treating as Unreachable");
+                        return (GattCommunicationStatus.Unreachable, Array.Empty<GattDeviceService>());
+                    }
+                }
+
                 if (flow == SendFlow.OShareHotspot)
                 {
                     Log.Info("BLE: discovering target alliance service 9955 only");
-                    var result = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                    var result = await DiscoverUuidAsync(ServiceUuid);
                     discoveryStatus = result.Status;
                     discoveryLabel = "9955";
                     if (result.Status == GattCommunicationStatus.Success)
@@ -171,7 +372,7 @@ public sealed class GattLink : IDisposable
                 else
                 {
                     Log.Info("BLE: discovering target OConnect service 9999 only");
-                    var oconnect = await device.GetGattServicesForUuidAsync(OConnectServiceUuid, BluetoothCacheMode.Uncached);
+                    var oconnect = await DiscoverUuidAsync(OConnectServiceUuid);
                     discoveryStatus = oconnect.Status;
                     discoveryLabel = "9999";
                     if (oconnect.Status == GattCommunicationStatus.Success)
@@ -185,11 +386,53 @@ public sealed class GattLink : IDisposable
                         discoveredServices.Count == 0)
                     {
                         Log.Info("BLE: service 9999 absent; probing 9955 fallback");
-                        var alliance = await device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached);
+                        var alliance = await DiscoverUuidAsync(ServiceUuid);
                         discoveryStatus = alliance.Status;
                         discoveryLabel = "9955";
                         if (alliance.Status == GattCommunicationStatus.Success)
                             discoveredServices.AddRange(alliance.Services);
+                    }
+                }
+
+                if (discoveryStatus != GattCommunicationStatus.Success)
+                {
+                    // Live finding (2026-09-29): in Contacts (聯絡人) visibility the
+                    // receiver's OShare GATT server answers ONLY over an encrypted link —
+                    // the tablet's own stack logs an SMP encryption attempt for the peer
+                    // and then serves nothing to an unencrypted client, which Windows
+                    // reports as discovery Unreachable. Everyone (所有人) mode serves
+                    // pairless/plain and needs none of this. Attempt a one-time LE bond
+                    // so the peer can encrypt, then retry discovery.
+                    // The fast (Contacts beacon) path never pairs: a bond makes the tablet drop Windows' first ATT
+                    // request (30 s timeout) and each PairAsync attempt burns ~5 s; a failed attempt just retries
+                    // against the next fresh beacon.
+                    if (!fast && await TryPairOnceAsync(device!, status))
+                    {
+                        Log.Info("BLE: paired — retrying service discovery over the encrypted link");
+                        if (flow == SendFlow.OShareHotspot)
+                        {
+                            var retryAlliance = await DiscoverUuidAsync(ServiceUuid);
+                            discoveryStatus = retryAlliance.Status;
+                            discoveryLabel = "9955";
+                            if (retryAlliance.Status == GattCommunicationStatus.Success)
+                                discoveredServices.AddRange(retryAlliance.Services);
+                        }
+                        else
+                        {
+                            var retryOConnect = await DiscoverUuidAsync(OConnectServiceUuid);
+                            discoveryStatus = retryOConnect.Status;
+                            discoveryLabel = "9999";
+                            if (retryOConnect.Status == GattCommunicationStatus.Success)
+                                discoveredServices.AddRange(retryOConnect.Services);
+                            else
+                            {
+                                var retryAlliance = await DiscoverUuidAsync(ServiceUuid);
+                                discoveryStatus = retryAlliance.Status;
+                                discoveryLabel = "9955";
+                                if (retryAlliance.Status == GattCommunicationStatus.Success)
+                                    discoveredServices.AddRange(retryAlliance.Services);
+                            }
+                        }
                     }
                 }
 
@@ -206,7 +449,7 @@ public sealed class GattLink : IDisposable
                 session = null;
                 Log.Info($"BLE: GATT connected to {PhoneDevice.FormatAddress(bluetoothAddress)} '{link._device.Name}' (addressType={addressType}, flow={flow}, target={discoveryLabel}, attempt {attempt})");
 
-                try
+                if (!fast) try
                 {
                     var allServices = await link._device.GetGattServicesAsync(BluetoothCacheMode.Uncached);
                     if (allServices.Status == GattCommunicationStatus.Success)
@@ -230,13 +473,18 @@ public sealed class GattLink : IDisposable
             {
                 last = ex;
                 Log.Warn($"BLE: connect attempt {attempt}/{retries} failed: {ex.Message}");
+                // Release the keep-alive BEFORE disposing, or Windows holds the link
+                // open and poisons the next attempt with a pre-existing connection.
+                try { if (session is not null) session.MaintainConnection = false; } catch { }
                 try { session?.Dispose(); } catch { }
                 try { device?.Dispose(); } catch { }
                 if (attempt < retries) await Task.Delay(2000, ct);
             }
         }
-        throw new InvalidOperationException($"BLE: connect failed after {retries} attempts — {last?.Message}. " +
-            "Make sure the 互传/OShare receive screen stays open on the phone.");
+        var hint = sawPreExistingLink
+            ? " A link to this device was already established before connecting (see BLEDIAG logs) — toggle the phone's Bluetooth off/on (or ignore/delete this PC from the phone's 互傳 device list) to drop it, then retry."
+            : " Make sure the 互传/OShare receive screen stays open on the phone.";
+        throw new InvalidOperationException($"BLE: connect failed after {retries} attempts — {last?.Message}.{hint}");
     }
 
     /// <summary>Enumerates the services needed by the selected flow. Called by
@@ -261,6 +509,8 @@ public sealed class GattLink : IDisposable
                         else if (c.Uuid == OConnectWriteUuid) OConnectWriteChar = c;
                         else if (c.Uuid == OConnectNotifyUuid) OConnectNotifyChar = c;
                         else if (c.Uuid == IBeaconCharUuid) IBeaconChar = c;
+                        else if (c.Uuid == new Guid("00009996-0000-1000-8000-00805f9b34fb")) OConnectWifiChar = c;
+                        else if (c.Uuid == new Guid("00009995-0000-1000-8000-00805f9b34fb")) OConnectCancelChar = c;
                     }
                     if (IBeaconChar is not null) Log.Info("BLE: 0x9892 iBeacon characteristic IS present this session");
                 }
@@ -291,6 +541,30 @@ public sealed class GattLink : IDisposable
                 }
             }
             catch (Exception ex) { Log.Warn($"BLE: 9999 service probe failed: {ex.Message}"); }
+        }
+
+        // The iBeacon business characteristic 0x9892 lives in the DCP service 0xBB15, not in 0x9999.
+        if ((flow == SendFlow.OConnectLan || flow == SendFlow.Auto) && IBeaconChar is null && _device is not null)
+        {
+            try
+            {
+                var bb = await _device.GetGattServicesForUuidAsync(new Guid("0000bb15-0000-1000-8000-00805f9b34fb"), BluetoothCacheMode.Uncached);
+                if (bb.Status == GattCommunicationStatus.Success)
+                {
+                    foreach (var svc in bb.Services)
+                    {
+                        _services.Add(svc);
+                        var cr = await svc.GetCharacteristicsForUuidAsync(IBeaconCharUuid, BluetoothCacheMode.Uncached);
+                        if (cr.Status == GattCommunicationStatus.Success && cr.Characteristics.Count > 0)
+                        {
+                            IBeaconChar = cr.Characteristics[0];
+                            Log.Info("BLE: 0x9892 iBeacon characteristic IS present this session (service 0xBB15)");
+                        }
+                    }
+                }
+                else Log.Info($"BLE: BB15 service lookup status {bb.Status}");
+            }
+            catch (Exception ex) { Log.Warn($"BLE: BB15/9892 probe failed: {ex.Message}"); }
         }
 
         // 9955 alliance service — OShare flow only. Isolation: the OConnect flow
@@ -481,7 +755,10 @@ public sealed class GattLink : IDisposable
         // cannot make anything worse — the write either succeeds or the
         // characteristic simply wasn't there, and the pv=1/pv=5 flow below runs
         // exactly as it would have anyway.
-        if (!string.IsNullOrEmpty(oppoSsoid))
+        // OFF by default: the pv=5 account proof below already makes the phone skip the
+        // confirm card, and an unanswered 0x9892 write (the tablet's iBeacon handler only
+        // answers while its share panel is active) blocks the whole ATT queue for 30 s.
+        if (!string.IsNullOrEmpty(oppoSsoid) && Environment.GetEnvironmentVariable("OSHAREPC_IBEACON_WRITE") == "1")
         {
             var beaconDeviceId = SettingsStore.Current.OppoBleDeviceId ?? senderName;
             try { await TryWriteIBeaconSameAccountAsync(oppoSsoid, beaconDeviceId, senderName, ct); }
@@ -549,7 +826,17 @@ public sealed class GattLink : IDisposable
         try
         {
             // 2. read 0x9897 - phone replies {"state","key","version"} and arms N=1 (5s timer!)
-            var read = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached);
+            GattReadResult read;
+            try
+            {
+                // A healthy receiver answers in well under a second. A listed-but-dead 9999 service (its app-side
+                // server already closed) never answers; fail after 6s instead of the OS default of ~30s.
+                read = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+            }
+            catch (TimeoutException)
+            {
+                throw new InvalidOperationException("BLE: receiver not responding (read 9897 timed out)");
+            }
             if (read.Status != GattCommunicationStatus.Success)
                 throw new InvalidOperationException($"BLE: read 9897 failed ({read.Status})");
             var hsJson = ReadString(read.Value);
@@ -559,6 +846,32 @@ public sealed class GattLink : IDisposable
             var state = hsDoc.RootElement.TryGetProperty("state", out var st) ? st.GetInt32() : -1;
             if (string.IsNullOrEmpty(phonePub))
                 throw new InvalidOperationException("BLE: 9897 reply has no key");
+            if (state != 0 && OConnectWifiChar is not null && OConnectCancelChar is not null)
+            {
+                // A stale receive task on the phone (left by an aborted/timed-out earlier session, or by a
+                // wake-up read) makes it answer "busy". Its own cancel command clears it: read 0x9996 first
+                // (the phone only accepts writes from a device that has read), then write 02 to 0x9995.
+                Log.Info($"BLE: phone reports busy (state={state}) — clearing its stale receive task (9996 read + 9995=02)");
+                try
+                {
+                    await OConnectWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+                    await OConnectCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+                    await Task.Delay(700, ct);
+                    read = await OConnectReadChar.ReadValueAsync(BluetoothCacheMode.Uncached);
+                    if (read.Status == GattCommunicationStatus.Success)
+                    {
+                        hsJson = ReadString(read.Value);
+                        Log.Info($"BLE: 9897 status after clear: {hsJson}");
+                        using var hsDoc2 = JsonDocument.Parse(hsJson);
+                        phonePub = hsDoc2.RootElement.TryGetProperty("key", out var k2) ? k2.GetString() : phonePub;
+                        state = hsDoc2.RootElement.TryGetProperty("state", out var st2) ? st2.GetInt32() : state;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    Log.Warn($"BLE: clearing the phone's stale receive task failed: {ex.Message}");
+                }
+            }
             if (state != 0)
                 throw new InvalidOperationException($"BLE: phone busy (state={state}) - close other transfers and retry");
 
@@ -572,7 +885,7 @@ public sealed class GattLink : IDisposable
             //    pv=5 was avoided by default: some builds expose no CCCD on 0x9898, and
             //    announcing pv=5 without being able to receive the phone's challenge
             //    would strand the transfer instead of falling back gracefully).
-            var effectivePv = (!string.IsNullOrEmpty(oppoSsoid) && notificationsSubscribed) ? 5 : OConnectPv;
+            var effectivePv = !string.IsNullOrEmpty(oppoSsoid) ? 5 : OConnectPv;
             Log.Info($"BLE: OConnect pv={effectivePv} (ssoid configured={!string.IsNullOrEmpty(oppoSsoid)}, notify subscribed={notificationsSubscribed})");
             var name = senderName ?? "PC";
             while (JsonSerializer.Serialize(BuildState1(crypto.PublicKeyB64, name, fileCount, effectivePv)).Length > maxPdu - 3 && name.Length > 4)
@@ -600,26 +913,24 @@ public sealed class GattLink : IDisposable
                 status?.Invoke("waiting for phone account validation...");
                 try
                 {
-                    var challengeJson = await accountNotifyTcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
-                    using var challenge = JsonDocument.Parse(challengeJson);
-                    var encPhoneAccount = challenge.RootElement.TryGetProperty("account_id", out var ai)
-                        ? ai.GetString() : null;
-                    if (string.IsNullOrEmpty(encPhoneAccount))
-                        throw new InvalidOperationException("account challenge had no account_id");
-                    var phoneAccount = OShareCrypto.CbcDecryptFromB64(cbcKey, cbcIv, encPhoneAccount);
-                    Log.Info($"BLE: account challenge decrypted (account len {phoneAccount.Length})");
+                    // The phone's check (w#j) decrypts OUR reply and compares it with its own
+                    // account id — the challenge content is irrelevant, and Windows can't even
+                    // receive it (0x9898 has no CCCD). So wait just long enough for the phone to
+                    // enter N=6 after state1, then answer with the uppercase account hash.
+                    if (notificationsSubscribed)
+                    {
+                        try { await accountNotifyTcs.Task.WaitAsync(TimeSpan.FromMilliseconds(1500), ct); } catch (TimeoutException) { }
+                    }
+                    else await Task.Delay(500, ct);
 
-                    var proof = OppoAccount.OppoSsoidHash.Hash(oppoSsoid!);
+                    var proof = OppoAccount.OppoSsoidHash.Hash(oppoSsoid!).ToUpperInvariant();
                     var accountResp = JsonSerializer.Serialize(new Dictionary<string, object>
                     {
                         ["account_id"] = OShareCrypto.CbcEncryptToB64(cbcKey, cbcIv, proof),
                     });
                     Log.Info($"BLE: 9896 account response <- {accountResp}");
                     await WriteOConnectSingle(accountResp);
-
-                    // the phone validates, notifies its wlan offer and moves to N=3. We
-                    // don't need that message - our state3 offer doesn't depend on it -
-                    // so we skip waiting for it entirely.
+                    await Task.Delay(300, ct);
                 }
                 catch (Exception ex) when (ex is TimeoutException or OperationCanceledException && !ct.IsCancellationRequested)
                 {
@@ -825,6 +1136,12 @@ public sealed class GattLink : IDisposable
 
     public void Dispose()
     {
+        // MaintainConnection=true makes Windows keep re-establishing this link even
+        // after the device object is gone; clearing it first is what actually lets
+        // the link drop. Otherwise the NEXT connect attempt to the same phone sees
+        // an already-established link and its discovery silently times out (BLE
+        // forbids a second link between the same address pair in the other role).
+        try { if (_session is not null) _session.MaintainConnection = false; } catch { }
         try { _session?.Dispose(); } catch { }
         _session = null;
         foreach (var svc in _services)

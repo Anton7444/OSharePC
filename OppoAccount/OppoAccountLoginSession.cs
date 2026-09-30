@@ -1,21 +1,27 @@
+using System.Text.Json;
+
 namespace OShareSender.OppoAccount;
 
 /// <summary>
 /// Drives one "log in to your OPPO account" attempt end-to-end and reports progress
 /// via a push callback (matching OShareBridgeServer's event-queue convention), so the
-/// Flutter settings page can show the QR code, live status, and finally the list of
-/// available 2FA methods.
+/// Flutter settings page can show the QR code, live status, and the available 2FA
+/// methods.
 ///
-/// Covers only what's confirmed working: generate QR -> poll for scan/confirm ->
-/// exchange for a processToken -> validate it -> list 2FA methods. Submitting an OTP
-/// and the final native-side session exchange are not implemented yet (see
-/// docs/oppo-account-login-notes.md).
+/// Covers the confirmed web flow: generate QR -> poll for scan/confirm -> exchange for
+/// a processToken -> validate it -> list methods -> gather/validate the selected
+/// password or one-time code. The final native-side session exchange is still not
+/// implemented (see docs/oppo-account-login-notes.md).
 /// </summary>
 public sealed class OppoAccountLoginSession : IAsyncDisposable
 {
     private readonly OppoAccountClient _client = new();
     private readonly CancellationTokenSource _cts = new();
+    private string? _processToken;
+    private IReadOnlyList<VerificationMethod> _verificationMethods = Array.Empty<VerificationMethod>();
     private Task? _runTask;
+
+    private const string VerificationSceneId = "RYhhvBD6i3zDrCL3ARei";
 
     public void Start(Action<string, object> push)
     {
@@ -23,6 +29,29 @@ public sealed class OppoAccountLoginSession : IAsyncDisposable
     }
 
     public void Cancel() => _cts.Cancel();
+
+    public async Task<VerificationGatherResult> GatherVerificationAsync(string verMethod)
+    {
+        var processToken = _processToken;
+        if (string.IsNullOrWhiteSpace(processToken))
+            throw new InvalidOperationException("The OPPO login has not reached two-factor verification yet.");
+        EnsureKnownVerificationMethod(verMethod);
+        return await _client.GatherUserDataAsync(processToken, verMethod, ct: _cts.Token);
+    }
+
+    public async Task<VerificationValidationResult> ValidateVerificationAsync(
+        string verMethod,
+        string validateData)
+    {
+        var processToken = _processToken;
+        if (string.IsNullOrWhiteSpace(processToken))
+            throw new InvalidOperationException("The OPPO login has not reached two-factor verification yet.");
+        if (string.IsNullOrWhiteSpace(validateData))
+            throw new ArgumentException("A verification code or password is required.", nameof(validateData));
+        EnsureKnownVerificationMethod(verMethod);
+
+        return await _client.ValidateUserDataAsync(processToken, verMethod, validateData, _cts.Token);
+    }
 
     private async Task RunAsync(Action<string, object> push, CancellationToken ct)
     {
@@ -38,6 +67,8 @@ public sealed class OppoAccountLoginSession : IAsyncDisposable
                 await Task.Delay(TimeSpan.FromSeconds(3), ct);
                 status = await _client.CheckQrCodeAsync(qr.Qid, ct);
                 push("oppoAccountStatus", new { status = status.Status, accountName = status.AccountName });
+                if (!string.IsNullOrWhiteSpace(status.AccountName))
+                    SettingsStore.Save(oppoAccountName: status.AccountName);
                 if (status.Status is "CONFIRMED" or "EXPIRED" or "CANCELLED") break;
             }
 
@@ -49,11 +80,22 @@ public sealed class OppoAccountLoginSession : IAsyncDisposable
 
             var check = await _client.AuthnCheckAsync(qr.Qid, ct);
             var validate = await _client.AuthnValidateAsync(check.ProcessToken, ct);
+            if (!string.IsNullOrWhiteSpace(validate.AccountName))
+                SettingsStore.Save(oppoAccountName: validate.AccountName);
 
-            // envInfo's real expected content is still unconfirmed (see findings notes) —
-            // "{}" is a best-effort placeholder. If the server rejects it, this surfaces
-            // as oppoAccountError below rather than crashing.
-            var methods = await _client.VerificationListAsync(check.ProcessToken, "{}", ct);
+            // The web client sends a JSON string here, rather than an empty object.
+            // Sending the same shape avoids a server-side validation error before the
+            // actual 2FA methods are returned.
+            var envInfo = JsonSerializer.Serialize(new
+            {
+                sceneId = ExtractSceneId(validate.VerificationUrl) ?? VerificationSceneId,
+                thirdPartyAppInfo = "",
+                enableFinger = false,
+                enablePin = false,
+            });
+            var methods = await _client.VerificationListAsync(check.ProcessToken, envInfo, ct);
+            _processToken = methods.ProcessToken;
+            _verificationMethods = methods.VerMethodList;
 
             push("oppoAccountMethods", new
             {
@@ -61,7 +103,14 @@ public sealed class OppoAccountLoginSession : IAsyncDisposable
                 verificationId = methods.VerificationId,
                 currentRound = methods.CurrentRound,
                 totalRound = methods.TotalRound,
-                methods = methods.VerMethodList,
+                tokenExpired = methods.TokenExpired,
+                methods = methods.VerMethodList.Select(m => m.VerMethod).ToArray(),
+                methodDetails = methods.VerMethodList.Select(m => new
+                {
+                    method = m.VerMethod,
+                    display = m.Display,
+                    order = m.Order,
+                }).ToArray(),
             });
         }
         catch (OperationCanceledException)
@@ -72,6 +121,27 @@ public sealed class OppoAccountLoginSession : IAsyncDisposable
         {
             push("oppoAccountError", new { error = ex.Message });
         }
+    }
+
+    private void EnsureKnownVerificationMethod(string verMethod)
+    {
+        if (string.IsNullOrWhiteSpace(verMethod) ||
+            !_verificationMethods.Any(m => string.Equals(m.VerMethod, verMethod, StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException("That verification method is not available for this login.", nameof(verMethod));
+    }
+
+    private static string? ExtractSceneId(string? verificationUrl)
+    {
+        if (string.IsNullOrWhiteSpace(verificationUrl)) return null;
+        var queryStart = verificationUrl.IndexOf('?');
+        if (queryStart < 0 || queryStart == verificationUrl.Length - 1) return null;
+        foreach (var part in verificationUrl[(queryStart + 1)..].Split('&'))
+        {
+            var pieces = part.Split('=', 2);
+            if (pieces.Length == 2 && string.Equals(pieces[0], "sceneId", StringComparison.OrdinalIgnoreCase))
+                return Uri.UnescapeDataString(pieces[1]);
+        }
+        return null;
     }
 
     public async ValueTask DisposeAsync()

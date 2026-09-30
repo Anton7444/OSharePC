@@ -88,7 +88,7 @@ public sealed class MainForm : Form
         // DPI scaling keeps the hand-laid-out shell from being clipped at 150%+.
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(96f, 96f);
-        Text = "OsharePC";
+        Text = "OSharePC";
         Lang.Load();
         Size = new Size(960, 660);
         MinimumSize = new Size(760, 560);
@@ -150,7 +150,7 @@ public sealed class MainForm : Form
             {
                 e.Cancel = true;
                 Hide();
-                _tray.ShowBalloonTip(1500, "OsharePC", Lang.T("Dialog.StillRunning"), ToolTipIcon.Info);
+                _tray.ShowBalloonTip(1500, "OSharePC", Lang.T("Dialog.StillRunning"), ToolTipIcon.Info);
             }
         };
         Shown += async (_, _) => await StartEngineAsync();
@@ -576,7 +576,7 @@ public sealed class MainForm : Form
     {
         _tray = new NotifyIcon
         {
-            Text = "OsharePC",
+            Text = "OSharePC",
             Icon = AppIcon.App,
             Visible = true,
         };
@@ -788,7 +788,7 @@ public sealed class MainForm : Form
 
         var answer = MessageBox.Show(this,
             $"A OShare device ({offer.SenderId}) wants to send files to this PC.\n\nAccept the incoming transfer?",
-            "Incoming OsharePC transfer", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+            "Incoming OSharePC transfer", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
             MessageBoxDefaultButton.Button2);
         return Task.FromResult(answer == DialogResult.Yes);
     }
@@ -871,7 +871,7 @@ public sealed class MainForm : Form
 
         try
         {
-            _tray.ShowBalloonTip(3000, "OsharePC",
+            _tray.ShowBalloonTip(3000, "OSharePC",
                 $"Received {files.Count} file(s) from {senderName}", ToolTipIcon.Info);
         }
         catch { }
@@ -1016,7 +1016,7 @@ public sealed class MainForm : Form
         _wantProgress = progress is not null;
         if (progress is not null) _footerBar.SetValue(progress.Value);
         LayoutFooter();
-        SetTrayText($"OsharePC — {TrayState(state)}");
+        SetTrayText($"OSharePC — {TrayState(state)}");
 
         if (_sending && _activeAddress is { } active)
         {

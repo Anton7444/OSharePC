@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
@@ -126,7 +127,7 @@ Future<void> _runDesktopDropPanel() async {
       size: panelWindowSize,
       minimumSize: panelWindowSize,
       maximumSize: panelWindowSize,
-      title: 'OsharePC Drop Target',
+      title: 'OSharePC Drop Target',
       titleBarStyle: TitleBarStyle.hidden,
       backgroundColor: Colors.transparent,
       alwaysOnTop: true,
@@ -334,7 +335,7 @@ class _OShareAppState extends State<OShareApp> {
       builder: (context, _) {
         return MaterialApp(
           navigatorKey: _navigatorKey,
-          title: 'OsharePC',
+          title: 'OSharePC',
           debugShowCheckedModeBanner: false,
           theme: AppTheme.lightTheme,
           darkTheme: AppTheme.darkTheme,
@@ -343,6 +344,16 @@ class _OShareAppState extends State<OShareApp> {
           supportedLocales: AppLanguage.values.map(
             (language) => language.locale,
           ),
+          // Without these, Flutter falls back to its built-in English-only
+          // localizations, and any Material widget that consults
+          // MaterialLocalizations.of(context) (e.g. TextField's default decoration
+          // internals) null-check-crashes on any other locale — which is exactly
+          // what silently blanked out the OPPO account ssoid field under Chinese.
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
           home: HomePage(
             client: widget.bridgeClient,
             currentThemeMode: _themeMode,

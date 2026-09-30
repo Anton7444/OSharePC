@@ -49,7 +49,7 @@ Future<void> runReceivePopup() async {
   windowManager.waitUntilReadyToShow(
     const WindowOptions(
       size: receivePopupSize,
-      title: 'OsharePC Receive',
+      title: 'OSharePC Receive',
       titleBarStyle: TitleBarStyle.hidden,
       backgroundColor: Colors.transparent,
       alwaysOnTop: true,
@@ -69,7 +69,7 @@ Future<void> runReceivePopup() async {
 
   runApp(
     MaterialApp(
-      title: 'OsharePC Receive',
+      title: 'OSharePC Receive',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,

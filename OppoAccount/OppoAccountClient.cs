@@ -17,24 +17,32 @@ public sealed record AuthnValidateResult(
     string? VerificationId,
     string? VerificationUrl);
 
+public sealed record VerificationMethod(string VerMethod, string? Display, int Order);
+
 public sealed record VerificationMethodsResult(
     string ProcessToken,
     string? VerificationId,
     int CurrentRound,
     int TotalRound,
-    IReadOnlyList<string> VerMethodList,
+    IReadOnlyList<VerificationMethod> VerMethodList,
     bool TokenExpired);
+
+public sealed record VerificationGatherResult(string VerMethod, int? CodeLength);
+
+public sealed record VerificationValidationResult(
+    string? Ticket,
+    bool NeedNextRound,
+    string? RuleId);
 
 /// <summary>
 /// Client for OPPO/HeyTap's account-center QR-login API, reverse-engineered from the
 /// real "OPPO Share" iOS app (com.heytap.oshare). Lets OSharePC drive the same
 /// same-account QR login flow the phone app itself uses, independently of any device.
 ///
-/// Confirmed working end-to-end against the live production server as of this
-/// writing: GenerateQrCodeAsync, PollQrCodeAsync, AuthnCheckAsync, AuthnValidateAsync,
-/// VerificationListAsync. Everything past "list the available 2FA methods" (submitting
-/// an OTP code, and the final native-side session/ssoid exchange) is still being
-/// reverse-engineered — see docs/oppo-account-login-notes.md.
+/// The captured web flow is: generate/poll the QR, exchange and validate its
+/// processToken, open the second verification round, list methods, and gather/validate
+/// the selected challenge. The final native-side session/ssoid exchange is still not
+/// implemented — see docs/oppo-account-login-notes.md.
 ///
 /// This uses OPPO's private, undocumented API and an app-signing secret extracted
 /// from their shipped client. Likely against their ToS; could change or break without
@@ -127,8 +135,18 @@ public sealed class OppoAccountClient : IDisposable
     /// </summary>
     public async Task<AuthnCheckResult> AuthnCheckAsync(string qid, CancellationToken ct = default)
     {
-        var result = await CallAsync(AuthHost, "/identity/v1/authn/check",
-            new Dictionary<string, object?> { ["qid"] = qid }, traceIdPrefix: "WEB_", ct: ct);
+        // The QR flow is served by the Singapore client endpoint. The web client
+        // also marks this request as a scan validation; the CN endpoint or a
+        // missing header is rejected as an incomplete parameter (code 100001).
+        // Body is just {"qid": ...} — confirmed against the real captured request
+        // (see docs/oppo-account-login-notes.md); a "deviceToken" field here is not
+        // part of this call and does not fix a real 100001 (that error also shows up
+        // for an unconfirmed qid, which is a different failure).
+        var result = await CallAsync(QrHost, "/identity/v1/authn/check",
+            new Dictionary<string, object?> { ["qid"] = qid },
+            traceIdPrefix: "LG_",
+            extraHeaders: new Dictionary<string, string> { ["x-validation-method"] = "scan" },
+            ct: ct);
 
         EnsureCodeOk(result, "authn/check");
 
@@ -147,7 +165,7 @@ public sealed class OppoAccountClient : IDisposable
                 ["validateParam"] = new Dictionary<string, object?>(),
                 ["processToken"] = processToken,
             },
-            traceIdPrefix: "WEB_",
+            traceIdPrefix: "LG_",
             extraHeaders: new Dictionary<string, string> { ["x-validation-method"] = "scan" },
             ct: ct);
 
@@ -155,16 +173,24 @@ public sealed class OppoAccountClient : IDisposable
 
         var data = result.RootElement.GetProperty("data");
         return new AuthnValidateResult(
-            data.TryGetProperty("registered", out var reg) && reg.GetBoolean(),
+            data.TryGetProperty("registered", out var reg) && reg.ValueKind == JsonValueKind.True,
             data.TryGetProperty("accountStatus", out var st) ? st.GetString() : null,
             data.TryGetProperty("accountName", out var an) ? an.GetString() : null,
             data.TryGetProperty("verificationId", out var vi) ? vi.GetString() : null,
             data.TryGetProperty("verificationUrl", out var vu) ? vu.GetString() : null);
     }
 
-    /// <summary>Step 3: lists the available 2FA methods (PASSWORD/SMS/EMAIL/INBOUND_SMS) for this processToken.</summary>
+    /// <summary>
+    /// Step 3: lists the available 2FA methods (PASSWORD/SMS/EMAIL/INBOUND_SMS) for this
+    /// processToken. Confirmed against the real captured request (see
+    /// docs/oppo-account-login-notes.md): the environment JSON, captcha and device-token
+    /// fields go directly on this call — there is no separate verification/check step
+    /// before it.
+    /// </summary>
     public async Task<VerificationMethodsResult> VerificationListAsync(
-        string processToken, string envInfoJson, CancellationToken ct = default)
+        string processToken,
+        string envInfoJson,
+        CancellationToken ct = default)
     {
         var result = await CallAsync(AuthHost, "/api/verification/list",
             new Dictionary<string, object?>
@@ -179,18 +205,105 @@ public sealed class OppoAccountClient : IDisposable
         EnsureCodeOk(result, "verification/list");
 
         var data = result.RootElement.GetProperty("data");
-        var methods = new List<string>();
+        var methods = new List<VerificationMethod>();
         if (data.TryGetProperty("verMethodList", out var list) && list.ValueKind == JsonValueKind.Array)
             foreach (var m in list.EnumerateArray())
-                if (m.GetString() is { } s) methods.Add(s);
+            {
+                if (m.ValueKind == JsonValueKind.String)
+                {
+                    var method = m.GetString();
+                    if (!string.IsNullOrWhiteSpace(method))
+                        methods.Add(new VerificationMethod(method, null, methods.Count + 1));
+                    continue;
+                }
+
+                if (m.ValueKind != JsonValueKind.Object ||
+                    !m.TryGetProperty("verMethod", out var methodElement) ||
+                    methodElement.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(methodElement.GetString()))
+                    continue;
+
+                var display = ReadVerificationDisplay(m);
+                var order = m.TryGetProperty("order", out var orderElement) &&
+                            orderElement.ValueKind == JsonValueKind.Number &&
+                            orderElement.TryGetInt32(out var parsedOrder)
+                    ? parsedOrder
+                    : methods.Count + 1;
+                methods.Add(new VerificationMethod(methodElement.GetString()!, display, order));
+            }
 
         return new VerificationMethodsResult(
             data.GetProperty("processToken").GetString()!,
             data.TryGetProperty("verificationId", out var vid) ? vid.GetString() : null,
-            data.TryGetProperty("currentRound", out var cr) ? cr.GetInt32() : 0,
-            data.TryGetProperty("totalRound", out var tr) ? tr.GetInt32() : 0,
+            data.TryGetProperty("currentRound", out var cr) && cr.TryGetInt32(out var currentRound)
+                ? currentRound
+                : 0,
+            data.TryGetProperty("totalRound", out var tr) && tr.TryGetInt32(out var totalRound)
+                ? totalRound
+                : 0,
             methods,
-            data.TryGetProperty("tokenExpired", out var te) && te.GetBoolean());
+            data.TryGetProperty("tokenExpired", out var te) && te.ValueKind == JsonValueKind.True);
+    }
+
+    /// <summary>Requests that OPPO send the selected email/SMS verification code.</summary>
+    public async Task<VerificationGatherResult> GatherUserDataAsync(
+        string processToken,
+        string verMethod,
+        string? captchaType = null,
+        string? captchaCode = null,
+        CancellationToken ct = default)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["verMethod"] = verMethod,
+            ["contactId"] = "",
+            ["metaInfo"] = "",
+            ["processToken"] = processToken,
+        };
+        if (!string.IsNullOrWhiteSpace(captchaType)) payload["captchaType"] = captchaType;
+        if (!string.IsNullOrWhiteSpace(captchaCode)) payload["captchaCode"] = captchaCode;
+
+        var result = await CallAsync(AuthHost, "/api/verification/gather-user-data",
+            payload, traceIdPrefix: "WEB_", ct: ct);
+        EnsureCodeOk(result, "verification/gather-user-data");
+
+        var data = result.RootElement.GetProperty("data");
+        int? codeLength = null;
+        if (data.TryGetProperty("gatherData", out var gatherData) &&
+            gatherData.ValueKind == JsonValueKind.Object &&
+            gatherData.TryGetProperty("length", out var length) &&
+            length.ValueKind == JsonValueKind.Number &&
+            length.TryGetInt32(out var parsedLength))
+        {
+            codeLength = parsedLength;
+        }
+
+        return new VerificationGatherResult(verMethod, codeLength);
+    }
+
+    /// <summary>Submits the password or one-time code for the selected method.</summary>
+    public async Task<VerificationValidationResult> ValidateUserDataAsync(
+        string processToken,
+        string verMethod,
+        string validateData,
+        CancellationToken ct = default)
+    {
+        var result = await CallAsync(AuthHost, "/api/verification/validate-data",
+            new Dictionary<string, object?>
+            {
+                ["verMethod"] = verMethod,
+                ["validateData"] = validateData,
+                ["processToken"] = processToken,
+            },
+            traceIdPrefix: "WEB_", ct: ct);
+        EnsureCodeOk(result, "verification/validate-data");
+
+        var data = result.RootElement.GetProperty("data");
+        return new VerificationValidationResult(
+            data.TryGetProperty("ticket", out var ticket) ? ticket.GetString() : null,
+            data.TryGetProperty("needNextRound", out var next) &&
+                next.ValueKind == JsonValueKind.True,
+            data.TryGetProperty("ruleId", out var rule) ? rule.GetString() : null);
     }
 
     private async Task<JsonDocument> CallAsync(
@@ -241,9 +354,31 @@ public sealed class OppoAccountClient : IDisposable
     /// no indication of what actually went wrong. Call this before reading "data".</summary>
     private static void EnsureCodeOk(JsonDocument result, string endpointLabel)
     {
-        var code = result.RootElement.TryGetProperty("code", out var c) ? c.GetInt32() : (int?)null;
+        var code = result.RootElement.TryGetProperty("code", out var c) &&
+                   c.TryGetInt32(out var parsedCode)
+            ? parsedCode
+            : (int?)null;
         if (code != 200)
             throw new InvalidOperationException($"{endpointLabel} failed: {result.RootElement}");
+    }
+
+    private static string? ReadVerificationDisplay(JsonElement method)
+    {
+        if (!method.TryGetProperty("showInfo", out var showInfo) ||
+            showInfo.ValueKind != JsonValueKind.Object)
+            return null;
+
+        // Keep the masked contact details useful in the UI, but never surface the
+        // inbound SMS random code that is also present in some showInfo objects.
+        var values = new List<string>();
+        foreach (var key in new[] { "accountName", "maskMobile", "inboundNumber", "countryCallingCode" })
+        {
+            if (showInfo.TryGetProperty(key, out var value) &&
+                value.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(value.GetString()))
+                values.Add(value.GetString()!);
+        }
+        return values.Count == 0 ? null : string.Join(" · ", values.Distinct());
     }
 
     public void Dispose() => _http.Dispose();

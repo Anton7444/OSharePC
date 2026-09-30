@@ -32,14 +32,14 @@ class TrayService with TrayListener, WindowListener {
     await windowManager.setMinimumSize(const Size(900, 620));
     await windowManager.setSize(const Size(1080, 720));
     await windowManager.center();
-    await windowManager.setTitle('OsharePC');
+    await windowManager.setTitle('OSharePC');
     await windowManager.setPreventClose(true);
 
     try {
       await trayManager.setIcon(
         Platform.isWindows ? 'assets/app.ico' : 'assets/app.ico',
       );
-      await trayManager.setToolTip('OsharePC - Mutual Transmission');
+      await trayManager.setToolTip('OSharePC - Mutual Transmission');
       _updateMenu();
     } catch (e) {
       debugPrint('Error setting tray icon: $e');
@@ -50,7 +50,7 @@ class TrayService with TrayListener, WindowListener {
     final receiveActive = bridgeClient.status.receiveEnabled;
     final menu = Menu(
       items: [
-        MenuItem(key: 'show', label: 'Open OsharePC'),
+        MenuItem(key: 'show', label: 'Open OSharePC'),
         MenuItem(
           key: 'toggle_receive',
           label: receiveActive ? 'Pause Receiving' : 'Resume Receiving',
