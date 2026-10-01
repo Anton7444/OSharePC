@@ -121,10 +121,10 @@ public sealed class OppoAccountClient : IDisposable
         ("iPhone17,1", "18.5"),     // iPhone 16 Pro
         ("iPhone17,2", "18.6"),     // iPhone 16 Pro Max
         ("iPhone17,5", "18.4.1"),   // iPhone 16e
-        ("iPhone18,3", "19.0"),     // iPhone 17
-        ("iPhone18,4", "19.0.1"),   // iPhone Air
-        ("iPhone18,1", "19.1"),     // iPhone 17 Pro
-        ("iPhone18,2", "19.0"),     // iPhone 17 Pro Max
+        ("iPhone18,3", "26.0"),     // iPhone 17
+        ("iPhone18,4", "26.0.1"),   // iPhone Air
+        ("iPhone18,1", "26.1"),     // iPhone 17 Pro
+        ("iPhone18,2", "26.0"),     // iPhone 17 Pro Max
         ("iPod9,1", "15.7.2"),      // iPod touch (7th gen) -- the original captured device
     ];
 
