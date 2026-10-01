@@ -6,7 +6,6 @@ import '../services/bridge_client.dart';
 import '../services/outgoing_staging_controller.dart';
 import '../widgets/custom_segmented_button.dart';
 import '../widgets/native_drop_zone.dart';
-import '../widgets/radar_logo.dart';
 
 class ReceiveTab extends StatefulWidget {
   final BridgeClient client;
@@ -82,13 +81,73 @@ class _ReceiveTabState extends State<ReceiveTab> {
     }
   }
 
+  Widget _statusPill(bool isEnabled, bool isDark) {
+    final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
+    final muted = isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted;
+    final fg = isEnabled ? accent : muted;
+    return InkWell(
+      onTap: () => widget.client.setReceiveEnabled(!isEnabled),
+      borderRadius: BorderRadius.circular(20),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 250),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: isEnabled
+              ? (isDark ? AppColors.darkAccentSoft : AppColors.lightAccentSoft)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isEnabled
+                ? accent.withValues(alpha: 0.5)
+                : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: fg),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              appText(
+                widget.language,
+                isEnabled ? 'receiveActive' : 'receivePaused',
+              ),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+                color: fg,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(
+              isEnabled
+                  ? Icons.pause_circle_outline_rounded
+                  : Icons.play_circle_outline_rounded,
+              size: 16,
+              color: fg,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = widget.client.status;
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final isEnabled = status.receiveEnabled;
     final ipParts = _formatIpAsHashes(status.lanIp);
+    final accent = isDark ? AppColors.darkAccent : AppColors.lightAccent;
+    final textColor = isDark ? AppColors.darkText : AppColors.lightText;
+    final muted = isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted;
+    final cardColor = isDark ? AppColors.darkCard : AppColors.lightCard;
+    final borderColor = isDark ? AppColors.darkBorder : AppColors.lightBorder;
 
     return NativeDropZone(
       enabled: widget.isCurrentTab && _isDropAllowed,
@@ -100,187 +159,121 @@ class _ReceiveTabState extends State<ReceiveTab> {
         children: [
           Center(
             child: SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 40,
-                  horizontal: 24,
-                ),
+              padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 480),
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // 1. Center Radar Logo
-                    RadarLogo(size: 160, active: isEnabled),
-                    const SizedBox(height: 28),
-
-                    // 2. Receive Feature Toggle Switch Button
-                    InkWell(
-                      onTap: () => widget.client.setReceiveEnabled(!isEnabled),
-                      borderRadius: BorderRadius.circular(20),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 250),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 7,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isEnabled
-                              ? (isDark
-                                    ? AppColors.darkAccentSoft
-                                    : AppColors.lightAccentSoft)
-                              : (isDark
-                                    ? const Color(0xFF26332E)
-                                    : const Color(0xFFE2EBE6)),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: isEnabled
-                                ? (isDark
-                                      ? AppColors.darkAccent.withValues(
-                                          alpha: 0.5,
-                                        )
-                                      : AppColors.lightAccent.withValues(
-                                          alpha: 0.5,
-                                        ))
-                                : (isDark
-                                      ? AppColors.darkBorder
-                                      : AppColors.lightBorder),
-                            width: 1,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: isEnabled
-                                    ? (isDark
-                                          ? AppColors.darkAccent
-                                          : AppColors.lightAccent)
-                                    : (isDark
-                                          ? AppColors.darkTextSubtle
-                                          : AppColors.lightTextMuted),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              appText(
-                                widget.language,
-                                isEnabled ? 'receiveActive' : 'receivePaused',
-                              ),
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.8,
-                                color: isEnabled
-                                    ? (isDark
-                                          ? AppColors.darkAccent
-                                          : AppColors.lightAccent)
-                                    : (isDark
-                                          ? AppColors.darkTextMuted
-                                          : AppColors.lightTextMuted),
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Icon(
-                              isEnabled
-                                  ? Icons.pause_circle_outline_rounded
-                                  : Icons.play_circle_outline_rounded,
-                              size: 16,
-                              color: isEnabled
-                                  ? (isDark
-                                        ? AppColors.darkAccent
-                                        : AppColors.lightAccent)
-                                  : (isDark
-                                        ? AppColors.darkTextMuted
-                                        : AppColors.lightTextMuted),
-                            ),
-                          ],
-                        ),
+                    // Device card: name + status, IP chips, quick save
+                    Container(
+                      padding: const EdgeInsets.all(22),
+                      decoration: BoxDecoration(
+                        color: cardColor,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: borderColor),
                       ),
-                    ),
-                    const SizedBox(height: 24),
-
-                    // 3. Device Name (Big & friendly font)
-                    Text(
-                      status.deviceName.isEmpty
-                          ? 'OSharePC'
-                          : status.deviceName,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 34,
-                        fontWeight: FontWeight.w700,
-                        color: isDark
-                            ? AppColors.darkText
-                            : AppColors.lightText,
-                        letterSpacing: -0.5,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  color: accent.withValues(alpha: 0.14),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Icon(
+                                  Icons.devices_rounded,
+                                  color: accent,
+                                  size: 22,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Text(
+                                  status.deviceName.isEmpty
+                                      ? 'OSharePC'
+                                      : status.deviceName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.w700,
+                                    color: textColor,
+                                    letterSpacing: -0.3,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              _statusPill(isEnabled, isDark),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 6,
+                            children: ipParts.map((part) {
+                              return Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: accent.withValues(alpha: 0.08),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  part,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: muted,
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            child: Divider(height: 1, color: borderColor),
+                          ),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  appText(widget.language, 'quickSave'),
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: textColor,
+                                  ),
+                                ),
+                              ),
+                              CustomSegmentedButton<QuickSaveMode>(
+                                values: const [
+                                  QuickSaveMode.off,
+                                  QuickSaveMode.on,
+                                ],
+                                labels: [
+                                  appText(widget.language, 'off'),
+                                  appText(widget.language, 'on'),
+                                ],
+                                selected:
+                                    widget.client.quickSaveMode ==
+                                        QuickSaveMode.favorites
+                                    ? QuickSaveMode.off
+                                    : widget.client.quickSaveMode,
+                                onSelected: (mode) =>
+                                    widget.client.setQuickSaveMode(mode),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 10),
-
-                    // 4. IP / Hash segments
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      alignment: WrapAlignment.center,
-                      children: ipParts.map((part) {
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: isDark
-                                ? AppColors.darkCard
-                                : AppColors.lightCard,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: isDark
-                                  ? AppColors.darkBorder
-                                  : AppColors.lightBorder,
-                            ),
-                          ),
-                          child: Text(
-                            part,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: isDark
-                                  ? AppColors.darkTextMuted
-                                  : AppColors.lightTextMuted,
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                    const SizedBox(height: 48),
-
-                    // 5. Quick Save Controls
-                    Text(
-                      appText(widget.language, 'quickSave'),
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: isDark
-                            ? AppColors.darkTextMuted
-                            : AppColors.lightTextMuted,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    CustomSegmentedButton<QuickSaveMode>(
-                      values: const [QuickSaveMode.off, QuickSaveMode.on],
-                      labels: [
-                        appText(widget.language, 'off'),
-                        appText(widget.language, 'on'),
-                      ],
-                      selected:
-                          widget.client.quickSaveMode == QuickSaveMode.favorites
-                          ? QuickSaveMode.off
-                          : widget.client.quickSaveMode,
-                      onSelected: (mode) =>
-                          widget.client.setQuickSaveMode(mode),
                     ),
                   ],
                 ),
@@ -288,7 +281,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
             ),
           ),
 
-          // 6. Drag and Drop Overlay
+          // Drag and Drop Overlay
           if (_isDragging && _isDropAllowed)
             Positioned.fill(
               child: Container(
@@ -306,12 +299,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                           ? AppColors.darkAccentSoft
                           : AppColors.lightAccentSoft,
                       borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: isDark
-                            ? AppColors.darkAccent
-                            : AppColors.lightAccent,
-                        width: 2,
-                      ),
+                      border: Border.all(color: accent, width: 2),
                       boxShadow: const [
                         BoxShadow(
                           color: Colors.black26,
@@ -323,13 +311,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          Icons.file_upload_rounded,
-                          size: 48,
-                          color: isDark
-                              ? AppColors.darkAccent
-                              : AppColors.lightAccent,
-                        ),
+                        Icon(Icons.file_upload_rounded, size: 48, color: accent),
                         const SizedBox(height: 14),
                         Text(
                           appText(widget.language, 'dropToSendFiles'),
@@ -337,9 +319,7 @@ class _ReceiveTabState extends State<ReceiveTab> {
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.w700,
-                            color: isDark
-                                ? AppColors.darkText
-                                : AppColors.lightText,
+                            color: textColor,
                           ),
                         ),
                       ],

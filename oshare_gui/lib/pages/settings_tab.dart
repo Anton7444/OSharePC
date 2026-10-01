@@ -46,7 +46,6 @@ class _SettingsTabState extends State<SettingsTab> {
   bool _startMinimized = false;
   bool _receivePopupEnabled = true;
   final _oppoSsoidController = TextEditingController();
-  bool _oppoUserIdRevealed = false;
 
   @override
   void initState() {
@@ -70,21 +69,13 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
-  /// Resets the advanced ssoid field back to the currently logged-in account's real
-  /// ssoid and saves it — undoes a manually-typed override.
-  Future<void> _revertOppoSsoid() async {
-    final mine = widget.client.oppoSsoid;
-    if (mine == null || mine.isEmpty) return;
-    _oppoSsoidController.text = mine;
-    final ok = await widget.client.updateSettings(oppoSsoid: mine);
-    if (!mounted) return;
+  /// Discards what was typed into the advanced ssoid field; the saved id is
+  /// untouched. (The GUI only ever receives a masked id, so it cannot re-save it.)
+  void _revertOppoSsoid() {
+    _oppoSsoidController.clear();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-          ok
-              ? appText(widget.currentLanguage, 'oppoSsoidReverted')
-              : appText(widget.currentLanguage, 'oppoSsoidSaveFailed'),
-        ),
+        content: Text(appText(widget.currentLanguage, 'oppoSsoidReverted')),
       ),
     );
   }
@@ -110,7 +101,6 @@ class _SettingsTabState extends State<SettingsTab> {
     if (confirmed != true) return;
     final ok = await widget.client.logoutOppoAccount();
     if (!context.mounted) return;
-    setState(() => _oppoUserIdRevealed = false);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -987,35 +977,17 @@ class _SettingsTabState extends State<SettingsTab> {
                   ),
                 ),
                 const SizedBox(height: 2),
+                // The backend only hands out a masked id (e.g. ******1234): enough
+                // to confirm "this is my account", never the full value.
                 if (ssoid != null && ssoid.isNotEmpty)
-                  GestureDetector(
-                    onTap: () => setState(() => _oppoUserIdRevealed = !_oppoUserIdRevealed),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _oppoUserIdRevealed
-                              ? '${appText(widget.currentLanguage, 'oppoUserIdLabel')}: $ssoid'
-                              : '${appText(widget.currentLanguage, 'oppoUserIdLabel')}: ${'•' * 8}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontFeatures: const [FontFeature.tabularFigures()],
-                            color: isDark
-                                ? AppColors.darkTextMuted
-                                : AppColors.lightTextMuted,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(
-                          _oppoUserIdRevealed
-                              ? Icons.visibility_off
-                              : Icons.visibility,
-                          size: 14,
-                          color: isDark
-                              ? AppColors.darkTextMuted
-                              : AppColors.lightTextMuted,
-                        ),
-                      ],
+                  Text(
+                    '${appText(widget.currentLanguage, 'oppoUserIdLabel')}: $ssoid',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                      color: isDark
+                          ? AppColors.darkTextMuted
+                          : AppColors.lightTextMuted,
                     ),
                   ),
               ],

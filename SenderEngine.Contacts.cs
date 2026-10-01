@@ -34,10 +34,20 @@ public sealed partial class SenderEngine
     /// <summary>How long after files were staged (or a send ended, or the GUI asked) the Contacts devices are kept
     /// warm. Short on purpose: each kept link costs the phone a little battery.</summary>
     private static readonly TimeSpan KeepWarmWindow = TimeSpan.FromMinutes(5);
+    // A warm link is only parked after the full OConnect service has been
+    // discovered.  Keeping a bare connected BLE link here caused sends to
+    // rediscover 9999 (or hit a stale receiver) after the fast path had already
+    // been selected.
     private readonly Dictionary<string, (GattLink Link, DateTimeOffset At)> _warmLinks = new();
 
     private void StoreWarmLink(string key, GattLink link)
     {
+        if (!link.IsConnected || !link.HasOConnect)
+        {
+            Log.Warn($"CONTACTS: refusing to park an incomplete link for {key}");
+            link.DisposeInBackground();
+            return;
+        }
         // A parked link does not need the fast interval; it is requested again when a send takes the link.
         link.RelaxConnectionParameters();
         lock (_warmLinks)
@@ -52,13 +62,20 @@ public sealed partial class SenderEngine
     {
         lock (_warmLinks)
         {
-            if (!_warmLinks.TryGetValue(key, out var w)) return null;
+            if (!_warmLinks.TryGetValue(key, out var w))
+            {
+                SendTimeline.Mark("warm-link-miss");
+                return null;
+            }
             _warmLinks.Remove(key);
             if (DateTimeOffset.UtcNow - w.At < WarmLinkLifetime && w.Link.IsConnected)
             {
                 w.Link.UseFastConnectionParameters();
+                SendTimeline.Mark($"warm-link-age-{(DateTimeOffset.UtcNow - w.At).TotalSeconds:0}");
                 return w.Link;
             }
+            Log.Info($"CONTACTS: discarded expired/disconnected warm link for {key}");
+            SendTimeline.Mark("warm-link-expired");
             w.Link.DisposeInBackground();
             return null;
         }
@@ -149,6 +166,13 @@ public sealed partial class SenderEngine
                     foreach (var d in Scanner.Devices.Where(x => x.Kind == PhoneKind.Lan && x.LanPdid.StartsWith("FC70", StringComparison.Ordinal)).ToList())
                     {
                         if (ct.IsCancellationRequested || _sendGate.CurrentCount == 0) break;
+                        if (Scanner.ShouldAvoidContactsWarm(d.LanDeviceType))
+                        {
+                            // This device is (or may be) in Everyone mode: a Contacts link to it would block the
+                            // connection an Everyone-mode send needs. Hold none.
+                            TakeWarmLink(d.LanPdid)?.DisposeInBackground();
+                            continue;
+                        }
                         if (HasWarmLink(d.LanPdid)) continue;
                         lock (_prewarmBackoff)
                             if (_prewarmBackoff.TryGetValue(d.LanPdid, out var b) && b.NextTry > DateTimeOffset.UtcNow) continue;
@@ -183,6 +207,24 @@ public sealed partial class SenderEngine
             catch (Exception ex) { Log.Warn($"CONTACTS: prewarm shutdown failed: {ex.Message}"); }
         }
         DropWarmLinks();
+    }
+
+    /// <summary>Before an Everyone-mode send: closes every kept Contacts link and waits (briefly) until they are
+    /// really down. The target phone may be one of those devices, reachable under another address, and an open
+    /// Contacts link to it makes the Everyone-mode connection fail.</summary>
+    private async Task ReleaseWarmLinksForSendAsync(CancellationToken ct)
+    {
+        List<GattLink> links;
+        lock (_warmLinks)
+        {
+            links = _warmLinks.Values.Select(w => w.Link).ToList();
+            _warmLinks.Clear();
+        }
+        if (links.Count == 0) return;
+        Log.Info($"SEND: releasing {links.Count} kept Contacts link(s) before an Everyone-mode send");
+        foreach (var l in links) l.DisposeInBackground();
+        await Task.WhenAll(links.Select(l => GattLink.WaitForLinkDownAsync(l.Address, l.AddressType, TimeSpan.FromSeconds(2), ct)));
+        SendTimeline.Mark("warm-links-released");
     }
 
     /// <summary>Closes every pre-warmed link and forgets the retry back-off.</summary>
@@ -274,7 +316,6 @@ public sealed partial class SenderEngine
         var digest = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid!);
         var type = (byte)device.LanDeviceType;
         Log.Info($"CONTACTS: {device.Name} beacons: {Scanner.DescribeContactsBeacons(type, digest)}");
-        using var passiveScan = Scanner.UsePassiveScanning();
         // The receiver keeps one beacon address for minutes while Windows reports its packets only every few
         // seconds, so the newest address heard recently is taken at once (requiring one heard in the last 6 s cost
         // up to several seconds of waiting). Addresses that just failed are skipped through IsAvoided instead.

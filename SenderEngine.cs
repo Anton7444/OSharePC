@@ -182,6 +182,9 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
             SetOppoAccountIdentity(SettingsStore.Current.OppoSsoid);
             LanDisc.DeviceAnnounced += (ip, _, pdid, dt, raw) =>
             {
+                // Announcements from this PC's own address come from other software on it (OPPO's O+Connect service
+                // devicespace.exe announces itself as a PC); they are never a send target.
+                if (string.Equals(ip, Lan?.IpString, StringComparison.Ordinal)) return;
                 if (!string.IsNullOrWhiteSpace(pdid))
                 {
                     _lanPeerIps[pdid.Replace(":", "").ToUpperInvariant()] = ip;
@@ -342,6 +345,10 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         Log.Info($"staged {task.FileCount} file(s), {task.TotalSize} bytes, taskId={task.TaskId}");
         foreach (var f in task.Files)
             Log.Info($"  {f}");
+        // Start Contact-mode preparation while the user is still choosing the
+        // receiver.  Waiting until Send() makes the beacon interval part of
+        // every first transfer and defeats the fast path.
+        PrewarmContactsDevices();
         return task;
     }
 
@@ -465,6 +472,14 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                         $"{device.Name} could not be reached. Keep it near the PC with Bluetooth on and try again.");
                 }
             }
+        }
+        if (!contactsPath)
+        {
+            // A Contacts pre-warm still connecting to another device would compete for the radio with this send;
+            // the keeper starts no new one while a send runs.
+            try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
+            if (await _contactsGate.WaitAsync(TimeSpan.FromSeconds(3), ct)) _contactsGate.Release(); // it has stopped
+            await ReleaseWarmLinksForSendAsync(ct);
         }
 
         for (var attempt = 1; connectedLink is null && attempt <= 3; attempt++)

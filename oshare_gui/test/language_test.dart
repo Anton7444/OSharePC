@@ -22,4 +22,20 @@ void main() {
       }
     }
   });
+
+  test('device kind labels are translated but brand names are kept', () {
+    expect(
+      deviceKindText(AppLanguage.traditionalChinese, 'Alliance (OnePlus)'),
+      '互傳聯盟 (OnePlus)',
+    );
+    expect(
+      deviceKindText(AppLanguage.simplifiedChinese, 'Alliance (OPPO/realme)'),
+      '互传联盟 (OPPO/realme)',
+    );
+    expect(deviceKindText(AppLanguage.traditionalChinese, 'Contacts'), '聯絡人');
+    expect(deviceKindText(AppLanguage.simplifiedChinese, 'LAN'), '局域网');
+    expect(deviceKindText(AppLanguage.traditionalChinese, 'Legacy OEM'), '舊版其他品牌');
+    expect(deviceKindText(AppLanguage.traditionalChinese, 'OShare'), 'OShare');
+    expect(deviceKindText(AppLanguage.english, 'Contacts'), 'Contacts');
+  });
 }

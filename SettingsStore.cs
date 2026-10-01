@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace OShareSender;
@@ -30,6 +31,17 @@ internal static class SettingsStore
         {
             using var doc = JsonDocument.Parse(File.ReadAllText(FilePath));
             var root = doc.RootElement;
+            // The account identity (ssoid, nickname, avatar URL) is stored DPAPI-encrypted ("<name>Protected").
+            // Files from older versions hold it in plain text ("<name>"); take it and rewrite the file encrypted.
+            var hadPlaintext = false;
+            string? ReadAccountField(string name)
+            {
+                var protectedValue = ReadString(root, name + "Protected");
+                if (protectedValue is not null) return SecretProtector.TryUnprotect(protectedValue);
+                var plain = ReadString(root, name);
+                if (plain is not null) hadPlaintext = true;
+                return plain;
+            }
             Current = new SavedSettings(
                 ReadString(root, "deviceName"),
                 ReadString(root, "saveDirectory"),
@@ -41,10 +53,12 @@ internal static class SettingsStore
                 ReadInt(root, "quickSaveMode"),
                 ReadBool(root, "minimizeToTray"),
                 ReadBool(root, "closeToTray"),
-                ReadString(root, "oppoSsoid"),
+                ReadAccountField("oppoSsoid"),
                 ReadString(root, "oppoBleDeviceId"),
-                ReadString(root, "oppoAccountName"),
-                ReadString(root, "oppoAvatarUrl"));
+                ReadAccountField("oppoAccountName"),
+                ReadAccountField("oppoAvatarUrl"));
+            if (hadPlaintext)
+                MigratePlaintextAccountFields();
             return Current;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -56,6 +70,23 @@ internal static class SettingsStore
     }
 
     public static SavedSettings Current { get; private set; } = new(null, null, null);
+
+    /// <summary>Rewrites a settings file that still holds account fields in plain text, so they only exist
+    /// encrypted.</summary>
+    private static void MigratePlaintextAccountFields()
+    {
+        SaveGate.Wait();
+        try
+        {
+            WriteCurrentToDisk();
+            Log.Info("Settings: the OPPO account id, nickname and avatar are now stored encrypted (Windows DPAPI)");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
+        {
+            Log.Warn($"Settings: encrypting the stored account fields failed: {ex.Message}");
+        }
+        finally { SaveGate.Release(); }
+    }
 
     /// <summary>Clears the logged-in OPPO account's identity (name, ssoid, avatar) —
     /// used by the Settings "Log out" action. Deliberately separate from <see
@@ -70,7 +101,7 @@ internal static class SettingsStore
             Current = Current with { OppoSsoid = null, OppoAccountName = null, OppoAvatarUrl = null };
             WriteCurrentToDisk();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
         {
             Log.Warn($"Settings: clearing OPPO account failed: {ex.Message}");
         }
@@ -107,7 +138,7 @@ internal static class SettingsStore
                 oppoAvatarUrl ?? Current.OppoAvatarUrl);
             WriteCurrentToDisk();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
         {
             Log.Warn($"Settings: save failed: {ex.Message}");
         }
@@ -128,10 +159,11 @@ internal static class SettingsStore
             quickSaveMode = Current.QuickSaveMode,
             minimizeToTray = Current.MinimizeToTray,
             closeToTray = Current.CloseToTray,
-            oppoSsoid = Current.OppoSsoid,
+            // Account identity is never written in plain text: DPAPI-encrypted for the current Windows user.
+            oppoSsoidProtected = ProtectOrNull(Current.OppoSsoid),
             oppoBleDeviceId = Current.OppoBleDeviceId,
-            oppoAccountName = Current.OppoAccountName,
-            oppoAvatarUrl = Current.OppoAvatarUrl,
+            oppoAccountNameProtected = ProtectOrNull(Current.OppoAccountName),
+            oppoAvatarUrlProtected = ProtectOrNull(Current.OppoAvatarUrl),
         },
             new JsonSerializerOptions { WriteIndented = true });
         var tempPath = FilePath + ".tmp";
@@ -139,6 +171,9 @@ internal static class SettingsStore
         if (File.Exists(FilePath)) File.Replace(tempPath, FilePath, null);
         else File.Move(tempPath, FilePath);
     }
+
+    private static string? ProtectOrNull(string? value) =>
+        string.IsNullOrEmpty(value) ? null : SecretProtector.Protect(value);
 
     private static string? ReadString(JsonElement root, string name)
     {

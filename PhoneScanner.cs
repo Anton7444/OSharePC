@@ -117,9 +117,14 @@ public sealed class PhoneDevice
     public bool IsSupportedBrand => Kind is not (PhoneKind.Alliance or PhoneKind.Legacy) ||
                                     BrandFromVender(Vender) is "OPPO/realme" or "OnePlus";
 
+    /// <summary>Computers announce themselves on the LAN too (another OSharePC, OPPO's O+Connect), but this app
+    /// can only send to phones and tablets.</summary>
+    private static readonly HashSet<int> ComputerDeviceTypes = new() { 6, 11 };
+
     public bool IsShareableLanDevice => Kind != PhoneKind.Lan ||
                                          LanDeviceType < 0 ||
-                                         !AccessoryDeviceTypes.Contains(LanDeviceType);
+                                         (!AccessoryDeviceTypes.Contains(LanDeviceType) &&
+                                          !ComputerDeviceTypes.Contains(LanDeviceType));
 
     public string LanTypeLabel => LanDeviceType switch
     {
@@ -221,7 +226,18 @@ public sealed class PhoneScanner : IDisposable
                 var liveBeaconIdentities = _lanDevices.Values
                     .Where(d => d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && now - d.LastSeen < LiveBeacon)
                     .Select(d => $"{d.LanDeviceType}:{d.Name.Trim().ToUpperInvariant()}").ToHashSet(StringComparer.Ordinal);
+                // An Everyone-mode phone shows up over BLE (device id = LAN pdid + 4 chars) AND over LAN: list it
+                // once, as the BLE entry, which is the one a send can connect to.
+                // Such a phone also keeps emitting its Contacts beacon, which would list it a third time and route a
+                // send down the Contacts path while its Everyone-mode connection is what works. Its Everyone-mode BLE
+                // name is the OPPO account name, and its LAN twin gives its device type: hide the Contacts entry of
+                // that type while it is visible that way (the BLE entry expires ~10 s after it goes back to Contacts).
+                var everyoneModeAccountTypes = EveryoneModeAccountTypesLocked();
                 return _devices.Values.Concat(_lanDevices.Values)
+                    .Where(device => device.Kind != PhoneKind.Lan || device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     BleTwinLocked(device) is null)
+                    .Where(device => !device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     !everyoneModeAccountTypes.Contains(device.LanDeviceType))
                     .Where(device => !device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
                                      now - device.LastSeen < LiveBeacon ||
                                      (now - device.LastSeen < TimeSpan.FromMinutes(5) && !realSameAccountTypes.Contains(device.LanDeviceType)))
@@ -553,78 +569,68 @@ public sealed class PhoneScanner : IDisposable
         return null;
     }
 
-    public void Start()
+    private DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private DateTimeOffset _accountDeviceEveryoneSeenAt;
+
+    /// <summary>True when Contacts pre-warming must leave the Contacts entry of this device type alone because the
+    /// device may be in Everyone mode: an account device of that type was heard in Everyone mode within the last
+    /// minute (any type, while its type is not known yet), or the scanner started too recently to know. Such a
+    /// device keeps sending its Contacts beacon too, but a Contacts connection to it (pre-warm, kept link) blocks
+    /// the Everyone-mode connection a send makes to its other address.</summary>
+    public bool ShouldAvoidContactsWarm(int deviceType)
     {
-        lock (_watcherGate)
+        var now = DateTimeOffset.UtcNow;
+        if (now - _startedAt < TimeSpan.FromSeconds(10)) return true;
+        if (now - _accountDeviceEveryoneSeenAt >= TimeSpan.FromSeconds(60)) return false;
+        lock (_gate)
         {
-            if (IsScanning) return;
-            _watcher = CreateWatcher(_passiveScanRequests > 0 ? BluetoothLEScanningMode.Passive : BluetoothLEScanningMode.Active);
-            IsScanning = true;
+            var types = EveryoneModeAccountTypesLocked();
+            return types.Count == 0 || types.Contains(deviceType);
         }
     }
 
-    private BluetoothLEAdvertisementWatcher CreateWatcher(BluetoothLEScanningMode mode)
+    /// <summary>The BLE (Everyone-mode) entry of a LAN-announced device: its device id is the LAN pdid + 4 chars.</summary>
+    private PhoneDevice? BleTwinLocked(PhoneDevice lan) => lan.LanPdid.Length == 12
+        ? _devices.Values.FirstOrDefault(b => b.DeviceId.Length == 16 && b.HasCompleteIdentity &&
+                                              b.DeviceId.StartsWith(lan.LanPdid, StringComparison.OrdinalIgnoreCase))
+        : null;
+
+    /// <summary>Device types of the account's own devices currently visible in Everyone mode (BLE name = account
+    /// nickname, type taken from the LAN twin).</summary>
+    private HashSet<int> EveryoneModeAccountTypesLocked()
     {
-        var watcher = new BluetoothLEAdvertisementWatcher
+        var accountName = SettingsStore.Current.OppoAccountName?.Trim();
+        if (string.IsNullOrEmpty(accountName)) return new HashSet<int>();
+        return _lanDevices.Values
+            .Where(l => !l.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && l.LanDeviceType > 0 &&
+                        string.Equals(BleTwinLocked(l)?.Name.Trim(), accountName, StringComparison.OrdinalIgnoreCase))
+            .Select(l => l.LanDeviceType).ToHashSet();
+    }
+
+    public void Start()
+    {
+        if (IsScanning) return;
+        _startedAt = DateTimeOffset.UtcNow;
+        // Always active: the Everyone-mode (Alliance) path needs the scan responses to identify a phone.
+        _watcher = new BluetoothLEAdvertisementWatcher
         {
-            ScanningMode = mode,
+            ScanningMode = BluetoothLEScanningMode.Active,
             // The tablet's always-on beacon (service data 0xFC70) is an extended advertisement.
             AllowExtendedAdvertisements = true
         };
-        watcher.Received += OnReceived;
-        watcher.Stopped += (_, e) => Log.Info($"BLE: scanner stopped (error={e.Error})");
-        watcher.Start();
-        return watcher;
+        _watcher.Received += OnReceived;
+        _watcher.Stopped += (_, e) => Log.Info($"BLE: scanner stopped (error={e.Error})");
+        _watcher.Start();
+        IsScanning = true;
     }
 
     public void Stop()
     {
-        lock (_watcherGate)
-        {
-            if (!IsScanning) return;
-            try { _watcher?.Stop(); } catch { }
-            _watcher = null;
-            IsScanning = false;
-        }
+        if (!IsScanning) return;
+        try { _watcher?.Stop(); } catch { }
+        _watcher = null;
+        IsScanning = false;
         PulseAdvertisement();
-    }
-
-    private readonly object _watcherGate = new();
-    private int _passiveScanRequests;
-
-    /// <summary>Switches the watcher to passive scanning until disposed. Active scanning sends a scan request to
-    /// every advertiser it hears, which competes for the radio with the connection being set up; the Contacts
-    /// beacon is carried in the advertisement itself, so passive scanning still sees it.</summary>
-    public IDisposable UsePassiveScanning()
-    {
-        lock (_watcherGate)
-            if (++_passiveScanRequests == 1) SwitchWatcherMode(BluetoothLEScanningMode.Passive);
-        return new PassiveScanLease(this);
-    }
-
-    private void SwitchWatcherMode(BluetoothLEScanningMode mode)
-    {
-        if (!IsScanning || _watcher is null || _watcher.ScanningMode == mode) return;
-        try
-        {
-            var old = _watcher;
-            old.Received -= OnReceived;
-            try { old.Stop(); } catch { }
-            _watcher = CreateWatcher(mode);
-            Log.Info($"BLE: scanner switched to {mode} scanning");
-        }
-        catch (Exception ex) { Log.Warn($"BLE: scanner switch to {mode} failed: {ex.Message}"); }
-    }
-
-    private sealed class PassiveScanLease(PhoneScanner owner) : IDisposable
-    {
-        private int _released;
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _released, 1) != 0) return;
-            lock (owner._watcherGate)
-                if (--owner._passiveScanRequests == 0) owner.SwitchWatcherMode(BluetoothLEScanningMode.Active);
-        }
     }
 
     /// <summary>Forget devices not seen in the last 10 seconds.</summary>
@@ -972,6 +978,12 @@ public sealed class PhoneScanner : IDisposable
         }
 
         PulseAdvertisement();
+
+        // In Everyone mode an OPPO/OnePlus device advertises the account nickname as its BLE name.
+        var loggedInAccountName = SettingsStore.Current.OppoAccountName?.Trim();
+        if (!string.IsNullOrEmpty(loggedInAccountName) && device.Kind != PhoneKind.Lan &&
+            string.Equals(device.Name.Trim(), loggedInAccountName, StringComparison.OrdinalIgnoreCase))
+            _accountDeviceEveryoneSeenAt = DateTimeOffset.UtcNow;
 
         if (!shouldPublish)
         {

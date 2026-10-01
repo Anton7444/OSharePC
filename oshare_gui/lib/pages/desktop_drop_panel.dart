@@ -1291,9 +1291,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    device.rssi == 0
-                        ? device.kind
-                        : '${device.kind} · ${device.rssi} dBm',
+                    deviceKindText(widget.language, device.kind),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

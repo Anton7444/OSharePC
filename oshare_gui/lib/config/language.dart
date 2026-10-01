@@ -159,7 +159,7 @@ String appText(AppLanguage language, String key) {
       'oppoAccountLoginBtn': 'Log in to OPPO account',
       'oppoUserIdLabel': 'User ID',
       'cancel': 'Cancel',
-      'oppoSsoidReverted': "Reverted to your account's ssoid.",
+      'oppoSsoidReverted': 'Cleared; your saved account id is unchanged.',
       'oppoLogout': 'Log out',
       'oppoLogoutConfirmTitle': 'Log out of OPPO account?',
       'oppoLogoutConfirmBody': "This clears the saved account name, ssoid and avatar from this PC. It does not sign you out of OPPO's servers.",
@@ -306,7 +306,7 @@ String appText(AppLanguage language, String key) {
       'oppoAccountLoginBtn': '登录 OPPO 账号',
       'oppoUserIdLabel': '用户ID',
       'cancel': '取消',
-      'oppoSsoidReverted': '已还原为你账号的 ssoid。',
+      'oppoSsoidReverted': '已清除输入，已保存的账号 ID 没有变。',
       'oppoLogout': '退出登录',
       'oppoLogoutConfirmTitle': '要退出 OPPO 账号吗？',
       'oppoLogoutConfirmBody': '这会清除本机保存的账号名、ssoid 和头像，但不会在 OPPO 服务器上退出登录。',
@@ -452,7 +452,7 @@ String appText(AppLanguage language, String key) {
       'oppoAccountLoginBtn': '登入 OPPO 帳號',
       'oppoUserIdLabel': '用戶ID',
       'cancel': '取消',
-      'oppoSsoidReverted': '已還原為你帳號的 ssoid。',
+      'oppoSsoidReverted': '已清除輸入，已儲存的帳號 ID 沒有變。',
       'oppoLogout': '登出',
       'oppoLogoutConfirmTitle': '要登出 OPPO 帳號嗎？',
       'oppoLogoutConfirmBody': '這會清除本機保存的帳號名、ssoid 和頭像，但不會在 OPPO 伺服器上登出。',
@@ -493,4 +493,38 @@ String appText(AppLanguage language, String key) {
     AppLanguage.traditionalChinese => 'zh-TW',
   };
   return values[code]?[key] ?? values['en']![key] ?? key;
+}
+
+/// Translates the device-type label the backend sends ("Alliance (OnePlus)",
+/// "Contacts", "LAN", ...). Brand names in brackets and the product name
+/// OShare stay as they are.
+String deviceKindText(AppLanguage language, String kind) {
+  const bases = {
+    'zh-CN': {
+      'Alliance': '互传联盟',
+      'Legacy OEM': '旧版其他品牌',
+      'Legacy': '旧版',
+      'Contacts': '联系人',
+      'LAN': '局域网',
+    },
+    'zh-TW': {
+      'Alliance': '互傳聯盟',
+      'Legacy OEM': '舊版其他品牌',
+      'Legacy': '舊版',
+      'Contacts': '聯絡人',
+      'LAN': '區域網路',
+    },
+  };
+  final code = switch (language) {
+    AppLanguage.english => 'en',
+    AppLanguage.simplifiedChinese => 'zh-CN',
+    AppLanguage.traditionalChinese => 'zh-TW',
+  };
+  final table = bases[code];
+  if (table == null) return kind;
+  final bracket = kind.indexOf(' (');
+  final base = bracket < 0 ? kind : kind.substring(0, bracket);
+  final suffix = bracket < 0 ? '' : kind.substring(bracket);
+  final translated = table[base];
+  return translated == null ? kind : '$translated$suffix';
 }

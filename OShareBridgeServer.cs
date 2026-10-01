@@ -183,7 +183,9 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 minimizeToTray = SettingsStore.Current.MinimizeToTray,
                 closeToTray = SettingsStore.Current.CloseToTray,
                 oppoAccountName = SettingsStore.Current.OppoAccountName,
-                oppoSsoid = SettingsStore.Current.OppoSsoid,
+                // Only a masked form leaves the backend; the real id stays encrypted on disk.
+                oppoSsoid = SecretProtector.Mask(SettingsStore.Current.OppoSsoid),
+                oppoSsoidSet = !string.IsNullOrEmpty(SettingsStore.Current.OppoSsoid),
                 oppoAvatarUrl = SettingsStore.Current.OppoAvatarUrl,
                 pendingTransfer = pending is null ? null : new
                 {
@@ -262,6 +264,9 @@ public sealed class OShareBridgeServer : IAsyncDisposable
 
         app.MapPost("/api/settings", async (SettingsRequest body) =>
         {
+            // The GUI only ever sees the masked id; never let it overwrite the real one.
+            if (body.OppoSsoid is not null && body.OppoSsoid.Contains('*'))
+                body = body with { OppoSsoid = null };
             if (!string.IsNullOrWhiteSpace(body.SaveDirectory)) _engine.UpdateSaveDirectory(body.SaveDirectory);
             SettingsStore.Save(
                 themeMode: body.ThemeMode,
@@ -286,7 +291,9 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 quickSaveMode = SettingsStore.Current.QuickSaveMode,
                 minimizeToTray = SettingsStore.Current.MinimizeToTray,
                 closeToTray = SettingsStore.Current.CloseToTray,
-                oppoSsoid = SettingsStore.Current.OppoSsoid,
+                // Only a masked form leaves the backend; the real id stays encrypted on disk.
+                oppoSsoid = SecretProtector.Mask(SettingsStore.Current.OppoSsoid),
+                oppoSsoidSet = !string.IsNullOrEmpty(SettingsStore.Current.OppoSsoid),
                 oppoAccountName = SettingsStore.Current.OppoAccountName,
             });
         });
@@ -691,7 +698,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                     Push("oppoWebLoginSuccess", new
                     {
                         accountName = exAccountName,
-                        ssoid = exSsoid,
+                        ssoid = SecretProtector.Mask(exSsoid),
                         avatarUrl = exAvatarUrl,
                         countryCode = callbackCountryCode,
                     });
@@ -721,7 +728,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             Push("oppoWebLoginSuccess", new
             {
                 accountName,
-                ssoid,
+                ssoid = SecretProtector.Mask(ssoid),
                 countryCode = result.CountryCode,
             });
         }

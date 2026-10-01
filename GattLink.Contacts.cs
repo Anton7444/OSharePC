@@ -73,12 +73,12 @@ public sealed partial class GattLink
         SendTimeline.Mark("wake-read");
         try
         {
-            var r = await _dcpWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
+            var r = await _dcpWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
             Log.Info($"CONTACTS: wake: 9996 read status {r.Status}");
             if (r.Status == GattCommunicationStatus.Success && IsConnected && _dcpCancelChar is not null)
             {
                 var w = await _dcpCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse)
-                    .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(2), ct);
+                    .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
                 Log.Info($"CONTACTS: wake: cleared the receive task the wake read opened ({w})");
                 _wakeTaskPending = false;
             }
@@ -115,7 +115,7 @@ public sealed partial class GattLink
         try
         {
             var w = await OConnectCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse)
-                .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(2), ct);
+                .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
             _wakeTaskPending = false;
             Log.Info($"CONTACTS: wake: cancelled the receive task the wake read opened ({w})");
             SendTimeline.Mark("wake-task-cleared");

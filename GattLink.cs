@@ -434,8 +434,9 @@ public sealed partial class GattLink : IDisposable
                 async Task<(GattCommunicationStatus Status, IReadOnlyList<GattDeviceService> Services)> DiscoverUuidAsync(Guid uuid)
                 {
                     // Over an already-established link a live receiver answers discovery in well under a second; a
-                    // stale link (the peer restarted its GATT server) never does, so give up on it sooner.
-                    using var discoTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(fast ? (preExistingThisAttempt ? 3 : 5) : 10));
+                    // stale link (the peer restarted its GATT server) never does, so give up on it sooner. A fresh
+                    // link can take 5 s to come up on some adapters (seen on a Snapdragon PC), so allow 8 s there.
+                    using var discoTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(fast ? (preExistingThisAttempt ? 3 : 8) : 10));
                     using var discoLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, discoTimeoutCts.Token);
                     try
                     {
