@@ -229,7 +229,7 @@ class _DesktopDropPanelAppState extends State<DesktopDropPanelApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'OsharePC Drop Target',
+      title: 'OSharePC Drop Target',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
@@ -347,6 +347,8 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
   }
 
   void _onDragEntered() {
+    // Start connecting to Contacts devices while the file is still being dragged.
+    widget.client.prewarmContacts();
     // A second drag can enter while the device picker is staged. Preserve the
     // expanded stage until that staged selection is explicitly cleared.
     if (_hasStagedDrop) return;
@@ -1289,7 +1291,7 @@ class _DesktopDropPanelPageState extends State<DesktopDropPanelPage>
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    '${device.kind} · ${device.rssi} dBm',
+                    deviceKindText(widget.language, device.kind),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

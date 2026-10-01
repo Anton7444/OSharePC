@@ -42,7 +42,6 @@ public sealed class OShareReceiveGattServer : IDisposable
     public event Action? AdvertStarted;
     public event Action? AdvertAborted;
     /// <summary>Advert gave up after repeated aborts — other advertisers may claim the slot.</summary>
-    public event Action? AdvertGaveUp;
 
     private int _advertRetrying;
 

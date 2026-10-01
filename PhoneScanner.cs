@@ -1,6 +1,7 @@
 using System.Text;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
+using Windows.Devices.Enumeration;
 using Windows.Storage.Streams;
 
 namespace OShareSender;
@@ -12,12 +13,19 @@ public enum PhoneKind
     /// <summary>Stock alliance ROM (OPPO/OnePlus/Xiaomi/vivo/…) — 128-bit 3331 + vender/bleFlag service data.</summary>
     Alliance,
     /// <summary>Legacy OEM variants (0x3333/0x3334, 0x6666/0x6667, 0x8181/0x8182) — display only for now.</summary>
-    Legacy
+    Legacy,
+    /// <summary>Discovered via the SSDP-style LAN ANNOUNCE (LanDiscovery.cs), not BLE
+    /// at all — see OPPO_ACCOUNT_API_FINDINGS.md section 5l. This is the one channel
+    /// confirmed (via a real adb logcat capture) to make a phone report
+    /// accountState=SAME_ACCOUNT for this PC without needing "All" BLE visibility, so
+    /// it's the most promising path for the reverse direction (PC discovering a
+    /// phone in "Contacts only" mode) too.</summary>
+    Lan
 }
 
 public sealed class PhoneDevice
 {
-    public ulong Address { get; init; }
+    public ulong Address { get; set; }
     public BluetoothAddressType AddressType { get; set; } = BluetoothAddressType.Unspecified;
     public string AddressStr => FormatAddress(Address);
     public string Name { get; set; } = "";
@@ -32,6 +40,26 @@ public sealed class PhoneDevice
     public string DeviceIdPart2 { get; set; } = "";
     /// <summary>OShare-style 4-hex sender id from the 27-byte payload.</summary>
     public string SenderId { get; set; } = "";
+    /// <summary>Legacy (0x6666/0x6667) kind only: this device's stable id, taken
+    /// directly from the trailing 12 hex-ASCII characters of the 0x6666 section —
+    /// self-contained, no multi-fragment address-rotation reconstruction needed
+    /// (unlike the Alliance kind's split 6+10 byte deviceId).</summary>
+    public string LegacyDeviceId { get; set; } = "";
+    /// <summary>Legacy kind only: the 3-character "same account" proof from the
+    /// 0x6667 section (com.oplus.oshare.utils.AccountManger#D) — see
+    /// OPPO_ACCOUNT_API_FINDINGS.md section 5f.</summary>
+    public string LegacyAccountId { get; set; } = "";
+    /// <summary>Lan kind only: the phone's "PDID" (protocol device id) from its
+    /// SSDP-style ANNOUNCE, and the IP it announced from.</summary>
+    public string LanPdid { get; set; } = "";
+    public string LanIp { get; set; } = "";
+    /// <summary>Lan kind only: the announce carried our own account digest.</summary>
+    public bool LanSameAccount { get; set; }
+    /// <summary>Lan kind only: the "DT" numeric device-type from the SERVICE-PUBLISH
+    /// packet (OPPO's DeviceType enum: 6=PC, 8=PHONE, 10=PAD, 1=SMART_WATCH,
+    /// 3/4/16=headphones, 7=BRACELET, ...). Used to filter accessories (earbuds,
+    /// watches) out of the shareable-device list, matching what OShare's own UI does.</summary>
+    public int LanDeviceType { get; set; } = -1;
     public int Version { get; set; }
     public short Rssi { get; set; }
     public DateTimeOffset LastSeen { get; set; }
@@ -55,6 +83,8 @@ public sealed class PhoneDevice
                               DeviceIdPart2.Length == 10 &&
                               DeviceId.Length == 16 &&
                               LastCompleteAdvertisement != default,
+        PhoneKind.Legacy => LegacyDeviceId.Length == 12,
+        PhoneKind.Lan => LanPdid.Length > 0,
         _ => false,
     };
 
@@ -70,9 +100,49 @@ public sealed class PhoneDevice
     public string KindLabel => Kind switch
     {
         PhoneKind.OShare => "OShare",
-        PhoneKind.Alliance => $"Alliance ({BrandFromVender(Vender)})",
+        PhoneKind.Alliance => BrandLabel("Alliance"),
+        PhoneKind.Legacy => BrandLabel("Legacy"),
+        PhoneKind.Lan => LanPdid.StartsWith("FC70", StringComparison.Ordinal) ? "Contacts" : "LAN",
         _ => "Legacy OEM"
     };
+
+    /// <summary>OPPO's DeviceType enum (com/oplus/pantaconnect/discovery/model/DeviceType.java):
+    /// wearables/audio accessories can't receive a file share, so LAN entries reporting
+    /// one of these types are filtered out of the shareable device list — matching what
+    /// OShare's own nearby-share UI does (it doesn't list your earbuds either).</summary>
+    private static readonly HashSet<int> AccessoryDeviceTypes = new() { 1, 3, 4, 7, 15, 16 };
+
+    /// <summary>OShare only works between OPPO, OnePlus and realme phones; BLE adverts from other brands
+    /// (the Alliance/Legacy formats are shared with other vendors) are not listed.</summary>
+    public bool IsSupportedBrand => Kind is not (PhoneKind.Alliance or PhoneKind.Legacy) ||
+                                    BrandFromVender(Vender) is "OPPO/realme" or "OnePlus";
+
+    /// <summary>Computers announce themselves on the LAN too (another OSharePC, OPPO's O+Connect), but this app
+    /// can only send to phones and tablets.</summary>
+    private static readonly HashSet<int> ComputerDeviceTypes = new() { 6, 11 };
+
+    public bool IsShareableLanDevice => Kind != PhoneKind.Lan ||
+                                         LanDeviceType < 0 ||
+                                         (!AccessoryDeviceTypes.Contains(LanDeviceType) &&
+                                          !ComputerDeviceTypes.Contains(LanDeviceType));
+
+    public string LanTypeLabel => LanDeviceType switch
+    {
+        5 => "TV",
+        6 => "PC",
+        8 => "Phone",
+        10 => "Pad",
+        11 => "MacBook",
+        12 => "iMac",
+        13 => "iPhone",
+        17 => "Camera",
+        51 => "NAS",
+        _ => "Device",
+    };
+
+    /// <summary>"Alliance (OnePlus)" for a known brand, plain "Alliance" when the vender code is unknown.</summary>
+    private string BrandLabel(string kind) =>
+        BrandFromVender(Vender) is { } brand && !brand.StartsWith("vender ", StringComparison.Ordinal) ? $"{kind} ({brand})" : kind;
 
     public static string BrandFromVender(int v) => v switch
     {
@@ -90,7 +160,7 @@ public sealed class PhoneDevice
     };
 
     public static string FormatAddress(ulong a) =>
-        string.Join(":", Enumerable.Range(0, 6).Select(i => ((byte)(a >> (i * 8))).ToString("x2")));
+        string.Join(":", Enumerable.Range(0, 6).Select(i => ((a >> (40 - i * 8)) & 0xFF).ToString("x2")));
 }
 
 /// <summary>
@@ -105,9 +175,18 @@ public sealed class PhoneScanner : IDisposable
 {
     public static readonly Guid AllianceServiceUuid = new("00003331-0000-1000-8000-008123456789");
     private static readonly TimeSpan AllianceMergeWindow = TimeSpan.FromSeconds(3);
+    /// <summary>Contacts beacons arrive every ~25 s; a device heard within this window is in Contacts mode now.</summary>
+    private static readonly TimeSpan LiveBeacon = TimeSpan.FromSeconds(90);
 
     private BluetoothLEAdvertisementWatcher? _watcher;
     private readonly Dictionary<ulong, PhoneDevice> _devices = new();
+    // Keyed by PDID (a string, not a BLE address) since LAN devices arrive over UDP,
+    // not BLE — kept separate from _devices rather than shoehorning a synthetic BLE
+    // address in, and merged into the Devices getter below.
+    private readonly Dictionary<string, PhoneDevice> _lanDevices = new(StringComparer.OrdinalIgnoreCase);
+    // Throttles the paired-device lookup below to once per PDID per interval,
+    // since UpsertLanDevice fires on every QUERY (roughly once a second).
+    private readonly Dictionary<string, DateTimeOffset> _pairedLookupAttempted = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new();
     private readonly object _signalGate = new();
     private TaskCompletionSource _advertisementSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -134,8 +213,38 @@ public sealed class PhoneScanner : IDisposable
             {
                 // Partial records are internal scanner state only. This mirrors the
                 // official common parser returning null for an incomplete ScanRecord.
-                return _devices.Values
-                    .Where(device => device.HasCompleteIdentity)
+                var now = DateTimeOffset.UtcNow;
+                var realSameAccountTypes = _lanDevices.Values
+                    .Where(d => !d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && d.LanSameAccount &&
+                                now - d.LastSeen < TimeSpan.FromMinutes(5))
+                    .Select(d => d.LanDeviceType).ToHashSet();
+                // A Contacts-beacon entry and a LAN-announced entry can be the same physical device.
+                // A device whose beacon was heard within LiveBeacon is in Contacts mode right now: always show it,
+                // and drop the LAN-announced twin of the same type (that entry has no Bluetooth address of its
+                // own, so hiding the beacon entry in its favour made the device vanish from the list).
+                // Older beacons are only kept while no matching real LAN entry exists (Everyone mode).
+                var liveBeaconIdentities = _lanDevices.Values
+                    .Where(d => d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && now - d.LastSeen < LiveBeacon)
+                    .Select(d => $"{d.LanDeviceType}:{d.Name.Trim().ToUpperInvariant()}").ToHashSet(StringComparer.Ordinal);
+                // An Everyone-mode phone shows up over BLE (device id = LAN pdid + 4 chars) AND over LAN: list it
+                // once, as the BLE entry, which is the one a send can connect to.
+                // Such a phone also keeps emitting its Contacts beacon, which would list it a third time and route a
+                // send down the Contacts path while its Everyone-mode connection is what works. Its Everyone-mode BLE
+                // name is the OPPO account name, and its LAN twin gives its device type: hide the Contacts entry of
+                // that type while it is visible that way (the BLE entry expires ~10 s after it goes back to Contacts).
+                var everyoneModeAccountTypes = EveryoneModeAccountTypesLocked();
+                return _devices.Values.Concat(_lanDevices.Values)
+                    .Where(device => device.Kind != PhoneKind.Lan || device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     BleTwinLocked(device) is null)
+                    .Where(device => !device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     !everyoneModeAccountTypes.Contains(device.LanDeviceType))
+                    .Where(device => !device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     now - device.LastSeen < LiveBeacon ||
+                                     (now - device.LastSeen < TimeSpan.FromMinutes(5) && !realSameAccountTypes.Contains(device.LanDeviceType)))
+                    .Where(device => device.Kind != PhoneKind.Lan || device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                                     !(device.LanSameAccount && liveBeaconIdentities.Contains(
+                                         $"{device.LanDeviceType}:{device.Name.Trim().ToUpperInvariant()}")))
+                    .Where(device => device.HasCompleteIdentity && device.IsShareableLanDevice && device.IsSupportedBrand)
                     .GroupBy(StableIdentity, StringComparer.OrdinalIgnoreCase)
                     .Select(group => group.OrderByDescending(device => device.LastCompleteAdvertisement).First())
                     .ToList();
@@ -143,14 +252,371 @@ public sealed class PhoneScanner : IDisposable
         }
     }
 
+    /// <summary>Called from LanDiscovery's DeviceAnnounced event (see SenderEngine.cs)
+    /// whenever the phone's SSDP-style ANNOUNCE arrives — a completely different,
+    /// non-BLE channel that a real adb logcat capture confirmed the phone treats as
+    /// SAME_ACCOUNT-eligible without needing "All" BLE visibility (see
+    /// OPPO_ACCOUNT_API_FINDINGS.md section 5l). Self-contained per announce, no
+    /// fragment reconstruction needed.</summary>
+    public void UpsertLanDevice(string pdid, string ip, string deviceName, string? deviceType = null, bool sameAccount = false)
+    {
+        if (string.IsNullOrWhiteSpace(pdid)) return;
+        lock (_gate)
+        {
+            if (!_lanDevices.TryGetValue(pdid, out var device))
+            {
+                device = new PhoneDevice
+                {
+                    Address = SyntheticAddressFromPdid(pdid),
+                    Kind = PhoneKind.Lan,
+                    LanPdid = pdid,
+                };
+                _lanDevices[pdid] = device;
+            }
+            device.LanIp = ip;
+            device.LanSameAccount = sameAccount;
+            if (int.TryParse(deviceType, out var dt)) device.LanDeviceType = dt;
+            // If this same 12-hex device id has ever been seen over BLE (e.g. an
+            // Alliance scan response from a prior "All"-mode window), borrow its real
+            // Bluetooth hardware address instead of the synthetic one — GATT sends
+            // need a real address, and the phone may still accept a direct connect
+            // to a known address even while not currently advertising.
+            var bleMatch = _devices.Values.FirstOrDefault(d =>
+                d.DeviceId.Length == 16 &&
+                d.DeviceId.StartsWith(pdid, StringComparison.OrdinalIgnoreCase));
+            if (bleMatch is not null && device.Address != bleMatch.Address)
+            {
+                Log.Info($"SCAN: LAN device {pdid} adopting real BLE address {bleMatch.AddressStr} (was synthetic {device.AddressStr})");
+                device.Address = bleMatch.Address;
+                device.AddressType = bleMatch.AddressType;
+            }
+            // Still no real address (no live "All"-mode BLE advertisement ever seen
+            // for this PDID) — fall back to a real Bluetooth MAC Windows already has
+            // cached from a one-time manual pairing (Settings > Bluetooth & devices).
+            // This works even in "Contacts only" mode since it doesn't depend on the
+            // phone currently advertising at all. Throttled to avoid re-querying the
+            // OS's device list on every ~1s QUERY packet.
+            if (device.Kind == PhoneKind.Lan && device.Address == SyntheticAddressFromPdid(pdid) &&
+                (!_pairedLookupAttempted.TryGetValue(pdid, out var last) || DateTimeOffset.UtcNow - last > TimeSpan.FromSeconds(30)))
+            {
+                _pairedLookupAttempted[pdid] = DateTimeOffset.UtcNow;
+                var nameHint = deviceName;
+                _ = ResolvePairedAddressAsync(pdid, nameHint);
+            }
+            if (!string.IsNullOrWhiteSpace(deviceName))
+                device.Name = deviceName;
+            else if (string.IsNullOrWhiteSpace(device.Name))
+            {
+                // The LAN SERVICE-PUBLISH broadcast carries no device name; borrow it
+                // from the BLE match above if we have one, else fall back to the
+                // account nickname.
+                if (bleMatch is not null && !string.IsNullOrWhiteSpace(bleMatch.Name))
+                    device.Name = bleMatch.Name;
+                else if (sameAccount && !string.IsNullOrWhiteSpace(SettingsStore.Current.OppoAccountName))
+                    // The protocol carries no device name at all over LAN; for a
+                    // same-account device we at least know whose account it belongs
+                    // to (from the login flow), so label it "<account>'s <type>"
+                    // instead of a raw hex id.
+                    device.Name = $"{SettingsStore.Current.OppoAccountName}'s {device.LanTypeLabel}";
+            }
+            device.LastSeen = DateTimeOffset.UtcNow;
+            device.LastCompleteAdvertisement = device.LastSeen;
+            device.SeenCount++;
+        }
+        Log.Info($"SCAN: LAN device upserted pdid={pdid} ip={ip} name={deviceName}");
+        PulseAdvertisement();
+    }
+
+    private static ulong SyntheticAddressFromPdid(string pdid)
+    {
+        if (pdid.Length <= 16 && pdid.All(Uri.IsHexDigit) && ulong.TryParse(pdid, System.Globalization.NumberStyles.HexNumber, null, out var direct))
+            return direct;
+        // Non-hex or too-long PDIDs (unexpected, but be defensive): derive a stable
+        // synthetic value instead of colliding everything onto 0.
+        var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(pdid));
+        return BitConverter.ToUInt64(hash, 0);
+    }
+
+    /// <summary>Looks up a real Bluetooth hardware address for a LAN-only device from
+    /// Windows' own paired-device cache, matched by name. This is the fallback for
+    /// phones kept in "Contacts only" OShare visibility, which never emit a live BLE
+    /// Alliance advertisement our scanner can observe (confirmed via LAN packet
+    /// capture: those phones only ever send bare QUERY packets with no bt_mac field
+    /// anywhere). A one-time manual Bluetooth pairing via Windows Settings makes the
+    /// phone's real address permanently resolvable here regardless of its current
+    /// OShare-app visibility setting.</summary>
+    private async Task ResolvePairedAddressAsync(string pdid, string nameHint)
+    {
+        try
+        {
+            var matches = new List<(ulong Address, BluetoothAddressType Type, string Name)>();
+
+            // Paired classic Bluetooth (BR/EDR) devices — phones pair this way by
+            // default via Settings > Bluetooth & devices > Add device.
+            foreach (var selector in new[]
+                     {
+                         BluetoothDevice.GetDeviceSelectorFromPairingState(true),
+                         BluetoothLEDevice.GetDeviceSelectorFromPairingState(true)
+                     })
+            {
+                DeviceInformationCollection found;
+                try { found = await DeviceInformation.FindAllAsync(selector); }
+                catch (Exception ex) { Log.Warn($"SCAN: paired-device enumerate failed: {ex.Message}"); continue; }
+
+                foreach (var di in found)
+                {
+                    if (string.IsNullOrWhiteSpace(di.Name)) continue;
+                    if (!string.IsNullOrWhiteSpace(nameHint) &&
+                        !di.Name.Contains(nameHint, StringComparison.OrdinalIgnoreCase) &&
+                        !nameHint.Contains(di.Name, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    try
+                    {
+                        if (selector == BluetoothDevice.GetDeviceSelectorFromPairingState(true))
+                        {
+                            using var bd = await BluetoothDevice.FromIdAsync(di.Id);
+                            if (bd is not null)
+                                matches.Add((bd.BluetoothAddress, BluetoothAddressType.Public, di.Name));
+                        }
+                        else
+                        {
+                            using var ble = await BluetoothLEDevice.FromIdAsync(di.Id);
+                            if (ble is not null)
+                                matches.Add((ble.BluetoothAddress, ble.BluetoothAddressType, di.Name));
+                        }
+                    }
+                    catch (Exception ex) { Log.Warn($"SCAN: paired-device resolve '{di.Name}' failed: {ex.Message}"); }
+                }
+            }
+
+            if (matches.Count == 0)
+            {
+                if (!pdid.StartsWith("FC70", StringComparison.Ordinal)) // Contacts beacon devices need no pairing
+                    Log.Info($"SCAN: LAN device {pdid} ('{nameHint}') has no matching Windows-paired Bluetooth device (optional fallback)");
+                return;
+            }
+
+            var (address, type, matchedName) = matches[0];
+            lock (_gate)
+            {
+                if (_lanDevices.TryGetValue(pdid, out var device) && device.Address != address)
+                {
+                    Log.Info($"SCAN: LAN device {pdid} adopting real paired-Bluetooth address {PhoneDevice.FormatAddress(address)} for '{matchedName}' (was synthetic {device.AddressStr})");
+                    device.Address = address;
+                    device.AddressType = type;
+                }
+            }
+            PulseAdvertisement();
+        }
+        catch (Exception ex) { Log.Warn($"SCAN: ResolvePairedAddressAsync({pdid}) failed: {ex.Message}"); }
+    }
+
     public bool IsScanning { get; private set; }
+
+    private readonly Dictionary<string, (DateTimeOffset Last, int Tries)> _nameResolveState = new();
+
+    /// <summary>The beacon has no name. Read the standard GAP "Device Name" (0x2A00) with a short connection,
+    /// a plain GAP read that does not touch OShare, at most a few times several minutes apart, until a name is known.</summary>
+    private async Task TryResolveContactNameAsync(ulong address, BluetoothAddressType type, int deviceType, string digest)
+    {
+        var key = $"{deviceType:X2}{digest}";
+        if (ContactNameLookupsPaused) return; // do not spend a try while a send/pre-warm owns the link
+        lock (_gate)
+        {
+            _nameResolveState.TryGetValue(key, out var st);
+            if (st.Tries >= 3 || DateTimeOffset.UtcNow - st.Last < TimeSpan.FromMinutes(3)) return;
+            _nameResolveState[key] = (DateTimeOffset.UtcNow, st.Tries + 1);
+        }
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(address, type).AsTask(cts.Token);
+            if (dev is null) return;
+            var ok = Windows.Devices.Bluetooth.GenericAttributeProfile.GattCommunicationStatus.Success;
+            var svcs = await dev.GetGattServicesForUuidAsync(new Guid("00001800-0000-1000-8000-00805f9b34fb"), BluetoothCacheMode.Uncached).AsTask(cts.Token);
+            if (svcs.Status != ok || svcs.Services.Count == 0) return;
+            var chars = await svcs.Services[0].GetCharacteristicsForUuidAsync(new Guid("00002a00-0000-1000-8000-00805f9b34fb"), BluetoothCacheMode.Uncached).AsTask(cts.Token);
+            if (chars.Status != ok || chars.Characteristics.Count == 0) return;
+            var read = await chars.Characteristics[0].ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(cts.Token);
+            if (read.Status != ok) return;
+            var reader = DataReader.FromBuffer(read.Value);
+            var bytes = new byte[read.Value.Length];
+            reader.ReadBytes(bytes);
+            RememberContactName(deviceType, digest, Encoding.UTF8.GetString(bytes));
+        }
+        catch (Exception ex) { Log.Info($"NAMES: name read for type {deviceType} did not work this time ({ex.GetType().Name})"); }
+    }
+
+    private int _nameLookupPauses;
+    private bool ContactNameLookupsPaused => Volatile.Read(ref _nameLookupPauses) > 0;
+
+    /// <summary>Stops the background GAP name reads until disposed. They open their own BLE connection to the
+    /// beacon address, which must not run alongside a send or pre-warm to the same device.</summary>
+    public IDisposable PauseContactNameLookups()
+    {
+        Interlocked.Increment(ref _nameLookupPauses);
+        return new NameLookupPause(this);
+    }
+
+    private sealed class NameLookupPause(PhoneScanner owner) : IDisposable
+    {
+        private int _released;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) Interlocked.Decrement(ref owner._nameLookupPauses);
+        }
+    }
+
+    /// <summary>Number of same-account LAN-announced (non-beacon) devices of this type seen within
+    /// <paramref name="within"/>. A Contacts beacon carries only type + account digest, so it can be tied
+    /// to a LAN device only when this is exactly one.</summary>
+    public int CountSameAccountLanDevices(int deviceType, TimeSpan within)
+    {
+        var cutoff = DateTimeOffset.UtcNow - within;
+        lock (_gate)
+            return _lanDevices.Values.Count(d => !d.LanPdid.StartsWith("FC70", StringComparison.Ordinal) &&
+                                                 d.LanSameAccount && d.LanDeviceType == deviceType && d.LastSeen > cutoff);
+    }
+
+    /// <summary>Saves a real device name and refreshes the listed entry.</summary>
+    public void RememberContactName(int deviceType, string digest, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return;
+        if (ContactNames.Set(deviceType, digest, name))
+            UpsertLanDevice($"FC70{deviceType:X2}{digest}", "", name.Trim(), deviceType.ToString());
+    }
+
+    public sealed record ContactsBeacon(ulong Address, BluetoothAddressType AddressType, byte DeviceType, string AccountDigest, DateTimeOffset SeenAt);
+
+    private readonly Dictionary<ulong, ContactsBeacon> _contactsBeacons = new();
+    /// <summary>Recent Contacts beacon packets per device (type + digest), for cadence diagnostics.</summary>
+    private readonly Dictionary<string, Queue<(DateTimeOffset At, ulong Address)>> _contactsBeaconHistory = new();
+
+    /// <summary>One-line cadence summary of a device's Contacts beacons over the last 60 s: packet count, the
+    /// longest silence, how long ago the last one was heard and how many addresses it rotated through.</summary>
+    public string DescribeContactsBeacons(byte deviceType, string accountDigestHex)
+    {
+        var key = $"{deviceType:X2}{accountDigestHex.ToUpperInvariant()}";
+        var now = DateTimeOffset.UtcNow;
+        lock (_gate)
+        {
+            if (!_contactsBeaconHistory.TryGetValue(key, out var history))
+                return "no beacon heard in the last 60s";
+            var times = history.Where(h => now - h.At <= TimeSpan.FromSeconds(60)).ToList();
+            if (times.Count == 0) return "no beacon heard in the last 60s";
+            var maxGap = TimeSpan.Zero;
+            for (var i = 1; i < times.Count; i++)
+                if (times[i].At - times[i - 1].At > maxGap) maxGap = times[i].At - times[i - 1].At;
+            var addresses = times.Select(t => t.Address).Distinct().Count();
+            return $"{times.Count} packets/60s, max gap {maxGap.TotalSeconds:0.0}s, last {(now - times[^1].At).TotalSeconds:0.0}s ago, {addresses} address(es)";
+        }
+    }
+
+    /// <summary>Uppercase hex of our own DSF account digest (e.g. "39154E"); Contacts-mode beacons with
+    /// this digest are same-account devices.</summary>
+    public string? ContactsAccountDigest { get; set; }
+
+    /// <summary>Refreshes account-scoped discovery state after login, account change, or logout.</summary>
+    public void ResetContactDiscovery(string? accountDigest)
+    {
+        lock (_gate)
+        {
+            ContactsAccountDigest = string.IsNullOrWhiteSpace(accountDigest) ? null : accountDigest;
+            _contactsBeacons.Clear();
+            _contactsBeaconHistory.Clear();
+            foreach (var key in _lanDevices.Keys.Where(k => k.StartsWith("FC70", StringComparison.OrdinalIgnoreCase)).ToArray())
+                _lanDevices.Remove(key);
+            foreach (var device in _lanDevices.Values)
+                device.LanSameAccount = false;
+        }
+        PulseAdvertisement();
+    }
+
+    /// <summary>Waits for a Contacts-mode beacon of the given OPPO device type and account digest that is
+    /// newer than <paramref name="newerThan"/>. Returns null on timeout.</summary>
+    /// <summary>True when a beacon of this type/digest was seen within <paramref name="within"/>.</summary>
+    public bool HasRecentContactsBeacon(byte deviceType, string accountDigestHex, TimeSpan within)
+    {
+        var cutoff = DateTimeOffset.UtcNow - within;
+        lock (_gate)
+            return _contactsBeacons.Values.Any(b => b.DeviceType == deviceType && b.SeenAt > cutoff &&
+                string.Equals(b.AccountDigest, accountDigestHex, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public async Task<ContactsBeacon?> WaitForContactsBeaconAsync(byte deviceType, string accountDigestHex, DateTimeOffset newerThan, TimeSpan timeout, CancellationToken ct,
+        Func<ulong, bool>? exclude = null)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            ContactsBeacon? best = null;
+            lock (_gate)
+            {
+                foreach (var b in _contactsBeacons.Values)
+                {
+                    if (b.DeviceType == deviceType &&
+                        string.Equals(b.AccountDigest, accountDigestHex, StringComparison.OrdinalIgnoreCase) &&
+                        b.SeenAt > newerThan && (best is null || b.SeenAt > best.SeenAt) &&
+                        exclude?.Invoke(b.Address) != true)
+                        best = b;
+                }
+            }
+            if (best is not null) return best;
+            await Task.Delay(100, ct);
+        }
+        return null;
+    }
+
+    private DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private DateTimeOffset _accountDeviceEveryoneSeenAt;
+
+    /// <summary>True when Contacts pre-warming must leave the Contacts entry of this device type alone because the
+    /// device may be in Everyone mode: an account device of that type was heard in Everyone mode within the last
+    /// minute (any type, while its type is not known yet), or the scanner started too recently to know. Such a
+    /// device keeps sending its Contacts beacon too, but a Contacts connection to it (pre-warm, kept link) blocks
+    /// the Everyone-mode connection a send makes to its other address.</summary>
+    public bool ShouldAvoidContactsWarm(int deviceType)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (now - _startedAt < TimeSpan.FromSeconds(10)) return true;
+        if (now - _accountDeviceEveryoneSeenAt >= TimeSpan.FromSeconds(60)) return false;
+        lock (_gate)
+        {
+            var types = EveryoneModeAccountTypesLocked();
+            return types.Count == 0 || types.Contains(deviceType);
+        }
+    }
+
+    /// <summary>The BLE (Everyone-mode) entry of a LAN-announced device: its device id is the LAN pdid + 4 chars.</summary>
+    private PhoneDevice? BleTwinLocked(PhoneDevice lan) => lan.LanPdid.Length == 12
+        ? _devices.Values.FirstOrDefault(b => b.DeviceId.Length == 16 && b.HasCompleteIdentity &&
+                                              b.DeviceId.StartsWith(lan.LanPdid, StringComparison.OrdinalIgnoreCase))
+        : null;
+
+    /// <summary>Device types of the account's own devices currently visible in Everyone mode (BLE name = account
+    /// nickname, type taken from the LAN twin).</summary>
+    private HashSet<int> EveryoneModeAccountTypesLocked()
+    {
+        var accountName = SettingsStore.Current.OppoAccountName?.Trim();
+        if (string.IsNullOrEmpty(accountName)) return new HashSet<int>();
+        return _lanDevices.Values
+            .Where(l => !l.LanPdid.StartsWith("FC70", StringComparison.Ordinal) && l.LanDeviceType > 0 &&
+                        string.Equals(BleTwinLocked(l)?.Name.Trim(), accountName, StringComparison.OrdinalIgnoreCase))
+            .Select(l => l.LanDeviceType).ToHashSet();
+    }
 
     public void Start()
     {
         if (IsScanning) return;
+        _startedAt = DateTimeOffset.UtcNow;
+        // Always active: the Everyone-mode (Alliance) path needs the scan responses to identify a phone.
         _watcher = new BluetoothLEAdvertisementWatcher
         {
-            ScanningMode = BluetoothLEScanningMode.Active
+            ScanningMode = BluetoothLEScanningMode.Active,
+            // The tablet's always-on beacon (service data 0xFC70) is an extended advertisement.
+            AllowExtendedAdvertisements = true
         };
         _watcher.Received += OnReceived;
         _watcher.Stopped += (_, e) => Log.Info($"BLE: scanner stopped (error={e.Error})");
@@ -178,6 +644,18 @@ public sealed class PhoneScanner : IDisposable
                 if (DateTimeOffset.Now - dev.LastSeen > TimeSpan.FromSeconds(10)) gone.Add(addr);
             }
             foreach (var addr in gone) _devices.Remove(addr);
+            var beaconCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(2);
+            foreach (var key in _contactsBeacons
+                         .Where(kv => kv.Value.SeenAt < beaconCutoff)
+                         .Select(kv => kv.Key)
+                         .ToArray())
+                _contactsBeacons.Remove(key);
+            var lanCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5);
+            foreach (var key in _lanDevices
+                         .Where(kv => kv.Value.LastSeen < lanCutoff)
+                         .Select(kv => kv.Key)
+                         .ToArray())
+                _lanDevices.Remove(key);
         }
         foreach (var addr in gone) DeviceExpired?.Invoke(addr);
     }
@@ -263,13 +741,60 @@ public sealed class PhoneScanner : IDisposable
 
         var hasAllianceUuid = adv.ServiceUuids.Any(u => u == AllianceServiceUuid);
 
+        // Contacts-mode "always-on" beacon (service data 0xFC70): 00 15 06 13 <deviceType> 37 <3-byte
+        // account digest> 84 ... Same-account OPPO/OnePlus devices in Contacts-only visibility emit it
+        // from a connectable extended advertising set; connecting to that address wakes their OShare
+        // GATT server (9999) on demand.
+        foreach (var sec in sections)
+        {
+            if (sec.Uuid16 == 0xFC70 && sec.Payload.Length >= 9 &&
+                sec.Payload[0] == 0x00 && sec.Payload[1] == 0x15 && sec.Payload[2] == 0x06 && sec.Payload[3] == 0x13 &&
+                sec.Payload[5] == 0x37)
+            {
+                var digest = Convert.ToHexString(sec.Payload, 6, 3);
+                // -127 dBm is Windows replaying a cached advertisement, not a packet heard now: that address may be
+                // off the air already, so it must not count as a fresh (connectable) beacon.
+                if (args.RawSignalStrengthInDBm > -127)
+                {
+                    var now = DateTimeOffset.UtcNow;
+                    lock (_gate)
+                    {
+                        _contactsBeacons[args.BluetoothAddress] = new ContactsBeacon(
+                            args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest, now);
+                        var historyKey = $"{sec.Payload[4]:X2}{digest}";
+                        if (!_contactsBeaconHistory.TryGetValue(historyKey, out var history))
+                            _contactsBeaconHistory[historyKey] = history = new Queue<(DateTimeOffset, ulong)>();
+                        history.Enqueue((now, args.BluetoothAddress));
+                        while (history.Count > 0 && (history.Count > 512 || now - history.Peek().At > TimeSpan.FromSeconds(60)))
+                            history.Dequeue();
+                    }
+                }
+                // A same-account device in Contacts-only visibility: list it (keyed by type+digest, since the
+                // beacon's address rotates) so it can be picked as a send target.
+                if (!string.IsNullOrEmpty(ContactsAccountDigest) &&
+                    string.Equals(digest, ContactsAccountDigest, StringComparison.OrdinalIgnoreCase))
+                {
+                    var dtName = ContactNames.Get(sec.Payload[4], digest) ??
+                                 (sec.Payload[4] switch { 10 => "Tablet", 8 => "Phone", 6 => "PC", _ => $"Device type {sec.Payload[4]}" });
+                    var beaconPdid = $"FC70{sec.Payload[4]:X2}{digest}";
+                    UpsertLanDevice(beaconPdid, "", dtName, sec.Payload[4].ToString());
+                    lock (_gate)
+                        if (_lanDevices.TryGetValue(beaconPdid, out var beaconDevice))
+                            beaconDevice.Rssi = args.RawSignalStrengthInDBm;
+                    if (ContactNames.Get(sec.Payload[4], digest) is null && !ContactNameLookupsPaused)
+                        Task.Run(() => TryResolveContactNameAsync(args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest));
+                }
+            }
+        }
+
         // Windows can deliver ADV and SCAN_RSP as separate events. Scan responses
         // carry the 27-byte name/id tail but not the 128-bit UUID AD, so recognise
         // the known service-data UUIDs only for accumulation. They are not enough
         // by themselves to make a connect candidate.
         static bool IsKnownSectionUuid(ushort u) =>
             u == 0xFFFF || u == 0x01FF ||
-            u == 0x0703 || u == 0x0204 || u == 0x0704;
+            u == 0x0703 || u == 0x0204 || u == 0x0704 ||
+            u == 0x6666 || u == 0x6667;
 
         PhoneDevice device;
         bool shouldPublish;
@@ -278,10 +803,26 @@ public sealed class PhoneScanner : IDisposable
         {
             if (!_devices.TryGetValue(args.BluetoothAddress, out device!))
             {
-                var kind = sections.Any(s => s.Uuid16 is 0xFFFF or 0x01FF) ? PhoneKind.OShare : PhoneKind.Alliance;
+                var kind = sections.Any(s => s.Uuid16 is 0xFFFF or 0x01FF) ? PhoneKind.OShare
+                    : sections.Any(s => s.Uuid16 is 0x6666 or 0x6667) ? PhoneKind.Legacy
+                    : PhoneKind.Alliance;
                 ushort firstUuid = sections.Count > 0 ? sections[0].Uuid16 : (ushort)0;
                 if (!hasAllianceUuid && !IsKnownSectionUuid(firstUuid))
+                {
+                    // DIAGNOSTIC: log advertisements we'd otherwise silently discard,
+                    // so we can see what a phone in "Contacts only" mode actually
+                    // broadcasts (it may not use the legacy Alliance format at all —
+                    // see OPPO_ACCOUNT_API_FINDINGS.md section 5k for the modern
+                    // "senseless"/0xAFAF format this might turn out to match).
+                    // Only the beacons this app actually uses are worth a log line, and each at most every 30 s
+                    // per address (unthrottled this alone produced tens of MB of log).
+                    if (sections.Count > 0 && sections.Any(x => x.Uuid16 is 0xFC70 or 0x3339) &&
+                        Log.Every($"unrec:{args.BluetoothAddress:X12}", TimeSpan.FromSeconds(30)))
+                        Log.Info($"BLE: unrecognized service-data {args.BluetoothAddress:X12} " +
+                                 $"[{string.Join(", ", sections.Select(s => $"{s.Uuid16:X4}:{Convert.ToHexString(s.Payload)}"))}] " +
+                                 $"rssi={args.RawSignalStrengthInDBm} allUuids=[{string.Join(",", adv.ServiceUuids)}]");
                     return;
+                }
                 device = new PhoneDevice { Address = args.BluetoothAddress, AddressType = args.BluetoothAddressType, Kind = kind };
                 _devices[device.Address] = device;
             }
@@ -337,6 +878,33 @@ public sealed class PhoneScanner : IDisposable
                         var n = DecodeName(payload, 10, 16);
                         if (n.Length > 0) device.Name = n;
                         device.Version = payload[26];
+
+                        // Some phones don't redeliver every AD fragment after a BLE
+                        // address rotation - only the scan-response half (this one)
+                        // shows up again, and the 6-byte primary-advertisement half
+                        // + UUID-list AD never return for the new address, so the
+                        // fresh 3-way correlation below can never succeed and the
+                        // device gets stuck "pending" forever. If this exact 10-byte
+                        // suffix was already fully resolved under a previous address,
+                        // trust that inherited identity instead of waiting for a
+                        // correlation that may never arrive again.
+                        if (device.DeviceIdPart1.Length != 6)
+                        {
+                            var known = _devices.Values.FirstOrDefault(other =>
+                                !ReferenceEquals(other, device) &&
+                                other.DeviceIdPart1.Length == 6 &&
+                                other.DeviceIdPart2 == device.DeviceIdPart2);
+                            if (known is not null)
+                            {
+                                device.DeviceIdPart1 = known.DeviceIdPart1;
+                                device.AllianceUuidSeen = true;
+                                if (string.IsNullOrWhiteSpace(device.Name)) device.Name = known.Name;
+                                if (device.Vender == 0) device.Vender = known.Vender;
+                                if (device.BleFlag == 0) device.BleFlag = known.BleFlag;
+                                device.DeviceId = device.DeviceIdPart1 + device.DeviceIdPart2;
+                                device.LastCompleteAdvertisement = now;
+                            }
+                        }
                     }
 
                     if (device.DeviceIdPart1.Length == 6 && device.DeviceIdPart2.Length == 10)
@@ -359,6 +927,41 @@ public sealed class PhoneScanner : IDisposable
                         device.DeviceId = "";
                     }
                 }
+                else if (s.Uuid16 == 0x6666 && payload.Length >= 12)
+                {
+                    // Self-contained: the last 12 bytes are the deviceId written out
+                    // as its own hex-ASCII string (e.g. "F6FBC3C12E1D"), no split-
+                    // fragment reconstruction needed. Whatever precedes it is a UTF-8
+                    // device nickname.
+                    device.Kind = PhoneKind.Legacy;
+                    var idHex = Encoding.ASCII.GetString(payload[^12..]);
+                    if (idHex.All(Uri.IsHexDigit))
+                    {
+                        device.LegacyDeviceId = idHex.ToUpperInvariant();
+                        device.LastCompleteAdvertisement = now;
+                        device.LastIdentityFragmentSeen = now;
+                    }
+                    if (payload.Length > 12)
+                    {
+                        var n = Encoding.UTF8.GetString(payload[..^12]).Trim('\0', ' ');
+                        if (n.Length > 0) device.Name = n;
+                    }
+                }
+                else if (s.Uuid16 == 0x6667 && payload.Length >= 4)
+                {
+                    // advBrandType(1) + accountId(3, ASCII) + accountName(remainder,
+                    // UTF-8, NUL-padded) — see com.oplus.oshare.ble.impl.o#q and
+                    // AccountManger#D (OPPO_ACCOUNT_API_FINDINGS.md section 5f).
+                    device.Kind = PhoneKind.Legacy;
+                    device.Vender = payload[0];
+                    device.LegacyAccountId = Encoding.ASCII.GetString(payload[1..4]).Trim('\0');
+                    if (payload.Length > 4)
+                    {
+                        var accountName = Encoding.UTF8.GetString(payload[4..]).Trim('\0', ' ');
+                        if (accountName.Length > 0 && string.IsNullOrWhiteSpace(device.Name))
+                            device.Name = accountName;
+                    }
+                }
             }
 
             if (string.IsNullOrWhiteSpace(device.Name) && !string.IsNullOrWhiteSpace(adv.LocalName))
@@ -376,14 +979,22 @@ public sealed class PhoneScanner : IDisposable
 
         PulseAdvertisement();
 
+        // In Everyone mode an OPPO/OnePlus device advertises the account nickname as its BLE name.
+        var loggedInAccountName = SettingsStore.Current.OppoAccountName?.Trim();
+        if (!string.IsNullOrEmpty(loggedInAccountName) && device.Kind != PhoneKind.Lan &&
+            string.Equals(device.Name.Trim(), loggedInAccountName, StringComparison.OrdinalIgnoreCase))
+            _accountDeviceEveryoneSeenAt = DateTimeOffset.UtcNow;
+
         if (!shouldPublish)
         {
             if (shouldLogPending)
+                if (Log.Every($"pend:{device.AddressStr}", TimeSpan.FromSeconds(30)))
                 Log.Info($"BLE: pending {device.KindLabel} advertisement {device.AddressStr} " +
                          $"idParts='{device.DeviceIdPart1}'+'{device.DeviceIdPart2}' rssi={device.Rssi} — waiting for complete scan response");
             return;
         }
 
+        if (Log.Every($"seen:{device.AddressStr}", TimeSpan.FromSeconds(30)))
         Log.Info($"BLE: seen {device.KindLabel} '{device.Name}' {device.AddressStr} rssi={device.Rssi} " +
                  $"addrType={device.AddressType} advType={args.AdvertisementType} " +
                  $"id='{device.DeviceId}' senderId='{device.SenderId}' vender={device.Vender} flag={device.BleFlag}");
@@ -403,6 +1014,7 @@ public sealed class PhoneScanner : IDisposable
             if (current.SenderId.Length == 0) current.SenderId = old.SenderId;
             if (current.Vender == 0) current.Vender = old.Vender;
             if (current.BleFlag == 0) current.BleFlag = old.BleFlag;
+            if (current.LegacyAccountId.Length == 0) current.LegacyAccountId = old.LegacyAccountId;
             _devices.Remove(old.Address);
             Log.Info($"BLE: merged rotated address {old.AddressStr} into {current.AddressStr} " +
                      $"identity={StableIdentity(current)}");
@@ -438,6 +1050,8 @@ public sealed class PhoneScanner : IDisposable
         if (a.Kind != b.Kind) return false;
         if (a.DeviceId.Length == 16 && b.DeviceId.Length == 16)
             return string.Equals(a.DeviceId, b.DeviceId, StringComparison.OrdinalIgnoreCase);
+        if (a.LegacyDeviceId.Length == 12 && b.LegacyDeviceId.Length == 12)
+            return string.Equals(a.LegacyDeviceId, b.LegacyDeviceId, StringComparison.OrdinalIgnoreCase);
 
         return a.SenderId.Length > 0 &&
                string.Equals(a.SenderId, b.SenderId, StringComparison.OrdinalIgnoreCase) &&
@@ -448,9 +1062,11 @@ public sealed class PhoneScanner : IDisposable
     public static string StableIdentity(PhoneDevice device) =>
         device.DeviceId.Length == 16
             ? $"deviceId:{device.DeviceId}"
-            : device.SenderId.Length > 0
-                ? $"senderId:{device.SenderId}"
-                : $"address:{device.AddressStr}";
+            : device.LegacyDeviceId.Length == 12
+                ? $"legacyDeviceId:{device.LegacyDeviceId}"
+                : device.SenderId.Length > 0
+                    ? $"senderId:{device.SenderId}"
+                    : $"address:{device.AddressStr}";
 
     private static DateTimeOffset Min(params DateTimeOffset[] values) =>
         values.Where(value => value != default).DefaultIfEmpty(default).Min();

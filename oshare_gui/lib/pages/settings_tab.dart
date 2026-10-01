@@ -45,12 +45,103 @@ class _SettingsTabState extends State<SettingsTab> {
   bool _launchAtStartup = false;
   bool _startMinimized = false;
   bool _receivePopupEnabled = true;
+  final _oppoSsoidController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     _loadTrayPrefs();
     _loadStartupPrefs();
+  }
+
+  Future<void> _saveOppoSsoid() async {
+    final ssoid = _oppoSsoidController.text.trim();
+    final ok = await widget.client.updateSettings(oppoSsoid: ssoid);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? appText(widget.currentLanguage, 'oppoSsoidSaved')
+              : appText(widget.currentLanguage, 'oppoSsoidSaveFailed'),
+        ),
+      ),
+    );
+  }
+
+  /// Discards what was typed into the advanced ssoid field; the saved id is
+  /// untouched. (The GUI only ever receives a masked id, so it cannot re-save it.)
+  void _revertOppoSsoid() {
+    _oppoSsoidController.clear();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(appText(widget.currentLanguage, 'oppoSsoidReverted')),
+      ),
+    );
+  }
+
+  Future<void> _logoutOppoAccount(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(appText(widget.currentLanguage, 'oppoLogoutConfirmTitle')),
+        content: Text(appText(widget.currentLanguage, 'oppoLogoutConfirmBody')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(appText(widget.currentLanguage, 'cancel')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(appText(widget.currentLanguage, 'oppoLogout')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final ok = await widget.client.logoutOppoAccount();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok
+              ? appText(widget.currentLanguage, 'oppoLoggedOut')
+              : appText(widget.currentLanguage, 'oppoLogoutFailed'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _clearOppoWebLoginData(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(appText(widget.currentLanguage, 'oppoClearBrowserDataTitle')),
+        content: Text(appText(widget.currentLanguage, 'oppoClearBrowserDataBody')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(appText(widget.currentLanguage, 'cancel')),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(appText(widget.currentLanguage, 'oppoClearBrowserDataConfirm')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final error = await widget.client.clearOppoWebLoginData();
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          error == null
+              ? appText(widget.currentLanguage, 'oppoBrowserDataCleared')
+              : '${appText(widget.currentLanguage, 'oppoBrowserDataClearFailed')}: $error',
+        ),
+      ),
+    );
   }
 
   Future<void> _loadStartupPrefs() async {
@@ -137,6 +228,7 @@ class _SettingsTabState extends State<SettingsTab> {
 
   @override
   void dispose() {
+    _oppoSsoidController.dispose();
     super.dispose();
   }
 
@@ -177,7 +269,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         const SizedBox(height: 4),
                         Text(
                           status.saveDirectory.isEmpty
-                              ? 'Downloads\\OShare'
+                              ? 'Downloads'
                               : status.saveDirectory,
                           style: TextStyle(
                             fontSize: 12,
@@ -624,6 +716,123 @@ class _SettingsTabState extends State<SettingsTab> {
 
         const SizedBox(height: 28),
 
+        // Section: OPPO Account (experimental)
+        _buildSectionHeader(appText(widget.currentLanguage, 'oppoAccount'), isDark),
+        const SizedBox(height: 12),
+        _buildCard(
+          isDark,
+          children: [
+            widget.client.oppoAccountName != null
+                ? _buildOppoProfileCard(context, isDark)
+                : Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                appText(widget.currentLanguage, 'oppoAccount'),
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark
+                                      ? AppColors.darkText
+                                      : AppColors.lightText,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                appText(widget.currentLanguage, 'oppoAccountHint'),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: isDark
+                                      ? AppColors.darkTextMuted
+                                      : AppColors.lightTextMuted,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: () => _showOppoWebLoginDialog(context, isDark),
+                          icon: const Icon(Icons.qr_code, size: 16),
+                          label: Text(
+                            appText(widget.currentLanguage, 'oppoAccountLoginBtn'),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: isDark
+                                ? AppColors.darkAccent
+                                : AppColors.lightAccent,
+                            side: BorderSide(
+                              color: isDark
+                                  ? AppColors.darkBorder
+                                  : AppColors.lightBorder,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _oppoSsoidController,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        labelText: appText(widget.currentLanguage, 'oppoSsoidLabel'),
+                        hintText: appText(widget.currentLanguage, 'oppoSsoidHint'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  if (widget.client.oppoSsoid != null && widget.client.oppoSsoid!.isNotEmpty) ...[
+                    OutlinedButton(
+                      onPressed: _revertOppoSsoid,
+                      child: Text(appText(widget.currentLanguage, 'oppoSsoidRevert')),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  OutlinedButton(
+                    onPressed: _saveOppoSsoid,
+                    child: Text(appText(widget.currentLanguage, 'save')),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => _clearOppoWebLoginData(context),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: Text(appText(widget.currentLanguage, 'oppoClearBrowserData')),
+                  style: TextButton.styleFrom(
+                    foregroundColor: isDark
+                        ? AppColors.darkTextMuted
+                        : AppColors.lightTextMuted,
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 0),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        const SizedBox(height: 28),
+
         // Section: Network & Info
         _buildSectionHeader(appText(widget.currentLanguage, 'network'), isDark),
         const SizedBox(height: 12),
@@ -717,12 +926,179 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
             _buildInfoRow(
               appText(widget.currentLanguage, 'version'),
-              'OsharePC GUI $_guiVersion',
+              'OSharePC GUI $_guiVersion',
               isDark,
             ),
           ],
         ),
       ],
+    );
+  }
+
+  /// Shown once logged in, in place of the login prompt: the account's avatar,
+  /// username, and a userId that stays masked until tapped (it's shown here purely as
+  /// a "is this really my account" confirmation, not something to type elsewhere, so
+  /// keeping it hidden by default avoids it being visible over someone's shoulder or in
+  /// a screenshot/screen-share).
+  Widget _buildOppoProfileCard(BuildContext context, bool isDark) {
+    final client = widget.client;
+    final name = client.oppoAccountName ?? '';
+    final ssoid = client.oppoSsoid;
+    final avatarUrl = client.oppoAvatarUrl;
+
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+            backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty
+                ? NetworkImage(avatarUrl)
+                : null,
+            child: avatarUrl == null || avatarUrl.isEmpty
+                ? Icon(
+                    Icons.person,
+                    color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+                  )
+                : null,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: isDark ? AppColors.darkText : AppColors.lightText,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                // The backend only hands out a masked id (e.g. ******1234): enough
+                // to confirm "this is my account", never the full value.
+                if (ssoid != null && ssoid.isNotEmpty)
+                  Text(
+                    '${appText(widget.currentLanguage, 'oppoUserIdLabel')}: $ssoid',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                      color: isDark
+                          ? AppColors.darkTextMuted
+                          : AppColors.lightTextMuted,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: appText(widget.currentLanguage, 'oppoLogout'),
+            icon: Icon(
+              Icons.logout,
+              size: 18,
+              color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+            ),
+            onPressed: () => _logoutOppoAccount(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Opens OPPO's official account-login widget in its own native popup window
+  /// (a WebView2 host on the backend side). This dialog is just a status readout —
+  /// the actual login UI (QR / password / 2FA, all OPPO's own real widget) happens
+  /// in that separate popup, not in Flutter.
+  Future<void> _showOppoWebLoginDialog(BuildContext context, bool isDark) async {
+    widget.client.startOppoWebLogin();
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AnimatedBuilder(
+          animation: widget.client,
+          builder: (context, _) {
+            final client = widget.client;
+            if (!client.oppoWebLoginActive &&
+                (client.oppoWebLoginSuccess || client.oppoWebLoginError != null)) {
+              // Auto-close a couple seconds after a terminal result so the user
+              // has time to read it without needing to click anything.
+              Future.delayed(const Duration(seconds: 2), () {
+                if (dialogContext.mounted && Navigator.of(dialogContext).canPop()) {
+                  Navigator.of(dialogContext).pop();
+                }
+              });
+            }
+            final String statusText;
+            final IconData icon;
+            final Color color;
+            if (client.oppoWebLoginSuccess) {
+              statusText = client.oppoAccountName != null
+                  ? 'Logged in as ${client.oppoAccountName}.'
+                  : 'Login succeeded.';
+              icon = Icons.check_circle;
+              color = Colors.green;
+            } else if (client.oppoWebLoginError != null) {
+              statusText = client.oppoWebLoginError!;
+              icon = Icons.error;
+              color = Colors.redAccent;
+            } else if (client.oppoWebLoginActive) {
+              statusText =
+                  'A login window has opened — finish signing in there.';
+              icon = Icons.open_in_new;
+              color = isDark ? AppColors.darkAccent : AppColors.lightAccent;
+            } else {
+              statusText = 'Login window closed.';
+              icon = Icons.info_outline;
+              color = isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted;
+            }
+            return AlertDialog(
+              backgroundColor: isDark ? AppColors.darkCard : AppColors.lightCard,
+              title: Text(
+                appText(widget.currentLanguage, 'oppoAccountDialogTitle'),
+                style: TextStyle(
+                  color: isDark ? AppColors.darkText : AppColors.lightText,
+                ),
+              ),
+              content: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (client.oppoWebLoginActive)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 12),
+                      child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: Icon(icon, color: color, size: 20),
+                    ),
+                  Flexible(
+                    child: Text(
+                      statusText,
+                      style: TextStyle(
+                        color: isDark ? AppColors.darkText : AppColors.lightText,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: Text(appText(widget.currentLanguage, 'close')),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 

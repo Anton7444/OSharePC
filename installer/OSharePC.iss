@@ -86,7 +86,7 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OsharePC"; ValueData: """{app}\{#MyAppExeName}"" --startup"; Flags: uninsdeletevalue; Tasks: startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "OSharePC"; ValueData: """{app}\{#MyAppExeName}"" --startup"; Flags: uninsdeletevalue; Tasks: startup
 
 
 
@@ -172,7 +172,7 @@ begin
       SaveStringToFile(ExpandConstant('{app}\installer-language.txt'), 'en', False);
 
     if not WizardIsTaskSelected('startup') then
-      RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OsharePC');
+      RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OSharePC');
   end;
 end;
 
@@ -195,7 +195,7 @@ begin
   end
   else if CurUninstallStep = usPostUninstall then
   begin
-    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OsharePC');
+    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'OSharePC');
     DeleteFile(ExpandConstant('{app}\installer-language.txt'));
 
     if UninstallRemoveAllData then

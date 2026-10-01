@@ -595,49 +595,29 @@ class _SendTabState extends State<SendTab> {
                     ),
                   ),
                   const SizedBox(height: 5),
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isDark
-                              ? AppColors.darkAccentSoft
-                              : AppColors.lightAccentSoft,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          device.kind,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: isDark
-                                ? AppColors.darkAccent
-                                : AppColors.lightAccent,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Icon(
-                        Icons.network_wifi_rounded,
-                        size: 14,
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? AppColors.darkAccentSoft
+                          : AppColors.lightAccentSoft,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      deviceKindText(widget.language, device.kind),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                         color: isDark
-                            ? AppColors.darkTextMuted
-                            : AppColors.lightTextMuted,
+                            ? AppColors.darkAccent
+                            : AppColors.lightAccent,
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${device.rssi} dBm',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: isDark
-                              ? AppColors.darkTextMuted
-                              : AppColors.lightTextMuted,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),

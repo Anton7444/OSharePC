@@ -4,7 +4,7 @@ using OShareSender.Ui;
 namespace OShareSender;
 
 /// <summary>Glues scanner, advertiser, GATT link, transfer server, and receive engine together.</summary>
-public sealed class SenderEngine : IDisposable, IAsyncDisposable
+public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
 {
     public const int DefaultPort = 8959;
 
@@ -31,7 +31,6 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     public string StagedTaskId => _staged?.TaskId ?? "";
     private OShareCrypto? _crypto;
     private bool _rxBeaconUp;      // 8881 connectable advert currently on air
-    private bool _catAdvertUp;     // 9955 connectable advert currently on air
     private CancellationTokenSource? _sendCts;
     private CancellationTokenSource? _oShareReceiveCts;
     private CancellationTokenSource? _devicePruneCts;
@@ -56,7 +55,9 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
     public SenderEngine()
     {
         var saved = SettingsStore.Load();
-        if (!string.IsNullOrWhiteSpace(saved.SaveDirectory) && Directory.Exists(saved.SaveDirectory))
+        // The old default (Downloads\OShare) was written to settings like a user choice; move it to Downloads itself.
+        if (!string.IsNullOrWhiteSpace(saved.SaveDirectory) && Directory.Exists(saved.SaveDirectory) &&
+            !string.Equals(Path.TrimEndingDirectorySeparator(saved.SaveDirectory), DownloadsFolder.LegacySaveDirectory, StringComparison.OrdinalIgnoreCase))
             Receiver.SaveDirectory = saved.SaveDirectory;
         if (saved.ReceiveEnabled.HasValue)
             ReceiveEnabled = saved.ReceiveEnabled.Value;
@@ -112,8 +113,8 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         }
         Receiver.BeaconStarted += () => { _rxBeaconUp = true; UpdateCoordination(); };
         Receiver.BeaconAborted += () => { _rxBeaconUp = false; UpdateCoordination(); };
-        OShareReceiveGatt.AdvertStarted += () => { _catAdvertUp = true; UpdateCoordination(); };
-        OShareReceiveGatt.AdvertAborted += () => { _catAdvertUp = false; UpdateCoordination(); };
+        OShareReceiveGatt.AdvertStarted += UpdateCoordination;
+        OShareReceiveGatt.AdvertAborted += UpdateCoordination;
 
         // Windows may briefly abort one provider when the other provider claims
         // the single advertising slot. Let both providers retry; the old
@@ -178,10 +179,26 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         try
         {
             LanDisc = new LanDiscovery(Lan.MacHex12) { LanIp = Lan.IpString, DeviceName = Advertiser.DeviceName };
-            LanDisc.DeviceAnnounced += (ip, _, pdid, _, _) =>
+            SetOppoAccountIdentity(SettingsStore.Current.OppoSsoid);
+            LanDisc.DeviceAnnounced += (ip, _, pdid, dt, raw) =>
             {
+                // Announcements from this PC's own address come from other software on it (OPPO's O+Connect service
+                // devicespace.exe announces itself as a PC); they are never a send target.
+                if (string.Equals(ip, Lan?.IpString, StringComparison.Ordinal)) return;
                 if (!string.IsNullOrWhiteSpace(pdid))
+                {
                     _lanPeerIps[pdid.Replace(":", "").ToUpperInvariant()] = ip;
+                    var dn = LanDiscovery.ParseHeader(raw, "DN");
+                    var ad = LanDiscovery.ParseHeader(raw, "AD");
+                    var sameAccount = !string.IsNullOrWhiteSpace(ad) &&
+                                       string.Equals(ad, LanDisc.AccountDigest, StringComparison.OrdinalIgnoreCase);
+                    Scanner.UpsertLanDevice(pdid, ip, dn ?? "", dt, sameAccount);
+                    // Beacon names are stored per device type; with two same-account devices of this type the
+                    // name would flip between them, so only learn it when this device is the only one.
+                    if (sameAccount && int.TryParse(dt, out var dtNum) && !string.IsNullOrWhiteSpace(dn) &&
+                        Scanner.CountSameAccountLanDevices(dtNum, TimeSpan.FromMinutes(5)) == 1)
+                        Scanner.RememberContactName(dtNum, LanDisc.AccountDigest!, dn);
+                }
             };
             LanDisc.Start();
         }
@@ -263,6 +280,24 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         TransferStateChanged?.Invoke(_staged?.TaskId ?? "", "transfer cancelled");
     }
 
+    /// <summary>Synchronizes all runtime discovery consumers with the persisted OPPO identity.</summary>
+    public void SetOppoAccountIdentity(string? ssoid)
+    {
+        var digest = string.IsNullOrWhiteSpace(ssoid)
+            ? null
+            : OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(ssoid);
+        if (LanDisc is not null)
+            LanDisc.AccountDigest = digest ?? "";
+        Scanner.ResetContactDiscovery(digest);
+        if (!string.Equals(digest, _contactsDigest, StringComparison.OrdinalIgnoreCase))
+        {
+            _contactsDigest = digest;
+            ResetContactsForAccountChange();
+        }
+    }
+
+    private string? _contactsDigest;
+
     public void UpdateSaveDirectory(string dir)
     {
         if (string.IsNullOrWhiteSpace(dir)) return;
@@ -272,6 +307,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
 
     public async Task StopAsync()
     {
+        await StopContactsAsync();
         _devicePruneCts?.Cancel();
         _devicePruneCts?.Dispose();
         _devicePruneCts = null;
@@ -309,6 +345,10 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         Log.Info($"staged {task.FileCount} file(s), {task.TotalSize} bytes, taskId={task.TaskId}");
         foreach (var f in task.Files)
             Log.Info($"  {f}");
+        // Start Contact-mode preparation while the user is still choosing the
+        // receiver.  Waiting until Send() makes the beacon interval part of
+        // every first transfer and defeats the fast path.
+        PrewarmContactsDevices();
         return task;
     }
 
@@ -324,6 +364,10 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (!await _sendGate.WaitAsync(0))
             throw new InvalidOperationException("A transfer is already running.");
+        var wasContactsSend = false;
+        GattLink? sendLink = null;
+        var sendSucceeded = false;
+        using var timeline = SendTimeline.Start($"send -> {device.Name}");
         try
         {
         if (_staged is null)
@@ -334,6 +378,7 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
 
         using var transferCts = new CancellationTokenSource();
         _sendCts = transferCts;
+        using var contactNamePause = Scanner.PauseContactNameLookups();
         var ct = transferCts.Token;
         // OnePlus Share only promotes a peer after its common BLE parser has a
         // complete ScanRecord. Windows splits ADV + SCAN_RSP, so wait for our
@@ -345,11 +390,99 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
             hotspotPrewarmTask = Hotspot.EnsureStartedAsync();
         }
 
+        // BLE allows only ONE link between a given address pair. If the phone has
+        // already connected inbound to our receive GATT server (its silent
+        // "senseless" flow does exactly this to same-account peers), an outbound
+        // connect to that same phone can never complete — the peer refuses the
+        // second link and discovery times out. Yield our connectable advert for the
+        // duration of the send, and if the TARGET itself is holding a link, fail
+        // fast with instructions instead of burning the retry budget on a
+        // connection the peer will refuse. (The PC's own Bluetooth radio is NEVER
+        // touched automatically — clearing the link must happen on the phone side.)
+        Receiver.PauseAdvertising("outbound send");
+        var establishedLinks = await BleLinkDiagnostics.GetConnectedLeDevicesAsync();
+        if (establishedLinks.Count == 0)
+            Log.Info($"BLEDIAG[send-start -> {device.Name}]: no established LE links before connecting");
+        foreach (var l in establishedLinks)
+            Log.Info($"BLEDIAG[send-start -> {device.Name}]: established LE link -> '{l.Name}' {l.Address} paired={l.Paired}");
+        if (establishedLinks.Any(l => string.Equals(l.Address, device.AddressStr, StringComparison.OrdinalIgnoreCase)))
+        {
+            // Do NOT fail fast: the tablet keeps a permanent senseless link to our
+            // receive server (re-establishes within a minute of any BT restart, so it
+            // cannot be cleared from the PC side), AND its OShare GATT server is up
+            // whenever its 互傳 UI is foreground. BLE links carry client+server roles
+            // simultaneously, so the existing link can serve our outbound discovery —
+            // observed working when the server is up, timing out only when it is not.
+            // Proceed and let the (bounded) discovery attempts decide.
+            Log.Warn($"SEND: {device.Name} already has an established LE link to this PC — " +
+                     "attempting GATT over the existing link (its 互傳 GATT server must be running, e.g. 互傳 UI foreground)");
+        }
+
         GattLink? connectedLink = null;
         Exception? lastConnectError = null;
         DateTimeOffset? requireAdvertisementNewerThan = null;
 
-        for (var attempt = 1; attempt <= 3; attempt++)
+        // Contacts-only receivers publish no Alliance advertisement; they emit a connectable 0xFC70 beacon
+        // (device type + account digest) and start their 9999 GATT server on demand when connected to.
+        // The first connection to a cold server only wakes it (the tablet restarts its GATT server and
+        // drops the link), so retry against fresh beacons.
+        var contactsPath = false;
+        if (device.Kind == PhoneKind.Lan && device.LanDeviceType > 0 &&
+            !string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid) && flow != SendFlow.OShareHotspot)
+        {
+            // A Contacts-listed device (pseudo pdid FC70…) always goes this way; a normal LAN-announced
+            // device only if it is also currently emitting the Contacts beacon (otherwise it is in "Everyone"
+            // mode and the regular path below is used without any extra waiting). The beacon carries only
+            // device type + account digest, so it is attributed to this LAN device only when it is the sole
+            // same-account device of that type; otherwise the send could reach a different device.
+            var digest0 = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid!);
+            contactsPath = device.LanPdid.StartsWith("FC70", StringComparison.Ordinal) ||
+                           (device.LanSameAccount &&
+                            Scanner.CountSameAccountLanDevices(device.LanDeviceType, TimeSpan.FromMinutes(5)) == 1 &&
+                            Scanner.HasRecentContactsBeacon((byte)device.LanDeviceType, digest0, TimeSpan.FromSeconds(120)));
+            if (contactsPath)
+            {
+                wasContactsSend = true;
+                // A receiver that finished a transfer a moment ago may still swallow the next offer; give it a beat.
+                var sinceLast = DateTimeOffset.UtcNow - _lastContactsSendEnded;
+                if (sinceLast < ContactsSendSettle)
+                    await Task.Delay(ContactsSendSettle - sinceLast, ct);
+                var gotContactsGate = await TakeContactsGateAsync(ct, device.LanPdid);
+                if (!gotContactsGate)
+                    throw new InvalidOperationException($"{device.Name} is still being prepared. Try again in a moment.");
+                SendTimeline.Mark("contacts-gate");
+                try
+                {
+                    connectedLink = TakeWarmLink(device.LanPdid);
+                    if (connectedLink is not null)
+                    {
+                        Log.Info($"CONTACTS: using the pre-warmed link to {device.Name}");
+                        SendTimeline.Mark("warm-link");
+                    }
+                    else
+                        connectedLink = await ConnectContactsAsync(device, s => TransferStateChanged?.Invoke(_staged!.TaskId, s),
+                            TimeSpan.FromSeconds(75), forceWake: false, ct);
+                }
+                finally { _contactsGate.Release(); }
+                if (connectedLink is null && device.LanPdid.StartsWith("FC70", StringComparison.Ordinal))
+                {
+                    // Listed only through its Contacts beacon: the old Alliance-style retry loop can never
+                    // find it, so report clearly instead of waiting a further ~30s for nothing.
+                    throw new InvalidOperationException(
+                        $"{device.Name} could not be reached. Keep it near the PC with Bluetooth on and try again.");
+                }
+            }
+        }
+        if (!contactsPath)
+        {
+            // A Contacts pre-warm still connecting to another device would compete for the radio with this send;
+            // the keeper starts no new one while a send runs.
+            try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
+            if (await _contactsGate.WaitAsync(TimeSpan.FromSeconds(3), ct)) _contactsGate.Release(); // it has stopped
+            await ReleaseWarmLinksForSendAsync(ct);
+        }
+
+        for (var attempt = 1; connectedLink is null && attempt <= 3; attempt++)
         {
             var wait = attempt == 1 ? TimeSpan.FromSeconds(6) : TimeSpan.FromSeconds(8);
             TransferStateChanged?.Invoke(
@@ -443,10 +576,14 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         }
 
         if (connectedLink is null)
+        {
+            await BleLinkDiagnostics.LogConnectedDevicesAsync("connect-failed", device.Address);
             throw new InvalidOperationException(
                 $"BLE: phone never exposed a connectable GATT session after fresh advertisements — {lastConnectError?.Message}");
+        }
 
-        using var link = connectedLink;
+        var link = connectedLink;
+        sendLink = link;
         _crypto ??= new OShareCrypto();
 
         var resolvedFlow = flow switch
@@ -475,16 +612,70 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
             // /websocket before the old lazy phoneConnected callback armed the task.
             Server.ArmTransfer(_staged, Lan.IpString, expectedPeerIp);
 
-            await link.OConnectLanSendAsync(
-                Lan,
-                Port,
-                _crypto,
-                Advertiser.DeviceName,
-                _staged.FileCount,
-                s => TransferStateChanged?.Invoke(_staged.TaskId, s),
-                phoneConnected: () => Server.WsConnected || _staged.Complete,
-                waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
-                ct: ct);
+            var activeLink = link;
+            try
+            {
+                for (var busyTry = 1; ; busyTry++)
+                {
+                    try
+                    {
+                        await activeLink.OConnectLanSendAsync(
+                            Lan,
+                            Port,
+                            _crypto,
+                            Advertiser.DeviceName,
+                            _staged.FileCount,
+                            s => TransferStateChanged?.Invoke(_staged.TaskId, s),
+                            phoneConnected: () => Server.WsConnected || _staged.Complete,
+                            waitForPhoneConnectedAsync: (timeout, token) => Server.WaitForPeerConnectedAsync(timeout, token),
+                            ct: ct,
+                            oppoSsoid: SettingsStore.Current.OppoSsoid,
+                            stallAfter: contactsPath && busyTry == 1 ? TimeSpan.FromSeconds(4) : null);
+                        SendTimeline.Mark("phone-connected");
+                        sendLink = activeLink; // the link that worked (a retry may have replaced the first one)
+                        break;
+                    }
+                    // Any handshake failure on a Contacts link is retried on a fresh one (a warm link's receiver may have
+                    // gone away since, which surfaces as assorted GATT errors) — except when the phone already took the
+                    // offer and simply never connected over the LAN.
+                    catch (Exception ex) when (contactsPath && busyTry < 3 && !ct.IsCancellationRequested &&
+                                               ex is not OperationCanceledException &&
+                                               !ex.Message.Contains("did not establish", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Release the failed link without waiting: closing one with an unanswered request queued on it
+                        // blocks until the 30 s ATT timeout (observed). BLE allows one link per address pair, so a
+                        // link that stopped answering also rules out its address for a while.
+                        var failed = activeLink;
+                        failed.DisposeInBackground();
+                        var restart = false;
+                        if (ex is LinkNotRespondingException nr)
+                        {
+                            // The receive service is listed but dead (typically after its idle timeout): restart it.
+                            Log.Warn($"CONTACTS: receiver not answering ({ex.Message}); restarting its receive service");
+                            AvoidAddress(nr.Address, TimeSpan.FromSeconds(35));
+                            restart = true;
+                        }
+                        else
+                            Log.Warn($"CONTACTS: handshake failed (try {busyTry}: {ex.GetType().Name} {ex.Message}); reconnecting and retrying");
+                        TransferStateChanged?.Invoke(_staged.TaskId, restart ? "restarting the receive service…" : "retrying…");
+                        if (!await TakeContactsGateAsync(ct)) throw;
+                        GattLink? again;
+                        try
+                        {
+                            again = await ConnectContactsAsync(device, s => TransferStateChanged?.Invoke(_staged!.TaskId, s),
+                                TimeSpan.FromSeconds(30), forceWake: restart, ct);
+                        }
+                        finally { _contactsGate.Release(); }
+                        if (again is null) throw;
+                        activeLink = again;
+                    }
+                }
+            }
+            finally
+            {
+                // Also on failure: a reconnected link left open would keep the phone connected to this PC.
+                if (!ReferenceEquals(activeLink, sendLink)) activeLink.DisposeInBackground();
+            }
             TransferStateChanged?.Invoke(_staged.TaskId, $"credentials sent to {device.Name} via LAN — waiting for the phone to connect");
         }
 
@@ -527,9 +718,26 @@ public sealed class SenderEngine : IDisposable, IAsyncDisposable
         // BLE credentials only authorize the phone. Keep the single-flight gate
         // held until the HTTP/WebSocket session reaches a terminal phone status.
         await Server.WaitForTransferCompletionAsync(_staged.TaskId, ct);
+        SendTimeline.Mark("transfer-complete");
+        timeline.Succeeded();
+        sendSucceeded = true;
         }
         finally
         {
+            // A Contacts receiver keeps its 9999 service up after a transfer, so the link that just worked is kept
+            // as the warm link for the next send. Closing it and reconnecting a second later collided with the
+            // closing link and made the receiver refuse new connections for up to 16 s (observed).
+            if (wasContactsSend && sendSucceeded && sendLink is { IsConnected: true })
+                StoreWarmLink(device.LanPdid, sendLink);
+            else
+                sendLink?.DisposeInBackground();
+            if (wasContactsSend)
+            {
+                // The receiver drops back to its idle state after every transfer; get it ready for the next one.
+                _lastContactsSendEnded = DateTimeOffset.UtcNow;
+                PrewarmContactsDevices();
+            }
+            Receiver.ResumeAdvertising();
             _sendCts = null;
             _sendGate.Release();
         }

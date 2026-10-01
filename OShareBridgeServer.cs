@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using OShareSender.OppoAccount;
 
 namespace OShareSender;
 
@@ -34,6 +35,12 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private int _shutdownRequested;
     private int _sendQuiet;
     private string? _sendRequestId;
+    private OppoAccountLoginSession? _oppoLoginSession;
+    private readonly SemaphoreSlim _oppoLoginGate = new(1, 1);
+    private volatile bool _oppoWebLoginRunning;
+    private OppoAccountBleAdvertiser? _oppoBleAdvertiser;
+    private OppoWindowsSenselessAdvertiser? _oppoWindowsAdvertiser;
+    private readonly SemaphoreSlim _oppoBleGate = new(1, 1);
 
     public OShareBridgeServer(string authToken)
     {
@@ -107,6 +114,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             ConfirmViaBridge(offer.SenderId, $"Wi-Fi Direct: {offer.Ssid}", "1", offer.SenderId);
 
         await _engine.StartAsync(SenderEngine.DefaultPort);
+        StartOppoBleAdvertiserIfConfigured();
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
@@ -174,6 +182,11 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 sendQuiet = Volatile.Read(ref _sendQuiet) != 0,
                 minimizeToTray = SettingsStore.Current.MinimizeToTray,
                 closeToTray = SettingsStore.Current.CloseToTray,
+                oppoAccountName = SettingsStore.Current.OppoAccountName,
+                // Only a masked form leaves the backend; the real id stays encrypted on disk.
+                oppoSsoid = SecretProtector.Mask(SettingsStore.Current.OppoSsoid),
+                oppoSsoidSet = !string.IsNullOrEmpty(SettingsStore.Current.OppoSsoid),
+                oppoAvatarUrl = SettingsStore.Current.OppoAvatarUrl,
                 pendingTransfer = pending is null ? null : new
                 {
                     id = pending.Id,
@@ -251,12 +264,25 @@ public sealed class OShareBridgeServer : IAsyncDisposable
 
         app.MapPost("/api/settings", async (SettingsRequest body) =>
         {
+            // The GUI only ever sees the masked id; never let it overwrite the real one.
+            if (body.OppoSsoid is not null && body.OppoSsoid.Contains('*'))
+                body = body with { OppoSsoid = null };
             if (!string.IsNullOrWhiteSpace(body.SaveDirectory)) _engine.UpdateSaveDirectory(body.SaveDirectory);
             SettingsStore.Save(
                 themeMode: body.ThemeMode,
                 quickSaveMode: body.QuickSaveMode,
                 minimizeToTray: body.MinimizeToTray,
-                closeToTray: body.CloseToTray);
+                closeToTray: body.CloseToTray,
+                oppoSsoid: body.OppoSsoid,
+                oppoAccountName: body.OppoAccountName);
+            if (body.OppoSsoid is not null)
+            {
+                _engine.SetOppoAccountIdentity(body.OppoSsoid);
+                if (string.IsNullOrWhiteSpace(body.OppoSsoid))
+                    await StopOppoBleAdvertiserAsync();
+                else
+                    await StartOppoBleAdvertiserAsync(body.OppoSsoid);
+            }
             return Results.Ok(new
             {
                 deviceName = _engine.Advertiser.DeviceName,
@@ -265,6 +291,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 quickSaveMode = SettingsStore.Current.QuickSaveMode,
                 minimizeToTray = SettingsStore.Current.MinimizeToTray,
                 closeToTray = SettingsStore.Current.CloseToTray,
+                // Only a masked form leaves the backend; the real id stays encrypted on disk.
+                oppoSsoid = SecretProtector.Mask(SettingsStore.Current.OppoSsoid),
+                oppoSsoidSet = !string.IsNullOrEmpty(SettingsStore.Current.OppoSsoid),
+                oppoAccountName = SettingsStore.Current.OppoAccountName,
             });
         });
 
@@ -289,7 +319,16 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 return Results.BadRequest(new { error = "No existing files were supplied." });
             }
             var task = _engine.StageFiles(files)!;
+            _engine.PrewarmContactsDevices();
             return Results.Ok(new { taskId = task.TaskId, fileCount = task.FileCount, totalSize = task.TotalSize });
+        });
+
+        // The GUI calls this when its window is focused or a file is dragged over it, so nearby Contacts devices are
+        // connected and their receive service started before the user picks a target.
+        app.MapPost("/api/contacts/prewarm", () =>
+        {
+            _engine.PrewarmContactsDevices();
+            return Results.Ok(new { started = true });
         });
 
         app.MapPost("/api/send", async (SendRequest body) =>
@@ -333,9 +372,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             finally { _sendGate.Release(); }
             _ = _sendTask.ContinueWith(t =>
             {
-                if (t.IsFaulted)
+                if (t.IsFaulted || t.IsCanceled)
                 {
-                    var error = t.Exception?.GetBaseException().Message ?? "send failed";
+                    // A cancelled task (link dropped mid-send) must still tell the UI, or it waits forever.
+                    var error = t.IsCanceled ? "The transfer was interrupted." : t.Exception?.GetBaseException().Message ?? "send failed";
                     Log.Warn($"send failed: {error}");
                     Push("sendFailed", new { error, quiet, requestId });
                     Interlocked.CompareExchange(ref _sendRequestId, null, requestId);
@@ -343,6 +383,168 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 }
             });
             return Results.Accepted(value: new { device = device.Name, address = device.Address, requestId });
+        });
+
+        app.MapPost("/api/oppo-account/login/start", async () =>
+        {
+            await _oppoLoginGate.WaitAsync();
+            try
+            {
+                if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
+                _oppoLoginSession = new OppoAccountLoginSession();
+                _oppoLoginSession.Start((type, data) => Push(type, data));
+            }
+            finally { _oppoLoginGate.Release(); }
+            return Results.Ok(new { started = true });
+        });
+
+        app.MapPost("/api/oppo-account/login/cancel", async () =>
+        {
+            await _oppoLoginGate.WaitAsync();
+            try
+            {
+                if (_oppoLoginSession is not null)
+                {
+                    await _oppoLoginSession.DisposeAsync();
+                    _oppoLoginSession = null;
+                }
+            }
+            finally { _oppoLoginGate.Release(); }
+            return Results.Ok(new { cancelled = true });
+        });
+
+        app.MapPost("/api/oppo-account/login/verification/gather", async (OppoVerificationRequest body) =>
+        {
+            await _oppoLoginGate.WaitAsync();
+            try
+            {
+                if (_oppoLoginSession is null)
+                    return Results.Conflict(new { error = "There is no active OPPO login." });
+                if (string.IsNullOrWhiteSpace(body.VerMethod))
+                    return Results.BadRequest(new { error = "verMethod is required" });
+
+                try
+                {
+                    var result = await _oppoLoginSession.GatherVerificationAsync(body.VerMethod);
+                    Push("oppoAccountVerificationChallenge", new
+                    {
+                        verMethod = result.VerMethod,
+                        codeLength = result.CodeLength,
+                    });
+                    return Results.Ok(new
+                    {
+                        sent = true,
+                        verMethod = result.VerMethod,
+                        codeLength = result.CodeLength,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Push("oppoAccountVerificationError", new { error = ex.Message });
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+            finally { _oppoLoginGate.Release(); }
+        });
+
+        app.MapPost("/api/oppo-account/login/verification/validate", async (OppoVerificationRequest body) =>
+        {
+            await _oppoLoginGate.WaitAsync();
+            try
+            {
+                if (_oppoLoginSession is null)
+                    return Results.Conflict(new { error = "There is no active OPPO login." });
+                if (string.IsNullOrWhiteSpace(body.VerMethod) || string.IsNullOrWhiteSpace(body.ValidateData))
+                    return Results.BadRequest(new { error = "verMethod and validateData are required" });
+
+                try
+                {
+                    var result = await _oppoLoginSession.ValidateVerificationAsync(
+                        body.VerMethod, body.ValidateData);
+                    Push("oppoAccountVerificationValidated", new
+                    {
+                        verMethod = body.VerMethod,
+                        ticket = result.Ticket,
+                        needNextRound = result.NeedNextRound,
+                        sessionPending = true,
+                    });
+                    return Results.Ok(new
+                    {
+                        accepted = false,
+                        ticket = result.Ticket,
+                        needNextRound = result.NeedNextRound,
+                        sessionPending = true,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Push("oppoAccountVerificationError", new { error = ex.Message });
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+            finally { _oppoLoginGate.Release(); }
+        });
+
+        app.MapPost("/api/oppo-account/weblogin/start", (OppoWebLoginStartRequest? body) =>
+        {
+            if (_oppoWebLoginRunning) return Results.Conflict(new { error = "A login attempt is already open." });
+            var brand = string.Equals(body?.Brand, "oneplus_oversea", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(body?.Brand, "oneplus", StringComparison.OrdinalIgnoreCase)
+                ? OppoBrand.OneplusOversea
+                : OppoBrand.Oppo;
+
+            // Show OPPO's login page in the app's own language (the GUI sends en-US / zh-CN / zh-TW).
+            var language = body?.Language switch
+            {
+                "zh-CN" or "zh-TW" or "en-US" => body.Language,
+                _ => "en-US",
+            };
+            _oppoWebLoginRunning = true;
+            Push("oppoWebLoginStarted", new { brand = brand.Name });
+            _ = RunOppoWebLoginAsync(brand, language);
+            return Results.Ok(new { started = true, brand = brand.Name });
+        });
+
+        app.MapPost("/api/oppo-account/logout", async () =>
+        {
+            SettingsStore.ClearOppoAccount();
+            _engine.SetOppoAccountIdentity(null);
+            await StopOppoBleAdvertiserAsync();
+            Log.Info("OppoWebLogin: logged out — cleared account identity and stopped the same-account BLE beacon.");
+            Push("oppoAccountLoggedOut", new { });
+            return Results.Ok(new { loggedOut = true });
+        });
+
+        app.MapPost("/api/oppo-account/weblogin/clear-data", () =>
+        {
+            if (_oppoWebLoginRunning)
+                return Results.Conflict(new { error = "Close the login window first." });
+            try
+            {
+                OppoWebLogin.ClearBrowserData();
+                return Results.Ok(new { cleared = true });
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"OppoWebLogin: ClearBrowserData failed: {ex.Message}");
+                return Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
+
+        app.MapPost("/api/oppo-account/ble-advertise/start", async (OppoBleAdvertiseStartRequest body) =>
+        {
+            if (string.IsNullOrWhiteSpace(body.Ssoid))
+                return Results.BadRequest(new { error = "ssoid is required" });
+            SettingsStore.Save(oppoSsoid: body.Ssoid);
+            _engine.SetOppoAccountIdentity(body.Ssoid);
+            await StartOppoBleAdvertiserAsync(body.Ssoid);
+            return Results.Ok(new { started = true });
+        });
+
+        app.MapPost("/api/oppo-account/ble-advertise/stop", async () =>
+        {
+            await StopOppoBleAdvertiserAsync();
+            return Results.Ok(new { stopped = true });
         });
 
         _app = app;
@@ -414,6 +616,228 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Runs the WebView2-hosted OPPO login widget (see OppoAccount/OppoWebLoginForm.cs)
+    /// to completion and pushes the result. This replaces the old hand-rolled REST/2FA
+    /// flow above, which OPPO's server rejected for reasons documented in
+    /// docs/oppo-account-login-notes.md.
+    /// </summary>
+    private async Task RunOppoWebLoginAsync(OppoBrand brand, string language)
+    {
+        try
+        {
+            var result = await OppoWebLogin.ShowAsync(brand, language);
+            if (result is null)
+            {
+                Log.Info("OppoWebLogin (bridge): login window closed without a result — treating as cancelled.");
+                Push("oppoWebLoginCancelled", new { });
+                return;
+            }
+
+            Log.Info($"OppoWebLogin (bridge): callback received ({RedactUrl(result.Msg)})");
+
+            var (code, callbackCountryCode) = TryParseCallbackCode(result.Msg);
+            if (code is not null)
+            {
+                // This is the normal case: result.Msg is the callback URL carrying a
+                // one-time OAuth-style code, which still needs to be exchanged for an
+                // actual session — see OppoAccountExchange.cs. Done immediately, since
+                // the code appears to be short-lived.
+                var cfg = ReferenceEquals(brand, OppoBrand.OneplusOversea)
+                    ? OppoAccountExchange.OneplusOversea
+                    : OppoAccountExchange.Oppo;
+                try
+                {
+                    using var exchanged = await OppoAccountExchange.ExchangeCodeAsync(cfg, code, callbackCountryCode);
+                    var exchangedText = exchanged.RootElement.ToString();
+                    var exchangeCode = exchanged.RootElement.TryGetProperty("code", out var exchangeCodeEl)
+                        ? exchangeCodeEl.ToString()
+                        : "unknown";
+                    Log.Info($"OppoWebLogin (bridge): session exchange completed (responseCode={exchangeCode})");
+
+                    // Confirmed real shape (seen live): {"code":200,"data":{"accessToken":
+                    // "...","expireIn":..,"accessDomain":"...","userDetail":{"userId":
+                    // "<the actual ssoid>","userName":"<display name>",...}}}. The
+                    // generic field-name fallback below is kept only for the (unlikely)
+                    // case that shape ever changes.
+                    string? exAccountName = null, exSsoid = null, exAvatarUrl = null;
+                    if (exchanged.RootElement.TryGetProperty("data", out var dataEl) &&
+                        dataEl.ValueKind == JsonValueKind.Object &&
+                        dataEl.TryGetProperty("userDetail", out var userDetail) &&
+                        userDetail.ValueKind == JsonValueKind.Object)
+                    {
+                        if (userDetail.TryGetProperty("userId", out var uid) && uid.ValueKind == JsonValueKind.String)
+                            exSsoid = uid.GetString();
+                        if (userDetail.TryGetProperty("userName", out var un) && un.ValueKind == JsonValueKind.String)
+                            exAccountName = un.GetString();
+                        if (userDetail.TryGetProperty("avatar", out var avatar) && avatar.ValueKind == JsonValueKind.Object)
+                        {
+                            // "default" is the user's own actual photo (a per-user
+                            // filename); "personalizationDefault" is the generic
+                            // placeholder silhouette used when there's no photo — prefer
+                            // the real one.
+                            if (avatar.TryGetProperty("default", out var def) && def.ValueKind == JsonValueKind.String)
+                                exAvatarUrl = def.GetString();
+                            else if (avatar.TryGetProperty("personalizationDefault", out var pd) && pd.ValueKind == JsonValueKind.String)
+                                exAvatarUrl = pd.GetString();
+                        }
+                    }
+                    if (exAccountName is null && exSsoid is null)
+                        (exAccountName, exSsoid) = TryParseOppoWebLoginMsg(exchangedText);
+
+                    Log.Info($"OppoWebLogin (bridge): parsed accountName={exAccountName ?? "(none)"}, ssoid={(exSsoid is null ? "(none)" : "(present)")}, avatarUrl={(exAvatarUrl is null ? "(none)" : "(present)")}");
+                    if (exAccountName is not null || exSsoid is not null || exAvatarUrl is not null)
+                        SettingsStore.Save(oppoSsoid: exSsoid, oppoAccountName: exAccountName, oppoAvatarUrl: exAvatarUrl);
+                    if (exSsoid is not null)
+                    {
+                        _engine.SetOppoAccountIdentity(exSsoid);
+                        if (!string.IsNullOrWhiteSpace(exSsoid)) await StartOppoBleAdvertiserAsync(exSsoid);
+                        else await StopOppoBleAdvertiserAsync();
+                    }
+
+                    Push("oppoWebLoginSuccess", new
+                    {
+                        accountName = exAccountName,
+                        ssoid = SecretProtector.Mask(exSsoid),
+                        avatarUrl = exAvatarUrl,
+                        countryCode = callbackCountryCode,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"OppoWebLogin (bridge): code exchange failed: {ex.Message}");
+                    Push("oppoWebLoginError", new { error = $"Login succeeded but the session exchange failed: {ex.Message}" });
+                }
+                return;
+            }
+
+            // Fallback for a shape that isn't the callback URL (e.g. if a future change
+            // ever gets the widget's onSuccess to fire directly, embedded-style) — treat
+            // it as an already-finished result, same as before this exchange step existed.
+            var (accountName, ssoid) = TryParseOppoWebLoginMsg(result.Msg);
+            Log.Info($"OppoWebLogin (bridge): parsed accountName={accountName ?? "(none)"}, ssoid={(ssoid is null ? "(none)" : "(present)")}");
+            if (accountName is not null || ssoid is not null)
+                SettingsStore.Save(oppoSsoid: ssoid, oppoAccountName: accountName);
+            if (ssoid is not null)
+            {
+                _engine.SetOppoAccountIdentity(ssoid);
+                if (!string.IsNullOrWhiteSpace(ssoid)) await StartOppoBleAdvertiserAsync(ssoid);
+                else await StopOppoBleAdvertiserAsync();
+            }
+
+            Push("oppoWebLoginSuccess", new
+            {
+                accountName,
+                ssoid = SecretProtector.Mask(ssoid),
+                countryCode = result.CountryCode,
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"OPPO web login failed: {ex.Message}");
+            Push("oppoWebLoginError", new { error = ex.Message });
+        }
+        finally
+        {
+            _oppoWebLoginRunning = false;
+        }
+    }
+
+    private static readonly string[] AccountNameFields = { "accountName", "userName", "nickName", "account" };
+    // "code" deliberately excluded — that field means the one-time OAuth-style exchange
+    // code (handled explicitly by TryParseCallbackCode/OppoAccountExchange), not a
+    // finished session id, and would be misleading if surfaced as one.
+    private static readonly string[] SsoidFields = { "ssoid", "ssoId", "userId", "token", "authToken", "ticket" };
+
+    /// <summary>Extracts the one-time exchange `code` (and its countryCode) from the
+    /// login widget's callback URL, if <paramref name="msg"/> is that URL — this is the
+    /// normal case (see OppoWebLoginForm.OnNavigationStarting). Returns (null, null) for
+    /// anything else, e.g. a future embedded-widget `onSuccess` payload that's already a
+    /// finished result rather than a code needing exchange.</summary>
+    private static (string? Code, string? CountryCode) TryParseCallbackCode(string msg)
+    {
+        if (!msg.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+            !msg.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            return (null, null);
+
+        try
+        {
+            var uri = new Uri(msg);
+            var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query.TrimStart('?'));
+            var code = query.TryGetValue("code", out var c) ? c.ToString() : null;
+            var countryCode = query.TryGetValue("countryCode", out var cc) ? cc.ToString() : null;
+            return (string.IsNullOrEmpty(code) ? null : code, string.IsNullOrEmpty(countryCode) ? null : countryCode);
+        }
+        catch (UriFormatException)
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>Best-effort extraction of an account name/ssoid from the web login
+    /// widget's result. Its exact shape wasn't known ahead of time: it can arrive either
+    /// as a JSON object (if a future embedded/iframe use of the widget ever calls
+    /// `onSuccess` directly) or — the actually-observed case — as the full URL OPPO
+    /// redirected to on completion (`callbackUrl?...`), whose query string or fragment
+    /// carries the result instead. Both are tried; failing both, both fields are left
+    /// null and the raw value is still pushed to the UI for inspection.</summary>
+    private static (string? AccountName, string? Ssoid) TryParseOppoWebLoginMsg(string msg)
+    {
+        if (msg.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            msg.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var uri = new Uri(msg);
+                var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var raw in new[] { uri.Query.TrimStart('?'), uri.Fragment.TrimStart('#') })
+                {
+                    if (string.IsNullOrEmpty(raw)) continue;
+                    foreach (var pair in Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(raw))
+                        fields[pair.Key] = pair.Value.ToString();
+                }
+
+                string? ReadField(string[] names) =>
+                    names.Select(n => fields.TryGetValue(n, out var v) ? v : null).FirstOrDefault(v => v is not null);
+
+                return (ReadField(AccountNameFields), ReadField(SsoidFields));
+            }
+            catch (UriFormatException)
+            {
+                return (null, null);
+            }
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(msg);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return (null, null);
+
+            // Also look one level into a "data" envelope — the exchange endpoint's own
+            // error responses come back as {"code":..,"message":..,"data":null}, so a
+            // real success response is likely {"code":200,"data":{...actual fields...}}.
+            var searchRoots = root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object
+                ? new[] { data, root }
+                : new[] { root };
+
+            string? Read(string[] names)
+            {
+                foreach (var scope in searchRoots)
+                    foreach (var name in names)
+                        if (scope.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String)
+                            return v.GetString();
+                return null;
+            }
+
+            return (Read(AccountNameFields), Read(SsoidFields));
+        }
+        catch (JsonException)
+        {
+            return (null, null);
+        }
+    }
+
     private void Push(string type, object data)
     {
         var s = Interlocked.Increment(ref _seq);
@@ -424,6 +848,10 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         ClearPendingTransfers();
+        if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
+        _oppoLoginGate.Dispose();
+        await StopOppoBleAdvertiserAsync();
+        _oppoBleGate.Dispose();
         if (_app is not null) await _app.StopAsync();
         await _engine.DisposeAsync();
         _sendGate.Dispose();
@@ -451,7 +879,103 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         int? ThemeMode,
         int? QuickSaveMode,
         bool? MinimizeToTray,
-        bool? CloseToTray);
+        bool? CloseToTray,
+        string? OppoSsoid = null,
+        string? OppoAccountName = null);
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null, string? TaskId = null);
+    private sealed record OppoWebLoginStartRequest(string? Brand, string? Language = null);
+    private sealed record OppoBleAdvertiseStartRequest(string? Ssoid);
+    private sealed record OppoVerificationRequest(string? VerMethod, string? ValidateData = null);
+
+    /// <summary>A random 6-byte identity for the OPPO "same account" BLE scheme,
+    /// generated once and persisted (SettingsStore.OppoBleDeviceId) — see
+    /// OppoAccountBleAdvertiser for how it's used.</summary>
+    private static string GenerateBleDeviceId()
+    {
+        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        var bytes = RandomNumberGenerator.GetBytes(6);
+        var chars = new char[6];
+        for (int i = 0; i < 6; i++) chars[i] = alphabet[bytes[i] % alphabet.Length];
+        return new string(chars);
+    }
+
+    /// <summary>Starts (or restarts) the same-account BLE beacon for the given ssoid,
+    /// generating and persisting a device id on first use. Called both from the manual
+    /// start endpoint and automatically whenever a real ssoid is configured, so no
+    /// dedicated UI action is required to keep the beacon running.</summary>
+    private async Task StartOppoBleAdvertiserAsync(string ssoid)
+    {
+        await _oppoBleGate.WaitAsync();
+        try
+        {
+            // A startup task may still be queued when logout/account-switch runs.
+            // Do not resurrect an identity that is no longer the persisted one.
+            if (!string.Equals(SettingsStore.Current.OppoSsoid, ssoid, StringComparison.Ordinal))
+                return;
+            var deviceId = SettingsStore.Current.OppoBleDeviceId;
+            if (string.IsNullOrEmpty(deviceId) || deviceId.Length != 6)
+            {
+                deviceId = GenerateBleDeviceId();
+                SettingsStore.Save(oppoBleDeviceId: deviceId);
+            }
+
+            // Windows BLE adapters typically only host one legacy advertising set
+            // at a time, and the receive-side connectable GATT advert (0x8881) is
+            // deliberately kept as the permanent slot winner (see SenderEngine.cs's
+            // UpdateCoordination) since phone->PC quick-save receiving depends on
+            // it. This advertiser therefore usually won't get real airtime while
+            // receive mode is on -- confirmed via a live nRF Connect scan showing
+            // only 0x180A/0x8881 even after isolating it with nothing else running
+            // (see OPPO_ACCOUNT_API_FINDINGS.md section 5k) -- but starting it
+            // anyway is harmless (non-connectable, doesn't fight 8881 for GATT
+            // connections) and lets it pick up the slot on devices/moments where
+            // 8881 isn't actively holding it.
+            _engine.FallbackAdvertiser.Pause();
+            _oppoBleAdvertiser?.Dispose();
+            _oppoBleAdvertiser = null;
+
+            _oppoWindowsAdvertiser?.Dispose();
+            _oppoWindowsAdvertiser = new OppoWindowsSenselessAdvertiser((byte)deviceId[0]);
+            _oppoWindowsAdvertiser.Start(ssoid);
+
+        }
+        finally { _oppoBleGate.Release(); }
+    }
+
+    private async Task StopOppoBleAdvertiserAsync()
+    {
+        await _oppoBleGate.WaitAsync();
+        try
+        {
+            _oppoBleAdvertiser?.Dispose();
+            _oppoBleAdvertiser = null;
+            _oppoWindowsAdvertiser?.Dispose();
+            _oppoWindowsAdvertiser = null;
+        }
+        finally { _oppoBleGate.Release(); }
+    }
+
+    private static string RedactUrl(string value)
+    {
+        try
+        {
+            var uri = new Uri(value);
+            return uri.GetLeftPart(UriPartial.Path);
+        }
+        catch
+        {
+            return "non-url login result";
+        }
+    }
+
+    /// <summary>Called on backend startup and whenever settings are saved — starts the
+    /// beacon if a real ssoid is already on file, so it survives process restarts
+    /// without the user re-entering anything.</summary>
+    private void StartOppoBleAdvertiserIfConfigured()
+    {
+        var ssoid = SettingsStore.Current.OppoSsoid;
+        if (!string.IsNullOrWhiteSpace(ssoid))
+            _ = StartOppoBleAdvertiserAsync(ssoid);
+    }
 }

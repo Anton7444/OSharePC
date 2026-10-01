@@ -44,3 +44,11 @@ desktop.ini
 
 # Local build selections and machine-specific tool paths.
 .build-local.config.json
+
+# Local signing certs (any name), agent scratch data, private debug notes and local release builds.
+*.pfx
+*.cer
+.codex-remote-attachments/
+deploy-gui-*/
+docs/contacts-mode-handoff.md
+docs/superpowers/

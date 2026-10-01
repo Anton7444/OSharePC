@@ -14,6 +14,18 @@ extension AppLanguageInfo on AppLanguage {
     }
   }
 
+  /// BCP-47 tag handed to web content, e.g. OPPO's account-login page.
+  String get webLanguageTag {
+    switch (this) {
+      case AppLanguage.english:
+        return 'en-US';
+      case AppLanguage.simplifiedChinese:
+        return 'zh-CN';
+      case AppLanguage.traditionalChinese:
+        return 'zh-TW';
+    }
+  }
+
   String get label {
     switch (this) {
       case AppLanguage.english:
@@ -141,6 +153,46 @@ String appText(AppLanguage language, String key) {
       'remoteRejected': 'The phone rejected the transfer.',
       'connectionLost': 'The connection to the phone was lost.',
       'transferTimedOut': 'The transfer timed out.',
+      'oppoAccount': 'OPPO Account',
+      'oppoAccountHint':
+          'Experimental: log in to your OPPO/OnePlus account by scanning a QR code with your phone, same as the official app.',
+      'oppoAccountLoginBtn': 'Log in to OPPO account',
+      'oppoUserIdLabel': 'User ID',
+      'cancel': 'Cancel',
+      'oppoSsoidReverted': 'Cleared; your saved account id is unchanged.',
+      'oppoLogout': 'Log out',
+      'oppoLogoutConfirmTitle': 'Log out of OPPO account?',
+      'oppoLogoutConfirmBody': "This clears the saved account name, ssoid and avatar from this PC. It does not sign you out of OPPO's servers.",
+      'oppoLoggedOut': 'Logged out.',
+      'oppoLogoutFailed': 'Could not reach the backend to log out.',
+      'oppoClearBrowserDataTitle': 'Clear saved login data?',
+      'oppoClearBrowserDataBody': "This clears the login window's saved cookies/session, so the next login shows a fresh sign-in page instead of continuing whichever OPPO account was used last. Close any open login window first.",
+      'oppoClearBrowserDataConfirm': 'Clear',
+      'oppoBrowserDataCleared': 'Login browser data cleared.',
+      'oppoBrowserDataClearFailed': 'Could not clear login browser data',
+      'oppoAccountDialogTitle': 'Log in to OPPO account',
+      'oppoAccountScanHint': 'Scan this QR code with your OPPO/OnePlus phone',
+      'oppoAccountWaitingScan': 'Waiting for scan…',
+      'oppoAccountScanned': 'Scanned — waiting for you to confirm on your phone…',
+      'oppoSsoidLabel': 'OPPO account ssoid (advanced)',
+      'oppoSsoidRevert': 'Revert',
+      'oppoClearBrowserData': 'Clear saved login browser data',
+      'oppoSsoidHint': 'Manual entry until login produces this automatically',
+      'oppoSsoidSaved': 'Saved.',
+      'oppoSsoidSaveFailed': 'Could not save — is the app running?',
+      'save': 'Save',
+      'oppoAccountConfirmed': 'Confirmed! Fetching account details…',
+      'oppoAccountExpired': 'QR code expired.',
+      'oppoAccountMethodsFound': 'Available verification methods',
+      'oppoAccountNoMoreYet': 'Choose a method to continue verification.',
+      'oppoAccountSendCode': 'Send verification code',
+      'oppoAccountSending': 'Sending…',
+      'oppoAccountCodeLabel': 'Verification code',
+      'oppoAccountPasswordLabel': 'OPPO account password',
+      'oppoAccountVerify': 'Verify',
+      'oppoAccountVerificationAccepted': 'Verification accepted.',
+      'oppoAccountSessionPending':
+          'The final OPPO session exchange is not available yet, so the account cannot be used for same-account discovery yet.',
     },
     'zh-CN': {
       'receive': '接收',
@@ -249,6 +301,44 @@ String appText(AppLanguage language, String key) {
       'remoteRejected': '手机已拒绝传输。',
       'connectionLost': '与手机的连接已断开。',
       'transferTimedOut': '传输超时。',
+      'oppoAccount': 'OPPO 账号',
+      'oppoAccountHint': '实验性功能：像官方应用一样，用手机扫码登录你的 OPPO/OnePlus 账号。',
+      'oppoAccountLoginBtn': '登录 OPPO 账号',
+      'oppoUserIdLabel': '用户ID',
+      'cancel': '取消',
+      'oppoSsoidReverted': '已清除输入，已保存的账号 ID 没有变。',
+      'oppoLogout': '退出登录',
+      'oppoLogoutConfirmTitle': '要退出 OPPO 账号吗？',
+      'oppoLogoutConfirmBody': '这会清除本机保存的账号名、ssoid 和头像，但不会在 OPPO 服务器上退出登录。',
+      'oppoLoggedOut': '已退出登录。',
+      'oppoLogoutFailed': '无法连接后端以退出登录。',
+      'oppoClearBrowserDataTitle': '清除已保存的登录数据？',
+      'oppoClearBrowserDataBody': '这会清除登录窗口保存的 Cookie/会话，下次登录将显示全新的登录页面，而不是继续上次使用的 OPPO 账号。请先关闭任何已打开的登录窗口。',
+      'oppoClearBrowserDataConfirm': '清除',
+      'oppoBrowserDataCleared': '登录浏览器数据已清除。',
+      'oppoBrowserDataClearFailed': '无法清除登录浏览器数据',
+      'oppoAccountDialogTitle': '登录 OPPO 账号',
+      'oppoAccountScanHint': '请用你的 OPPO/OnePlus 手机扫描此二维码',
+      'oppoAccountWaitingScan': '等待扫描……',
+      'oppoAccountScanned': '已扫描——请在手机上确认……',
+      'oppoAccountConfirmed': '已确认！正在获取账号信息……',
+      'oppoAccountExpired': '二维码已过期。',
+      'oppoAccountMethodsFound': '可用的验证方式',
+      'oppoSsoidLabel': 'OPPO 账号 ssoid（高级）',
+      'oppoSsoidRevert': '还原',
+      'oppoClearBrowserData': '清除已保存的登录浏览器数据',
+      'oppoSsoidHint': '登录流程完成前，先手动输入',
+      'oppoSsoidSaved': '已保存。',
+      'oppoSsoidSaveFailed': '保存失败——程序是否在运行？',
+      'save': '保存',
+      'oppoAccountNoMoreYet': '请选择验证方式继续。',
+      'oppoAccountSendCode': '发送验证码',
+      'oppoAccountSending': '发送中……',
+      'oppoAccountCodeLabel': '验证码',
+      'oppoAccountPasswordLabel': 'OPPO 账号密码',
+      'oppoAccountVerify': '验证',
+      'oppoAccountVerificationAccepted': '验证已通过。',
+      'oppoAccountSessionPending': '最终 OPPO 会话交换尚未完成，账号暂时无法用于同账号发现。',
     },
     'zh-TW': {
       'receive': '接收',
@@ -357,6 +447,44 @@ String appText(AppLanguage language, String key) {
       'remoteRejected': '手機已拒絕傳送。',
       'connectionLost': '與手機的連線已中斷。',
       'transferTimedOut': '傳送逾時。',
+      'oppoAccount': 'OPPO 帳號',
+      'oppoAccountHint': '實驗性功能：像官方應用程式一樣，用手機掃碼登入你的 OPPO/OnePlus 帳號。',
+      'oppoAccountLoginBtn': '登入 OPPO 帳號',
+      'oppoUserIdLabel': '用戶ID',
+      'cancel': '取消',
+      'oppoSsoidReverted': '已清除輸入，已儲存的帳號 ID 沒有變。',
+      'oppoLogout': '登出',
+      'oppoLogoutConfirmTitle': '要登出 OPPO 帳號嗎？',
+      'oppoLogoutConfirmBody': '這會清除本機保存的帳號名、ssoid 和頭像，但不會在 OPPO 伺服器上登出。',
+      'oppoLoggedOut': '已登出。',
+      'oppoLogoutFailed': '無法連接後端以登出。',
+      'oppoClearBrowserDataTitle': '清除已保存的登入資料？',
+      'oppoClearBrowserDataBody': '這會清除登入視窗保存的 Cookie/工作階段，下次登入將顯示全新的登入頁面，而不是繼續上次使用的 OPPO 帳號。請先關閉任何已開啟的登入視窗。',
+      'oppoClearBrowserDataConfirm': '清除',
+      'oppoBrowserDataCleared': '登入瀏覽器資料已清除。',
+      'oppoBrowserDataClearFailed': '無法清除登入瀏覽器資料',
+      'oppoAccountDialogTitle': '登入 OPPO 帳號',
+      'oppoAccountScanHint': '請用你的 OPPO/OnePlus 手機掃描此二維碼',
+      'oppoAccountWaitingScan': '等待掃描……',
+      'oppoAccountScanned': '已掃描——請在手機上確認……',
+      'oppoAccountConfirmed': '已確認！正在取得帳號資訊……',
+      'oppoAccountExpired': '二維碼已過期。',
+      'oppoAccountMethodsFound': '可用的驗證方式',
+      'oppoAccountNoMoreYet': '請選擇驗證方式繼續。',
+      'oppoAccountSendCode': '傳送驗證碼',
+      'oppoAccountSending': '傳送中……',
+      'oppoAccountCodeLabel': '驗證碼',
+      'oppoAccountPasswordLabel': 'OPPO 帳號密碼',
+      'oppoAccountVerify': '驗證',
+      'oppoAccountVerificationAccepted': '驗證已通過。',
+      'oppoAccountSessionPending': '最終 OPPO 工作階段交換尚未完成，帳號暫時無法用於同帳號探索。',
+      'oppoSsoidLabel': 'OPPO 帳號 ssoid（進階）',
+      'oppoSsoidRevert': '還原',
+      'oppoClearBrowserData': '清除已保存的登入瀏覽器資料',
+      'oppoSsoidHint': '登入流程完成前，先手動輸入',
+      'oppoSsoidSaved': '已儲存。',
+      'oppoSsoidSaveFailed': '儲存失敗——程式是否在執行？',
+      'save': '儲存',
     },
   };
   final code = switch (language) {
@@ -365,4 +493,38 @@ String appText(AppLanguage language, String key) {
     AppLanguage.traditionalChinese => 'zh-TW',
   };
   return values[code]?[key] ?? values['en']![key] ?? key;
+}
+
+/// Translates the device-type label the backend sends ("Alliance (OnePlus)",
+/// "Contacts", "LAN", ...). Brand names in brackets and the product name
+/// OShare stay as they are.
+String deviceKindText(AppLanguage language, String kind) {
+  const bases = {
+    'zh-CN': {
+      'Alliance': '互传联盟',
+      'Legacy OEM': '旧版其他品牌',
+      'Legacy': '旧版',
+      'Contacts': '联系人',
+      'LAN': '局域网',
+    },
+    'zh-TW': {
+      'Alliance': '互傳聯盟',
+      'Legacy OEM': '舊版其他品牌',
+      'Legacy': '舊版',
+      'Contacts': '聯絡人',
+      'LAN': '區域網路',
+    },
+  };
+  final code = switch (language) {
+    AppLanguage.english => 'en',
+    AppLanguage.simplifiedChinese => 'zh-CN',
+    AppLanguage.traditionalChinese => 'zh-TW',
+  };
+  final table = bases[code];
+  if (table == null) return kind;
+  final bracket = kind.indexOf(' (');
+  final base = bracket < 0 ? kind : kind.substring(0, bracket);
+  final suffix = bracket < 0 ? '' : kind.substring(bracket);
+  final translated = table[base];
+  return translated == null ? kind : '$translated$suffix';
 }

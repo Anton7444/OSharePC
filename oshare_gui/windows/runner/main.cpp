@@ -50,7 +50,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     if (!is_drop_panel) {
       // The drop panel is another Flutter window, so duplicate launches must
       // target the main app by its dedicated title.
-      HWND hWnd = FindWindow(nullptr, L"OsharePC");
+      HWND hWnd = FindWindow(nullptr, L"OSharePC");
       if (hWnd) {
         ShowWindow(hWnd, SW_RESTORE);
         SetForegroundWindow(hWnd);
@@ -106,9 +106,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // desktop hot-zone HWND handles idle OLE hit-testing instead of the surface.
   Win32Window::Size size(is_drop_panel ? 720 : is_receive_popup ? 376 : 1280,
                          is_drop_panel ? 360 : is_receive_popup ? 176 : 720);
-  const wchar_t* title = is_drop_panel      ? L"OsharePC Drop Target"
-                         : is_receive_popup ? L"OsharePC Receive"
-                                            : L"OsharePC";
+  const wchar_t* title = is_drop_panel      ? L"OSharePC Drop Target"
+                         : is_receive_popup ? L"OSharePC Receive"
+                                            : L"OSharePC";
   if (!window.Create(title, origin, size)) {
     if (ole_initialized) {
       ::OleUninitialize();

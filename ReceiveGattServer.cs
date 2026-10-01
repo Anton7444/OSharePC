@@ -53,8 +53,7 @@ public sealed class ReceiveGattServer : IDisposable
     public string DeviceName { get; set; } = Environment.MachineName;
 
     /// <summary>Directory where incoming files will be saved.</summary>
-    public string SaveDirectory { get; set; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "OShare");
+    public string SaveDirectory { get; set; } = DownloadsFolder.DefaultSaveDirectory;
 
     /// <summary>
     /// Raised when a remote phone offers files. Return true to accept or false to reject.
@@ -74,13 +73,55 @@ public sealed class ReceiveGattServer : IDisposable
     public event Action? BeaconStarted;
     public event Action? BeaconAborted;
     /// <summary>Beacon gave up after repeated aborts — other advertisers may claim the slot.</summary>
-    public event Action? BeaconGaveUp;
 
     private int _beaconRetrying;
 
     /// <summary>Set by the engine: returns true when no other advert owns the slot,
     /// so competing GATT adverts don't kick each other off in an endless loop.</summary>
     public Func<bool>? RetryGate { get; set; }
+
+    private volatile bool _advertisingPaused;
+
+    /// <summary>Temporarily stops the connectable 8881 beacon and the 9999 advert so an
+    /// outbound send owns the radio uncontended. The GATT database and event handlers
+    /// stay registered — a phone that is ALREADY connected keeps its link (Windows has
+    /// no API to kick a connected GATT client), but new phone→PC receive handshakes
+    /// can't start while paused, and the tablet's senseless inbound connect can't race
+    /// our own outbound connect (BLE forbids a second link between the same address
+    /// pair in the opposite role).</summary>
+    public void PauseAdvertising(string reason)
+    {
+        if (!IsRunning || _advertisingPaused) return;
+        _advertisingPaused = true;
+        try { _beacon?.StopAdvertising(); } catch { }
+        try { _service?.StopAdvertising(); } catch { }
+        State($"advertising paused ({reason}) — receive handshakes deferred until the send finishes");
+    }
+
+    public void ResumeAdvertising()
+    {
+        if (!_advertisingPaused) return;
+        _advertisingPaused = false;
+        try
+        {
+            _service?.StartAdvertising(new GattServiceProviderAdvertisingParameters
+            {
+                IsDiscoverable = false,
+                IsConnectable = false,
+            });
+        }
+        catch (Exception ex) { Log.Warn($"RX: 9999 advert resume failed: {ex.Message}"); }
+        try
+        {
+            _beacon?.StartAdvertising(new GattServiceProviderAdvertisingParameters
+            {
+                IsDiscoverable = true,
+                IsConnectable = true,
+            });
+        }
+        catch (Exception ex) { Log.Warn($"RX: 8881 beacon resume failed: {ex.Message}"); }
+        State("advertising resumed after outbound send");
+    }
 
     private async void RetryBeaconAsync(GattServiceProvider beacon)
     {
@@ -93,7 +134,7 @@ public sealed class ReceiveGattServer : IDisposable
             while (IsRunning)
             {
                 await Task.Delay(TimeSpan.FromSeconds(5));
-                if (!IsRunning) return;
+                if (!IsRunning || _advertisingPaused) return;
                 // The initial StartAdvertising may report Aborted first and
                 // then become Started. Do not restart a healthy advert while
                 // the phone is already negotiating over GATT.
