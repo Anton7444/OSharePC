@@ -108,6 +108,23 @@ public sealed class OppoAccountClient : IDisposable
         ("iPhone13,2", "17.6.1"),   // iPhone 12
         ("iPhone13,4", "16.6"),     // iPhone 12 Pro Max
         ("iPhone14,5", "17.2"),     // iPhone 13
+        ("iPhone14,7", "18.1"),     // iPhone 14
+        ("iPhone14,8", "18.2"),     // iPhone 14 Plus
+        ("iPhone15,2", "18.0"),     // iPhone 14 Pro
+        ("iPhone15,3", "18.3"),     // iPhone 14 Pro Max
+        ("iPhone15,4", "18.2.1"),   // iPhone 15
+        ("iPhone15,5", "18.4"),     // iPhone 15 Plus
+        ("iPhone16,1", "18.5"),     // iPhone 15 Pro
+        ("iPhone16,2", "18.3.2"),   // iPhone 15 Pro Max
+        ("iPhone17,3", "18.6"),     // iPhone 16
+        ("iPhone17,4", "18.6.1"),   // iPhone 16 Plus
+        ("iPhone17,1", "18.5"),     // iPhone 16 Pro
+        ("iPhone17,2", "18.6"),     // iPhone 16 Pro Max
+        ("iPhone17,5", "18.4.1"),   // iPhone 16e
+        ("iPhone18,3", "19.0"),     // iPhone 17
+        ("iPhone18,4", "19.0.1"),   // iPhone Air
+        ("iPhone18,1", "19.1"),     // iPhone 17 Pro
+        ("iPhone18,2", "19.0"),     // iPhone 17 Pro Max
         ("iPod9,1", "15.7.2"),      // iPod touch (7th gen) -- the original captured device
     ];
 
