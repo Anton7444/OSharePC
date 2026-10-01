@@ -87,6 +87,37 @@ public sealed class OppoAccountClient : IDisposable
         }
     }
 
+    // (device identifier, iOS version it's paired with) -- real devices running a real,
+    // plausible iOS version for that hardware, so the model/OS-version combo never looks
+    // impossible. Safari's "Mobile/15E148" build tag is left alone: Apple has reused that
+    // same token across every iOS release since iOS 11, so it doesn't need to vary with
+    // the chosen version.
+    private static readonly (string Model, string IosVersion)[] DeviceProfiles =
+    [
+        ("iPhone9,1", "15.7.9"),    // iPhone 7
+        ("iPhone9,3", "15.8"),      // iPhone 7
+        ("iPhone10,3", "16.7.2"),   // iPhone X
+        ("iPhone10,6", "16.7.8"),   // iPhone X
+        ("iPhone11,2", "17.5.1"),   // iPhone XS
+        ("iPhone11,6", "17.6"),     // iPhone XS Max
+        ("iPhone11,8", "17.6.1"),   // iPhone XR
+        ("iPhone12,1", "17.4.1"),   // iPhone 11
+        ("iPhone12,3", "17.3"),     // iPhone 11 Pro
+        ("iPhone12,5", "17.1.2"),   // iPhone 11 Pro Max
+        ("iPhone12,8", "17.5"),     // iPhone SE (2nd gen)
+        ("iPhone13,2", "17.6.1"),   // iPhone 12
+        ("iPhone13,4", "16.6"),     // iPhone 12 Pro Max
+        ("iPhone14,5", "17.2"),     // iPhone 13
+        ("iPod9,1", "15.7.2"),      // iPod touch (7th gen) -- the original captured device
+    ];
+
+    private static readonly (string Model, string IosVersion) LocalDeviceProfile =
+        DeviceProfiles[Random.Shared.Next(DeviceProfiles.Length)];
+
+    private static string LocalDeviceModel => LocalDeviceProfile.Model;
+    private static string LocalIosVersionDotted => LocalDeviceProfile.IosVersion;
+    private static string LocalIosVersionUnderscore => LocalIosVersionDotted.Replace('.', '_');
+
     private static readonly Dictionary<string, string> BaseHeaders = new()
     {
         ["x-device-brand"] = "heytap",
@@ -103,7 +134,7 @@ public sealed class OppoAccountClient : IDisposable
         ["referer"] = "https://muc.heytap.com/",
         ["x-sys-duid"] = "",
         ["x-sdk-version"] = "206",
-        ["x-sys-osversioncode"] = "15.7.2",
+        ["x-sys-osversioncode"] = LocalIosVersionDotted,
         ["x-envelope-version"] = "V1",
         ["origin"] = "https://muc.heytap.com",
         ["x-context-locale"] = LocalLocaleUnderscore,
@@ -111,7 +142,7 @@ public sealed class OppoAccountClient : IDisposable
         ["x-app-hostpackage"] = "com.heytap.oshare",
         ["x-app-hostversion"] = "149",
         ["x-biz-package"] = "com.heytap.oshare",
-        ["x-device-model"] = "iPod9,1",
+        ["x-device-model"] = LocalDeviceModel,
         ["x-app-acpackage"] = "com.oppo.OPLoginRegisterKitOnePlus",
         ["x-app-acversion"] = "206",
         ["x-biz-appkey"] = "5407efeca7f6453c80bea5f961cfb7a3",
@@ -122,10 +153,10 @@ public sealed class OppoAccountClient : IDisposable
     };
 
     private static readonly string UserAgent =
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7_2 like Mac OS X) AppleWebKit/605.1.15 " +
+        $"Mozilla/5.0 (iPhone; CPU iPhone OS {LocalIosVersionUnderscore} like Mac OS X) AppleWebKit/605.1.15 " +
         $"(KHTML, like Gecko) Mobile/15E148 regionCode/{LocalCountryCode} isPanel/0 isThird/1 deviceType/IOS " +
         $"Business/account hardwareType/Mobile isMagicWindow/0 DayNight/0 language/{LocalCultureTag} " +
-        $"languageTag/{LocalCultureTag} locale/{LocalLocaleUnderscore} timeZone/{LocalIanaTimeZone} model/iPod9,1 " +
+        $"languageTag/{LocalCultureTag} locale/{LocalLocaleUnderscore} timeZone/{LocalIanaTimeZone} model/{LocalDeviceModel} " +
         $"appPackageName/com.heytap.oshare appVersion/1.4.6 AcLegacyLanguageTag/{LocalCultureTag} AcLanguageTag/{LocalCultureTag}";
 
     /// <summary>Generates a brand-new login QR code. No phone or app needed on this side.</summary>
