@@ -23,7 +23,6 @@ Download `OSharePC-Portable-<version>-win-x64.zip`, extract it anywhere, and run
 ## System Requirements
 
 - Windows 10 19041 or later
-- 64-bit x64 Windows; ARM can only send files
 - A phone that supports mutual transfer
 
 ## Usage
