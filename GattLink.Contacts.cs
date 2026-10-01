@@ -14,14 +14,14 @@ public sealed partial class GattLink
 
     /// <summary>Finds the DCP service 0xBB15 and its characteristics (from the database Windows has just read when
     /// possible). Best effort.</summary>
-    private async Task EnumerateDcpAsync(TimeSpan timeout)
+    private async Task EnumerateDcpAsync(TimeSpan timeout, bool fresh = false)
     {
         if (_device is null) return;
         try
         {
             using var cts = new CancellationTokenSource(timeout);
-            var svcs = await _device.GetGattServicesForUuidAsync(DcpServiceUuid, BluetoothCacheMode.Cached).AsTask(cts.Token);
-            if (svcs.Status != GattCommunicationStatus.Success || svcs.Services.Count == 0)
+            var svcs = await _device.GetGattServicesForUuidAsync(DcpServiceUuid, fresh ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached).AsTask(cts.Token);
+            if (!fresh && (svcs.Status != GattCommunicationStatus.Success || svcs.Services.Count == 0))
                 svcs = await _device.GetGattServicesForUuidAsync(DcpServiceUuid, BluetoothCacheMode.Uncached).AsTask(cts.Token);
             if (svcs.Status != GattCommunicationStatus.Success || svcs.Services.Count == 0)
             {
@@ -31,8 +31,8 @@ public sealed partial class GattLink
             foreach (var svc in svcs.Services)
             {
                 if (!_services.Contains(svc)) _services.Add(svc);
-                var chars = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Cached).AsTask(cts.Token);
-                if (chars.Status != GattCommunicationStatus.Success || chars.Characteristics.Count == 0)
+                var chars = await svc.GetCharacteristicsAsync(fresh ? BluetoothCacheMode.Uncached : BluetoothCacheMode.Cached).AsTask(cts.Token);
+                if (!fresh && (chars.Status != GattCommunicationStatus.Success || chars.Characteristics.Count == 0))
                     chars = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached).AsTask(cts.Token);
                 if (chars.Status != GattCommunicationStatus.Success) continue;
                 foreach (var c in chars.Characteristics)
@@ -62,7 +62,7 @@ public sealed partial class GattLink
     /// <summary>Starts the receiver's 9999 server over THIS link (no separate wake connection): read 0x9996 on the DCP
     /// service, then clear the receive task that read opens (the 9995 cancel is accepted right after our own read,
     /// otherwise the next handshake finds the receiver busy), then wait for 9999 to appear on the same link.</summary>
-    public async Task<WakeOutcome> WakeOnLinkAsync(CancellationToken ct)
+    public async Task<WakeOutcome> WakeOnLinkAsync(CancellationToken ct, bool clearViaDcp = false)
     {
         if (_dcpWifiChar is null) await EnumerateDcpAsync(TimeSpan.FromSeconds(3));
         if (_dcpWifiChar is null)
@@ -75,6 +75,14 @@ public sealed partial class GattLink
         {
             var r = await _dcpWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
             Log.Info($"CONTACTS: wake: 9996 read status {r.Status}");
+            // What an Android sender gets here ("p2pMac&version&name&randomPort&..."), kept to study that path.
+            if (r.Status == GattCommunicationStatus.Success && r.Value is { Length: > 0 } v)
+            {
+                using var reader = DataReader.FromBuffer(v);
+                var bytes = new byte[v.Length];
+                reader.ReadBytes(bytes);
+                Log.Info($"CONTACTS: wake: 9996 value: {System.Text.Encoding.UTF8.GetString(bytes)}");
+            }
             if (r.Status == GattCommunicationStatus.Success && IsConnected && _dcpCancelChar is not null)
             {
                 var w = await _dcpCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse)
@@ -99,7 +107,7 @@ public sealed partial class GattLink
             if (!IsConnected) return WakeOutcome.LinkDropped;
         }
         var outcome = await WaitForOConnectServiceAsync(TimeSpan.FromSeconds(4), ct);
-        if (outcome == WakeOutcome.ServiceUp && _wakeTaskPending) await ClearWakeTaskAsync(ct);
+        if (outcome == WakeOutcome.ServiceUp && _wakeTaskPending) await ClearWakeTaskAsync(ct, clearViaDcp);
         return outcome;
     }
 
@@ -109,21 +117,36 @@ public sealed partial class GattLink
     private bool _wakeTaskPending;
     public bool WakeTaskPending => _wakeTaskPending;
 
-    public async Task ClearWakeTaskAsync(CancellationToken ct)
+    /// <summary>Receivers differ in which 0x9995 accepts this cancel (seen: the tablet answers the one on 9999, the
+    /// phone never answers it), and an unanswered write poisons the link, so only one is tried per link;
+    /// <paramref name="viaDcp"/> picks the one on the DCP service, re-read because the receiver restarted its GATT
+    /// server after the wake read.</summary>
+    public async Task ClearWakeTaskAsync(CancellationToken ct, bool viaDcp = false)
     {
-        if (OConnectCancelChar is null) return;
+        var cancel = OConnectCancelChar;
+        if (viaDcp)
+        {
+            _dcpCancelChar = null;
+            await EnumerateDcpAsync(TimeSpan.FromSeconds(3), fresh: true);
+            cancel = _dcpCancelChar ?? cancel;
+        }
+        if (cancel is null) return;
+        var via = ReferenceEquals(cancel, OConnectCancelChar) ? "9999" : "DCP";
         try
         {
-            var w = await OConnectCancelChar.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse)
-                .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
+            // A receiver that will answer this has always done so within ~1.3 s (observed); one that won't never
+            // answers at all, so a short local timeout only trims wasted waiting — it does not affect correctness.
+            var w = await cancel.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse)
+                .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(2), ct);
             _wakeTaskPending = false;
-            Log.Info($"CONTACTS: wake: cancelled the receive task the wake read opened ({w})");
-            SendTimeline.Mark("wake-task-cleared");
+            Log.Info($"CONTACTS: wake: cancelled the receive task the wake read opened via {via} 9995 ({w})");
+            SendTimeline.Mark($"wake-task-cleared-{via}");
             await Task.Delay(300, ct);
         }
         catch (TimeoutException)
         {
-            throw new LinkNotRespondingException(Address, "BLE: receiver not responding (cancelling the wake task timed out)");
+            throw new LinkNotRespondingException(Address, $"BLE: receiver not responding (cancelling the wake task via {via} 9995 timed out)")
+            { DuringWakeClear = true };
         }
     }
 

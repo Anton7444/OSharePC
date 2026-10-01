@@ -1,4 +1,4 @@
-using OShareSender.Ui;
+﻿using OShareSender.Ui;
 
 namespace OShareSender;
 
@@ -110,6 +110,27 @@ public sealed partial class SenderEngine
     {
         lock (_avoidAddresses) _avoidAddresses[address] = DateTimeOffset.UtcNow + duration;
         Log.Info($"CONTACTS: avoiding {PhoneDevice.FormatAddress(address)} for {duration.TotalSeconds:0}s");
+    }
+
+    // Which 0x9995 cancels the receive task a wake read opened. The tablet answers the one on 9999 (every time); the
+    // phone never did (4 of 4 timeouts, each leaving it busy and unreachable for about a minute), so phones start
+    // with the one on the DCP service. Each unanswered cancel flips the choice for that device.
+    private const int PhoneBeaconType = 8;
+    private readonly HashSet<string> _wakeClearFlipped = new();
+
+    private bool WakeClearViaDcp(PhoneDevice device)
+    {
+        lock (_wakeClearFlipped)
+            return (device.LanDeviceType == PhoneBeaconType) != _wakeClearFlipped.Contains(device.LanPdid);
+    }
+
+    private void WakeClearTimedOut(PhoneDevice device)
+    {
+        lock (_wakeClearFlipped)
+        {
+            if (!_wakeClearFlipped.Add(device.LanPdid)) _wakeClearFlipped.Remove(device.LanPdid);
+        }
+        Log.Info($"CONTACTS: {device.Name}: next wake-task cancel goes via {(WakeClearViaDcp(device) ? "DCP" : "9999")}");
     }
 
     private bool IsAvoided(ulong address)
@@ -357,7 +378,7 @@ public sealed partial class SenderEngine
                     if (link.HasOConnect && !(forceWake && !woke))
                     {
                         // A wake on the previous (dropped) link left its receive task open: cancel it from here.
-                        if (wakeTaskPending) await link.ClearWakeTaskAsync(ct);
+                        if (wakeTaskPending) await link.ClearWakeTaskAsync(ct, WakeClearViaDcp(device));
                         Log.Info($"CONTACTS: connected to {device.Name} (attempt {attempt}.{hop})");
                         return TakeLink(ref link);
                     }
@@ -366,13 +387,13 @@ public sealed partial class SenderEngine
                         status?.Invoke($"waking {device.Name} receive service…");
                         Log.Info($"CONTACTS: {(forceWake ? "restarting" : "starting")} the {device.Name} receive service over this link");
                         woke = true;
-                        outcome = await link.WakeOnLinkAsync(ct);
+                        outcome = await link.WakeOnLinkAsync(ct, WakeClearViaDcp(device));
                     }
                     else outcome = await link.WaitForOConnectServiceAsync(TimeSpan.FromSeconds(3), ct);
                     Log.Info($"CONTACTS: wake outcome {outcome}");
                     if (outcome == GattLink.WakeOutcome.ServiceUp)
                     {
-                        if (wakeTaskPending) await link.ClearWakeTaskAsync(ct);
+                        if (wakeTaskPending) await link.ClearWakeTaskAsync(ct, WakeClearViaDcp(device));
                         Log.Info($"CONTACTS: connected to {device.Name} after waking it (attempt {attempt}.{hop})");
                         return TakeLink(ref link);
                     }
@@ -404,6 +425,13 @@ public sealed partial class SenderEngine
             {
                 Log.Warn($"CONTACTS: attempt {attempt}: {ex.Message}");
                 AvoidAddress(ex.Address, TimeSpan.FromSeconds(35));
+                if (ex.DuringWakeClear)
+                {
+                    // The task is still open: the next link cancels it the other way, or wakes again if 9999 is gone.
+                    WakeClearTimedOut(device);
+                    woke = false;
+                    wakeTaskPending = true;
+                }
             }
             catch (Exception ex)
             {

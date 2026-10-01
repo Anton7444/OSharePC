@@ -1368,4 +1368,6 @@ public sealed class HandshakeStalledException(string message) : InvalidOperation
 public sealed class LinkNotRespondingException(ulong address, string message) : InvalidOperationException(message)
 {
     public ulong Address { get; } = address;
+    /// <summary>The unanswered request was the cancel of the receive task a wake read opened.</summary>
+    public bool DuringWakeClear { get; init; }
 }
