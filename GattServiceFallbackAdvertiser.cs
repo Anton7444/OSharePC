@@ -21,7 +21,6 @@ public sealed class GattServiceFallbackAdvertiser : IDisposable
     private int _restarts;
     private bool _startedOk;
     private bool _desired;   // false while paused (a connectable GATT advert owns the slot)
-    private CancellationTokenSource? _delayCts;
 
     public event Action<string>? StatusChanged;
 
@@ -29,7 +28,6 @@ public sealed class GattServiceFallbackAdvertiser : IDisposable
     /// is non-connectable, so a live connectable GATT advert always wins the slot.</summary>
     public void Pause()
     {
-        _delayCts?.Cancel();
         _desired = false;
         Stop();
     }
