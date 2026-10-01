@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -55,27 +56,58 @@ public sealed class OppoAccountClient : IDisposable
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
+    // Derived from the machine's own OS settings instead of a hardcoded "AU" so the
+    // account-center calls describe whoever is actually running this, not the device
+    // the login flow was originally captured from.
+    private static readonly string LocalIanaTimeZone = ResolveIanaTimeZone();
+    private static readonly string LocalCountryCode = ResolveCountryCode();
+    private static readonly string LocalCultureTag = CultureInfo.CurrentCulture.Name; // e.g. "en-AU"
+    private static readonly string LocalLocaleUnderscore = LocalCultureTag.Replace('-', '_'); // e.g. "en_AU"
+
+    private static string ResolveIanaTimeZone()
+    {
+        var local = TimeZoneInfo.Local;
+        if (local.HasIanaId) return local.Id;
+        return TimeZoneInfo.TryConvertWindowsIdToIanaId(local.Id, out var ianaId)
+            ? ianaId
+            : "Etc/UTC"; // last-resort fallback if the ICU conversion data isn't available
+    }
+
+    private static string ResolveCountryCode()
+    {
+        try
+        {
+            return RegionInfo.CurrentRegion.TwoLetterISORegionName.ToUpperInvariant();
+        }
+        catch (ArgumentException)
+        {
+            // RegionInfo throws if the current culture is a neutral/language-only culture
+            // with no associated region (e.g. "en" instead of "en-AU").
+            return "US";
+        }
+    }
+
     private static readonly Dictionary<string, string> BaseHeaders = new()
     {
         ["x-device-brand"] = "heytap",
         ["x-device-clienttype"] = "IOSSDK",
-        ["x-context-timezone"] = "Australia/Melbourne",
+        ["x-context-timezone"] = LocalIanaTimeZone,
         ["x-biz-version"] = "149",
         ["x-sys-talkbackstate"] = "false",
-        ["x-context-country"] = "AU",
+        ["x-context-country"] = LocalCountryCode,
         ["x-app-deviceid"] = "",
         ["x-device-hardwaretype"] = "Mobile",
         ["x-sdk-type"] = "open",
         ["x-app-overseaclient"] = "true",
-        ["x-context-maskregion"] = "AU",
+        ["x-context-maskregion"] = LocalCountryCode,
         ["referer"] = "https://muc.heytap.com/",
         ["x-sys-duid"] = "",
         ["x-sdk-version"] = "206",
         ["x-sys-osversioncode"] = "15.7.2",
         ["x-envelope-version"] = "V1",
         ["origin"] = "https://muc.heytap.com",
-        ["x-context-locale"] = "en_AU",
-        ["accept-language"] = "en-AU",
+        ["x-context-locale"] = LocalLocaleUnderscore,
+        ["accept-language"] = LocalCultureTag,
         ["x-app-hostpackage"] = "com.heytap.oshare",
         ["x-app-hostversion"] = "149",
         ["x-biz-package"] = "com.heytap.oshare",
@@ -89,12 +121,12 @@ public sealed class OppoAccountClient : IDisposable
         ["x-sign-algorithm"] = "HMAC1_SK",
     };
 
-    private const string UserAgent =
+    private static readonly string UserAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7_2 like Mac OS X) AppleWebKit/605.1.15 " +
-        "(KHTML, like Gecko) Mobile/15E148 regionCode/AU isPanel/0 isThird/1 deviceType/IOS " +
-        "Business/account hardwareType/Mobile isMagicWindow/0 DayNight/0 language/en-AU " +
-        "languageTag/en-AU locale/en_AU timeZone/Australia/Melbourne model/iPod9,1 " +
-        "appPackageName/com.heytap.oshare appVersion/1.4.6 AcLegacyLanguageTag/en-AU AcLanguageTag/en-AU";
+        $"(KHTML, like Gecko) Mobile/15E148 regionCode/{LocalCountryCode} isPanel/0 isThird/1 deviceType/IOS " +
+        $"Business/account hardwareType/Mobile isMagicWindow/0 DayNight/0 language/{LocalCultureTag} " +
+        $"languageTag/{LocalCultureTag} locale/{LocalLocaleUnderscore} timeZone/{LocalIanaTimeZone} model/iPod9,1 " +
+        $"appPackageName/com.heytap.oshare appVersion/1.4.6 AcLegacyLanguageTag/{LocalCultureTag} AcLanguageTag/{LocalCultureTag}";
 
     /// <summary>Generates a brand-new login QR code. No phone or app needed on this side.</summary>
     public async Task<QrCodeInfo> GenerateQrCodeAsync(CancellationToken ct = default)
