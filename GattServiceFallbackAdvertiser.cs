@@ -24,7 +24,7 @@ public sealed class GattServiceFallbackAdvertiser : IDisposable
 
     public event Action<string>? StatusChanged;
 
-    /// <summary>Stop advertising and ignore recycling until Resume — the fallback advert
+    /// <summary>Stop advertising and ignore recycling — the fallback advert
     /// is non-connectable, so a live connectable GATT advert always wins the slot.</summary>
     public void Pause()
     {

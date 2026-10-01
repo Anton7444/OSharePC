@@ -15,7 +15,6 @@ public sealed class LanDiscovery : IDisposable
     public string DeviceName { get; set; } = Environment.MachineName;
     public string AccountDigest { get; set; } = "";
     public string LanIp { get; set; } = "";
-    public string? KnownPadIp { get; set; }
 
     private UdpClient? _udp;
     private UdpClient? _udpReply;
@@ -259,13 +258,6 @@ public sealed class LanDiscovery : IDisposable
                 _udp?.Send(announce, announce.Length, new IPEndPoint(IPAddress.Parse("239.255.255.250"), 10150));
                 _udp?.Send(servicePublish, servicePublish.Length, new IPEndPoint(IPAddress.Parse("239.255.255.250"), 10150));
                 _udp?.Send(senseless, senseless.Length, new IPEndPoint(IPAddress.Parse("239.255.255.250"), 10150));
-                if (!string.IsNullOrEmpty(KnownPadIp))
-                {
-                    _udp?.Send(servicePublish, servicePublish.Length, new IPEndPoint(IPAddress.Parse(KnownPadIp), 10150));
-                    _udp?.Send(query, query.Length, new IPEndPoint(IPAddress.Parse(KnownPadIp), 10150));
-                    _udp?.Send(announce, announce.Length, new IPEndPoint(IPAddress.Parse(KnownPadIp), 10150));
-                    _udp?.Send(senseless, senseless.Length, new IPEndPoint(IPAddress.Parse(KnownPadIp), 10150));
-                }
                 // Also unicast SENSELESS directly to every peer IP we've actually
                 // heard from recently — a real device may only answer a directed
                 // SENSELESS with its bt_mac-bearing NSDATA, not a multicast one.
