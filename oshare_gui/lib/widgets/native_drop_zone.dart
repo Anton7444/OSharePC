@@ -76,11 +76,6 @@ class DragDropService {
   void removeDragStateListener(void Function(bool) listener) =>
       _dragStateListeners.remove(listener);
 
-  void addDropListener(void Function(List<String>) listener) =>
-      _dropListeners.add(listener);
-  void removeDropListener(void Function(List<String>) listener) =>
-      _dropListeners.remove(listener);
-
   void attachZone(
     void Function(bool isDragging) dragStateListener,
     void Function(List<String> paths) dropListener,

@@ -28,9 +28,6 @@ const _panelHorizontalChrome = 44.0;
 const panelExpandedSize = Size(panelExpandedMinWidth, panelExpandedHeight);
 const panelWindowSize = Size(720, 360);
 const desktopDropInstructionMaxLines = 3;
-// Kept as aliases while the state-transition animation is migrated.
-const panelIdleSize = panelDropTargetSize;
-const panelPreviewSize = panelDropTargetSize;
 const _cornerMargin = 0.0;
 
 enum DesktopDropPanelStage { idle, dragging, staged }

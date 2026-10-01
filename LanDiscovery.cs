@@ -1,4 +1,3 @@
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -22,7 +21,6 @@ public sealed class LanDiscovery : IDisposable
     private UdpClient? _udpReply;
     private TcpListener? _tcp;
     private System.Threading.Timer? _queryTimer;
-    private int _dspPort = 10151;
     private CancellationTokenSource? _cts;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _recentPeerIps = new();
 
@@ -148,7 +146,6 @@ public sealed class LanDiscovery : IDisposable
 
         try
         {
-            _dspPort = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
             _udp.MulticastLoopback = false;
             _udp.JoinMulticastGroup(IPAddress.Parse("239.255.255.250"), bindIp);
             _udp.Client.SendTimeout = 1000;

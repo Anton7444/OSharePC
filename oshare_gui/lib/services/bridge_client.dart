@@ -70,19 +70,9 @@ class BridgeClient extends ChangeNotifier {
   DateTime? _lastProgressTime;
   int _lastProgressBytes = 0;
   String? _connectionIssue;
-  String? _oppoAccountQrUrl;
-  String? _oppoAccountStatus;
   String? _oppoAccountName;
   String? _oppoSsoid;
   String? _oppoAvatarUrl;
-  String? _oppoAccountError;
-  List<String>? _oppoAccountMethods;
-  String? _oppoAccountVerificationMethod;
-  int? _oppoAccountVerificationLength;
-  String? _oppoAccountVerificationError;
-  String? _oppoAccountVerificationTicket;
-  bool _oppoAccountVerificationComplete = false;
-  bool _oppoAccountActive = false;
   bool _oppoWebLoginActive = false;
   String? _oppoWebLoginError;
   bool _oppoWebLoginSuccess = false;
@@ -99,19 +89,9 @@ class BridgeClient extends ChangeNotifier {
   IncomingTransferOffer? get pendingIncomingOffer => _pendingIncomingOffer;
   bool get isConnecting => _isConnecting;
   String? get connectionIssue => _connectionIssue;
-  String? get oppoAccountQrUrl => _oppoAccountQrUrl;
-  String? get oppoAccountStatus => _oppoAccountStatus;
   String? get oppoAccountName => _oppoAccountName;
   String? get oppoSsoid => _oppoSsoid;
   String? get oppoAvatarUrl => _oppoAvatarUrl;
-  String? get oppoAccountError => _oppoAccountError;
-  List<String>? get oppoAccountMethods => _oppoAccountMethods;
-  String? get oppoAccountVerificationMethod => _oppoAccountVerificationMethod;
-  int? get oppoAccountVerificationLength => _oppoAccountVerificationLength;
-  String? get oppoAccountVerificationError => _oppoAccountVerificationError;
-  String? get oppoAccountVerificationTicket => _oppoAccountVerificationTicket;
-  bool get oppoAccountVerificationComplete => _oppoAccountVerificationComplete;
-  bool get oppoAccountActive => _oppoAccountActive;
   bool get oppoWebLoginActive => _oppoWebLoginActive;
   String? get oppoWebLoginError => _oppoWebLoginError;
   bool get oppoWebLoginSuccess => _oppoWebLoginSuccess;
@@ -636,47 +616,6 @@ class BridgeClient extends ChangeNotifier {
         );
         if (isSendingFailure) _backgroundSend = false;
         _pendingIncomingOffer = null;
-      } else if (type == 'oppoAccountQr' && data is Map) {
-        _oppoAccountQrUrl = data['qrcodeUrl']?.toString();
-        _oppoAccountStatus = 'INITIAL';
-      } else if (type == 'oppoAccountStatus' && data is Map) {
-        _oppoAccountStatus = data['status']?.toString();
-        final name = data['accountName']?.toString();
-        if (name != null && name.isNotEmpty) _oppoAccountName = name;
-      } else if (type == 'oppoAccountMethods' && data is Map) {
-        _oppoAccountActive = false;
-        final name = data['accountName']?.toString();
-        if (name != null && name.isNotEmpty) _oppoAccountName = name;
-        final list = data['methods'];
-        _oppoAccountMethods = list is List
-            ? list
-                .map<String>((m) => m is Map
-                    ? (m['method'] ?? m['verMethod'] ?? '').toString()
-                    : m.toString())
-                .where((m) => m.isNotEmpty)
-                .toList()
-            : <String>[];
-      } else if (type == 'oppoAccountVerificationChallenge' && data is Map) {
-        _oppoAccountVerificationMethod = data['verMethod']?.toString();
-        final length = data['codeLength'];
-        _oppoAccountVerificationLength = length is num ? length.toInt() : null;
-        _oppoAccountVerificationError = null;
-      } else if (type == 'oppoAccountVerificationError' && data is Map) {
-        _oppoAccountVerificationError =
-            data['error']?.toString() ?? 'Verification failed';
-      } else if (type == 'oppoAccountVerificationValidated' && data is Map) {
-        _oppoAccountVerificationMethod = data['verMethod']?.toString();
-        _oppoAccountVerificationTicket = data['ticket']?.toString();
-        final needNextRound = data['needNextRound'] == true;
-        _oppoAccountVerificationComplete = !needNextRound;
-        _oppoAccountVerificationError = needNextRound
-            ? 'OPPO requested another verification round. Start the login again.'
-            : null;
-      } else if (type == 'oppoAccountError' && data is Map) {
-        _oppoAccountActive = false;
-        _oppoAccountError = data['error']?.toString() ?? 'Unknown error';
-      } else if (type == 'oppoAccountCancelled') {
-        _oppoAccountActive = false;
       } else if (type == 'oppoWebLoginStarted') {
         _oppoWebLoginActive = true;
         _oppoWebLoginError = null;
@@ -923,20 +862,6 @@ class BridgeClient extends ChangeNotifier {
     }
   }
 
-  void dismissIncomingOffer() {
-    if (_pendingIncomingOffer != null) {
-      final id = _pendingIncomingOffer!.id;
-      _dismissedTransferIds.add(id);
-      _pendingIncomingOffer = null;
-      if (_disposed) return;
-      notifyListeners();
-      _postJson('/api/confirm-receive', {
-        'id': id,
-        'accept': false,
-      }).catchError((_) => http.Response('', 500));
-    }
-  }
-
   Future<bool> updateSettings({
     String? saveDirectory,
     int? themeMode,
@@ -987,31 +912,6 @@ class BridgeClient extends ChangeNotifier {
   void dismissTransferModal() {
     _transferState = TransferStateModel();
     notifyListeners();
-  }
-
-  /// Starts a "log in to OPPO account" attempt: the backend generates a fresh QR
-  /// code, waits for the phone to scan/confirm it, then fetches the account's
-  /// available 2FA methods. Progress arrives via oppoAccount* events.
-  Future<void> startOppoAccountLogin() async {
-    _oppoAccountQrUrl = null;
-    _oppoAccountStatus = null;
-    _oppoAccountName = null;
-    _oppoAccountError = null;
-    _oppoAccountMethods = null;
-    _oppoAccountVerificationMethod = null;
-    _oppoAccountVerificationLength = null;
-    _oppoAccountVerificationError = null;
-    _oppoAccountVerificationTicket = null;
-    _oppoAccountVerificationComplete = false;
-    _oppoAccountActive = true;
-    notifyListeners();
-    try {
-      await _post('/api/oppo-account/login/start');
-    } catch (e) {
-      _oppoAccountActive = false;
-      _oppoAccountError = 'Could not reach the backend: $e';
-      notifyListeners();
-    }
   }
 
   /// Opens OPPO's own official account-login widget in a native popup window
@@ -1068,108 +968,6 @@ class BridgeClient extends ChangeNotifier {
     } catch (e) {
       return 'Could not reach the backend: $e';
     }
-  }
-
-  Future<void> cancelOppoAccountLogin() async {
-    _oppoAccountActive = false;
-    notifyListeners();
-    try {
-      await _post('/api/oppo-account/login/cancel');
-    } catch (e) {
-      debugPrint('Error cancelling OPPO account login: $e');
-    }
-  }
-
-  Future<bool> requestOppoAccountVerificationCode(String verMethod) async {
-    _oppoAccountVerificationError = null;
-    notifyListeners();
-    try {
-      final response = await _postJson(
-        '/api/oppo-account/login/verification/gather',
-        {'verMethod': verMethod},
-      );
-      if (response.statusCode != 200) {
-        _oppoAccountVerificationError = _responseError(response);
-        notifyListeners();
-        return false;
-      }
-      final body = jsonDecode(response.body);
-      final length = body is Map ? body['codeLength'] : null;
-      _oppoAccountVerificationMethod = verMethod;
-      _oppoAccountVerificationLength = length is num ? length.toInt() : null;
-      notifyListeners();
-      return true;
-    } catch (e) {
-      _oppoAccountVerificationError = 'Could not request a verification code: $e';
-      notifyListeners();
-      return false;
-    }
-  }
-
-  Future<bool> submitOppoAccountVerification(
-    String validateData, {
-    String? verMethod,
-  }) async {
-    final method = verMethod ?? _oppoAccountVerificationMethod;
-    if (method == null || method.isEmpty) {
-      _oppoAccountVerificationError = 'Select a verification method first.';
-      notifyListeners();
-      return false;
-    }
-    _oppoAccountVerificationMethod = method;
-    _oppoAccountVerificationError = null;
-    notifyListeners();
-    try {
-      final response = await _postJson(
-        '/api/oppo-account/login/verification/validate',
-        {'verMethod': method, 'validateData': validateData},
-      );
-      if (response.statusCode != 200) {
-        _oppoAccountVerificationError = _responseError(response);
-        notifyListeners();
-        return false;
-      }
-      final body = jsonDecode(response.body);
-      _oppoAccountVerificationTicket =
-          body is Map ? body['ticket']?.toString() : null;
-      final needNextRound = body is Map && body['needNextRound'] == true;
-      final sessionPending = body is Map && body['sessionPending'] == true;
-      _oppoAccountVerificationComplete = !needNextRound && !sessionPending;
-      _oppoAccountVerificationError = needNextRound
-          ? 'OPPO requested another verification round. Start the login again.'
-          : sessionPending
-              ? 'Verification passed, but OPPO did not return a session. Use web login to enable Contacts sharing.'
-              : null;
-      notifyListeners();
-      return !needNextRound && !sessionPending;
-    } catch (e) {
-      _oppoAccountVerificationError = 'Could not verify the code: $e';
-      notifyListeners();
-      return false;
-    }
-  }
-
-  String _responseError(http.Response response) {
-    try {
-      final body = jsonDecode(response.body);
-      if (body is Map && body['error'] != null) return body['error'].toString();
-    } catch (_) {}
-    return 'The OPPO server rejected the request (${response.statusCode}).';
-  }
-
-  void clearOppoAccountState() {
-    _oppoAccountQrUrl = null;
-    _oppoAccountStatus = null;
-    _oppoAccountName = null;
-    _oppoAccountError = null;
-    _oppoAccountMethods = null;
-    _oppoAccountVerificationMethod = null;
-    _oppoAccountVerificationLength = null;
-    _oppoAccountVerificationError = null;
-    _oppoAccountVerificationTicket = null;
-    _oppoAccountVerificationComplete = false;
-    _oppoAccountActive = false;
-    notifyListeners();
   }
 
   Future<bool> cancelTransfer() async {

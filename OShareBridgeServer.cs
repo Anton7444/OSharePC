@@ -35,8 +35,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private int _shutdownRequested;
     private int _sendQuiet;
     private string? _sendRequestId;
-    private OppoAccountLoginSession? _oppoLoginSession;
-    private readonly SemaphoreSlim _oppoLoginGate = new(1, 1);
     private volatile bool _oppoWebLoginRunning;
     private OppoAccountBleAdvertiser? _oppoBleAdvertiser;
     private OppoWindowsSenselessAdvertiser? _oppoWindowsAdvertiser;
@@ -248,12 +246,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Ok(new { success = false, message = "Transfer already completed, cancelled, or expired." });
         });
 
-        app.MapPost("/api/cancel-transfers", () =>
-        {
-            ClearPendingTransfers();
-            return Results.Ok(new { success = true });
-        });
-
         app.MapPost("/api/shutdown", () =>
         {
             Log.Info("Shutdown requested via /api/shutdown");
@@ -385,106 +377,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
             return Results.Accepted(value: new { device = device.Name, address = device.Address, requestId });
         });
 
-        app.MapPost("/api/oppo-account/login/start", async () =>
-        {
-            await _oppoLoginGate.WaitAsync();
-            try
-            {
-                if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
-                _oppoLoginSession = new OppoAccountLoginSession();
-                _oppoLoginSession.Start((type, data) => Push(type, data));
-            }
-            finally { _oppoLoginGate.Release(); }
-            return Results.Ok(new { started = true });
-        });
-
-        app.MapPost("/api/oppo-account/login/cancel", async () =>
-        {
-            await _oppoLoginGate.WaitAsync();
-            try
-            {
-                if (_oppoLoginSession is not null)
-                {
-                    await _oppoLoginSession.DisposeAsync();
-                    _oppoLoginSession = null;
-                }
-            }
-            finally { _oppoLoginGate.Release(); }
-            return Results.Ok(new { cancelled = true });
-        });
-
-        app.MapPost("/api/oppo-account/login/verification/gather", async (OppoVerificationRequest body) =>
-        {
-            await _oppoLoginGate.WaitAsync();
-            try
-            {
-                if (_oppoLoginSession is null)
-                    return Results.Conflict(new { error = "There is no active OPPO login." });
-                if (string.IsNullOrWhiteSpace(body.VerMethod))
-                    return Results.BadRequest(new { error = "verMethod is required" });
-
-                try
-                {
-                    var result = await _oppoLoginSession.GatherVerificationAsync(body.VerMethod);
-                    Push("oppoAccountVerificationChallenge", new
-                    {
-                        verMethod = result.VerMethod,
-                        codeLength = result.CodeLength,
-                    });
-                    return Results.Ok(new
-                    {
-                        sent = true,
-                        verMethod = result.VerMethod,
-                        codeLength = result.CodeLength,
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Push("oppoAccountVerificationError", new { error = ex.Message });
-                    return Results.BadRequest(new { error = ex.Message });
-                }
-            }
-            finally { _oppoLoginGate.Release(); }
-        });
-
-        app.MapPost("/api/oppo-account/login/verification/validate", async (OppoVerificationRequest body) =>
-        {
-            await _oppoLoginGate.WaitAsync();
-            try
-            {
-                if (_oppoLoginSession is null)
-                    return Results.Conflict(new { error = "There is no active OPPO login." });
-                if (string.IsNullOrWhiteSpace(body.VerMethod) || string.IsNullOrWhiteSpace(body.ValidateData))
-                    return Results.BadRequest(new { error = "verMethod and validateData are required" });
-
-                try
-                {
-                    var result = await _oppoLoginSession.ValidateVerificationAsync(
-                        body.VerMethod, body.ValidateData);
-                    Push("oppoAccountVerificationValidated", new
-                    {
-                        verMethod = body.VerMethod,
-                        ticket = result.Ticket,
-                        needNextRound = result.NeedNextRound,
-                        sessionPending = true,
-                    });
-                    return Results.Ok(new
-                    {
-                        accepted = false,
-                        ticket = result.Ticket,
-                        needNextRound = result.NeedNextRound,
-                        sessionPending = true,
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Push("oppoAccountVerificationError", new { error = ex.Message });
-                    return Results.BadRequest(new { error = ex.Message });
-                }
-            }
-            finally { _oppoLoginGate.Release(); }
-        });
-
         app.MapPost("/api/oppo-account/weblogin/start", (OppoWebLoginStartRequest? body) =>
         {
             if (_oppoWebLoginRunning) return Results.Conflict(new { error = "A login attempt is already open." });
@@ -529,22 +421,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 Log.Warn($"OppoWebLogin: ClearBrowserData failed: {ex.Message}");
                 return Results.Json(new { error = ex.Message }, statusCode: 500);
             }
-        });
-
-        app.MapPost("/api/oppo-account/ble-advertise/start", async (OppoBleAdvertiseStartRequest body) =>
-        {
-            if (string.IsNullOrWhiteSpace(body.Ssoid))
-                return Results.BadRequest(new { error = "ssoid is required" });
-            SettingsStore.Save(oppoSsoid: body.Ssoid);
-            _engine.SetOppoAccountIdentity(body.Ssoid);
-            await StartOppoBleAdvertiserAsync(body.Ssoid);
-            return Results.Ok(new { started = true });
-        });
-
-        app.MapPost("/api/oppo-account/ble-advertise/stop", async () =>
-        {
-            await StopOppoBleAdvertiserAsync();
-            return Results.Ok(new { stopped = true });
         });
 
         _app = app;
@@ -848,8 +724,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         ClearPendingTransfers();
-        if (_oppoLoginSession is not null) await _oppoLoginSession.DisposeAsync();
-        _oppoLoginGate.Dispose();
         await StopOppoBleAdvertiserAsync();
         _oppoBleGate.Dispose();
         if (_app is not null) await _app.StopAsync();
@@ -885,8 +759,6 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private sealed record StageRequest(string[]? Files);
     private sealed record SendRequest(string? Address, bool Quiet = false, string? RequestId = null, string? TaskId = null);
     private sealed record OppoWebLoginStartRequest(string? Brand, string? Language = null);
-    private sealed record OppoBleAdvertiseStartRequest(string? Ssoid);
-    private sealed record OppoVerificationRequest(string? VerMethod, string? ValidateData = null);
 
     /// <summary>A random 6-byte identity for the OPPO "same account" BLE scheme,
     /// generated once and persisted (SettingsStore.OppoBleDeviceId) — see

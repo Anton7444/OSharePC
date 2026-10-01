@@ -18,8 +18,6 @@ public static class AppDialog
 
     public static DialogResult Error(Form? owner, string title, string message) => Show(owner, title, message, DialogKind.Error);
 
-    public static bool Confirm(Form? owner, string title, string message) => MessageBox.Show(owner, message, title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
-
     private sealed class DialogForm : Form
     {
         private const int CS_DROPSHADOW = 0x20000;

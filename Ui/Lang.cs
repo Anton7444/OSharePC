@@ -100,9 +100,6 @@ public static class Lang
         ["Btn.OpenLogFile"]     = ["Open log file", "\u958b\u555f\u65e5\u8a8c\u6a94\u6848", "\u6253\u5f00\u65e5\u5fd7\u6587\u4ef6"],
         ["Btn.OpenFolder"]      = ["Open folder",   "\u958b\u555f\u8cc7\u6599\u593e", "\u6253\u5f00\u6587\u4ef6\u593e"],
         ["Btn.ChangeFolder"]    = ["Change folder…", "\u8b8a\u66f4\u8cc7\u6599\u593e…", "\u66f4\u6539\u6587\u4ef6\u593e…"],
-        ["Btn.OpenFile"]        = ["Open file",     "\u958b\u555f\u6a94\u6848", "\u6253\u5f00\u6587\u4ef6"],
-        ["Btn.Accept"]          = ["Accept",        "\u63a5\u53d7",          "\u63a5\u53d7"],
-        ["Btn.Reject"]          = ["Reject",        "\u62d2\u7d55",          "\u62d2\u7edd"],
         ["Btn.OK"]              = ["OK",            "\u78ba\u5b9a",          "\u786e\u5b9a"],
 
         // Drop zone
@@ -173,26 +170,8 @@ public static class Lang
         ["Mode.OShare"]       = ["OShare - Hotspot mode", "OShare - \u71b1\u9ede\u6a21\u5f0f", "OShare - \u70ed\u70b9\u6a21\u5f0f"],
 
         // Engine messages (shown in UI status bar)
-        ["Engine.NoLan"]        = ["No LAN adapter with a default gateway found \u2014 connect this PC to the same Wi-Fi router as the phone.",
-                                   "\u672a\u627e\u5230\u5177\u6709\u9810\u8a2d\u9598\u9053\u7684\u5340\u57df\u7db2\u8def\u4ecb\u9762\u5361 \u2014 \u8acb\u5c07\u6b64\u96fb\u8166\u9023\u63a5\u5230\u8207\u624b\u6a5f\u76f8\u540c\u7684 Wi-Fi \u8def\u7531\u5668\u3002",
-                                   "\u672a\u627e\u5230\u5177\u6709\u9ed8\u8ba4\u7f51\u5173\u7684\u5c40\u57df\u7f51\u9002\u914d\u5668 \u2014 \u8bf7\u5c06\u6b64\u7535\u8111\u8fde\u63a5\u5230\u4e0e\u624b\u673a\u76f8\u540c\u7684 Wi-Fi \u8def\u7531\u5668\u3002"],
         ["Engine.NoNetProfile"] = ["No network connection profile found \u2014 connect this laptop to Wi-Fi first.",
                                    "\u672a\u627e\u5230\u7db2\u8def\u9023\u7dda\u914d\u7f6e \u2014 \u8acb\u5148\u8b93\u7b46\u8a18\u672c\u9023\u4e0a Wi-Fi\u3002",
                                    "\u672a\u627e\u5230\u7f51\u7edc\u8fde\u63a5\u914d\u7f6e \u2014 \u8bf7\u5148\u8ba9\u7b14\u8bb0\u672c\u8fde\u4e0a Wi-Fi\u3002"],
-        ["Engine.OShareModeError"] = [
-            "BLE: OShare mode requires selecting a 'My Phone' (OShare type) device \u2014 the current selection is an Alliance broadcast. Both entries come from two apps on the same phone; please pick the right one.",
-            "BLE\uff1aOShare \u6a21\u5f0f\u9700\u8981\u9078\u64c7\u300c\u6211\u7684\u624b\u6a5f\u300d\uff08OShare \u985e\u578b\uff09\u7684\u88dd\u7f6e \u2014 \u7576\u524d\u9078\u4e2d\u7684\u662f\u539f\u88dd\u4e92\u50b3\u7684\u5ee3\u64ad\u3002\u5169\u689d\u88dd\u7f6e\u689d\u76ee\u4f86\u81ea\u540c\u4e00\u90e8\u624b\u6a5f\u4e0a\u7684\u5169\u500b App\uff0c\u8acb\u9078\u5c0d\u3002",
-            "BLE\uff1aOShare \u6a21\u5f0f\u9700\u8981\u9009\u62e9\u201c\u6211\u7684\u624b\u673a\u201d\uff08OShare \u7c7b\u578b\uff09\u7684\u8bbe\u5907 \u2014 \u5f53\u524d\u9009\u4e2d\u7684\u662f\u539f\u88c5\u4e92\u4f20\u7684\u5e7f\u64ad\u3002\u4e24\u6761\u8bbe\u5907\u6761\u76ee\u6765\u81ea\u540c\u4e00\u90e8\u624b\u673a\u4e0a\u7684\u4e24\u4e2a App\uff0c\u8bf7\u9009\u5bf9\u3002"],
-        ["Engine.StartingHotspot"] = ["starting Wi-Fi hotspot\u2026", "\u6b63\u5728\u555f\u52d5 Wi-Fi \u71b1\u9ede\u2026", "\u6b63\u5728\u542f\u52a8 Wi-Fi \u70ed\u70b9\u2026"],
-        ["Engine.HotspotUp"]    = ["hotspot '{0}' up \u2014 the phone will switch Wi-Fi to it",
-                                   "\u71b1\u9ede\u300c{0}\u300d\u5df2\u555f\u52d5 \u2014 \u624b\u6a5f\u5c07\u5207\u63db Wi-Fi \u9023\u7dda",
-                                   "\u70ed\u70b9\u201c{0}\u201d\u5df2\u542f\u52a8 \u2014 \u624b\u673a\u5c06\u5207\u6362 Wi-Fi \u8fde\u63a5"],
-        ["Engine.CredentialsSent"] = ["credentials sent to {0} \u2014 waiting for the phone to connect",
-                                      "\u6191\u8b49\u5df2\u50b3\u9001\u81f3 {0} \u2014 \u7b49\u5f85\u624b\u6a5f\u9023\u7dda",
-                                      "\u51ed\u636e\u5df2\u53d1\u9001\u81f3 {0} \u2014 \u7b49\u5f85\u624b\u673a\u8fde\u63a5"],
-        ["Engine.BleHandshake"] = ["BLE handshake with {0}\u2026", "BLE \u8207 {0} \u9032\u884c\u63e1\u624b\u2026", "BLE \u4e0e {0} \u8fdb\u884c\u63e1\u624b\u2026"],
-        ["Engine.OConnectCycle"]= ["OConnect cycle {0}/3: 9998/9896 handshake\u2026",
-                                   "OConnect \u7b2c {0}/3 \u8f2a\uff1a9998/9896 \u63e1\u624b\u2026",
-                                   "OConnect \u7b2c {0}/3 \u8f6e\uff1a9998/9896 \u63e1\u624b\u2026"],
     };
 }

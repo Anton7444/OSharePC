@@ -34,29 +34,6 @@ public sealed class GattServiceFallbackAdvertiser : IDisposable
         Stop();
     }
 
-    /// <summary>Resume advertising (when no connectable GATT advert is running).</summary>
-    public void Resume()
-    {
-        ResumeAfter(TimeSpan.Zero);
-    }
-
-    /// <summary>Resume after a grace delay so a retrying GATT advert can claim the
-    /// slot first; the fallback only comes back if the GATT adverts stay dead.</summary>
-    public void ResumeAfter(TimeSpan delay)
-    {
-        _delayCts?.Cancel();
-        _desired = true;
-        if (delay <= TimeSpan.Zero) { Start(); return; }
-        _delayCts = new CancellationTokenSource();
-        var token = _delayCts.Token;
-        _ = Task.Run(async () =>
-        {
-            try { await Task.Delay(delay, token); }
-            catch (OperationCanceledException) { return; }
-            if (_desired && _publisher is null) Start();
-        });
-    }
-
     public void Start()
     {
         Stop();

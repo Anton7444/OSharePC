@@ -12,7 +12,6 @@ namespace OShareSender;
 /// </summary>
 internal static class OfficialStoredZipWriter
 {
-    private const int CrcBufferSize = 512 * 1024;
     private const int TransferBufferSize = 1024 * 1024;
     private const ushort Utf8Flag = 0x0800;
     private const ushort StoredMethod = 0;
@@ -56,7 +55,7 @@ internal static class OfficialStoredZipWriter
                 throw new InvalidOperationException($"ZIP entry name is too long: {name}");
 
             var crcStarted = System.Diagnostics.Stopwatch.StartNew();
-            var crc = await ComputeCrc32Async(path, cancellationToken);
+            var crc = await PreparedCrcCache.GetCrc32Async(path, cancellationToken);
             crcStarted.Stop();
 
             // Re-read metadata after the CRC pass. If a producer changed the file while
@@ -137,24 +136,6 @@ internal static class OfficialStoredZipWriter
 
         await writer.WriteEndAsync(entries.Count, centralDirectorySize, centralDirectoryOffset, cancellationToken);
         Log.Info($"HTTP: official STORED ZIP complete, payload={sent}/{totalBytes} bytes, entries={entries.Count}, wire={writer.Offset} bytes, zip64={needsZip64}");
-    }
-
-    private static Task<uint> ComputeCrc32Async(string path, CancellationToken cancellationToken) =>
-        PreparedCrcCache.GetCrc32Async(path, cancellationToken);
-
-    private static readonly uint[] CrcTable = BuildCrcTable();
-
-    private static uint[] BuildCrcTable()
-    {
-        var table = new uint[256];
-        for (uint i = 0; i < table.Length; i++)
-        {
-            var value = i;
-            for (var bit = 0; bit < 8; bit++)
-                value = (value & 1) != 0 ? 0xEDB88320u ^ (value >> 1) : value >> 1;
-            table[i] = value;
-        }
-        return table;
     }
 
     private static (ushort time, ushort date) ToDosTime(DateTime dateTime)

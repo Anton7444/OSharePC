@@ -102,7 +102,8 @@ internal static class Program
                 return 0;
             }
 
-            Log.Warn("No backend mode selected. Launch oshare_gui.exe for the supported UI; use --legacy-ui only for backend debugging.");            mutex.ReleaseMutex();
+            Log.Warn("No backend mode selected. Launch oshare_gui.exe for the supported UI; use --legacy-ui only for backend debugging.");
+            mutex.ReleaseMutex();
             return 2;
         }
         catch
