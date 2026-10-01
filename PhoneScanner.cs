@@ -660,13 +660,6 @@ public sealed class PhoneScanner : IDisposable
         foreach (var addr in gone) DeviceExpired?.Invoke(addr);
     }
 
-    /// <summary>
-    /// Find the freshest complete advertisement for a known device. If a newer
-    /// partial record with the same stable identity prefix exists, return null:
-    /// that is an advertiser/address rotation in progress, not a connectable peer.
-    /// </summary>
-    public PhoneDevice? FindFresh(PhoneDevice known) => FindFreshConnectable(known, null);
-
     public async Task<PhoneDevice> WaitForConnectableAsync(
         PhoneDevice known,
         TimeSpan timeout,

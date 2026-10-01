@@ -1,6 +1,5 @@
 using System.IO.Compression;
 using System.Net;
-using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.WebSockets;
 using System.Net.Security;

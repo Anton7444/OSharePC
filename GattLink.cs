@@ -1260,42 +1260,6 @@ public sealed partial class GattLink : IDisposable
         }
     }
 
-    /// <summary>Opportunistic write to the iBeacon business characteristic (0x9892),
-    /// declaring same-account membership the way a real iPhone linked to the same
-    /// account does (com.oplus.oshare.ble.impl.w9.b#e, method "iBeacon_advertise").
-    /// The receiver (com.oplus.oshare.ble.impl.w9.b#b) trusts "is_same_account"
-    /// verbatim with no further cryptographic check — see
-    /// OPPO_ACCOUNT_API_FINDINGS.md section 5g/5h. No-op if 0x9892 wasn't found on
-    /// this phone's GATT table this session (its iBeacon subsystem wasn't running).</summary>
-    public async Task<bool> TryWriteIBeaconSameAccountAsync(string oppoSsoid, string deviceId, string deviceName, CancellationToken ct = default)
-    {
-        if (IBeaconChar is null)
-        {
-            Log.Info("BLE: 0x9892 not present this session — skipping iBeacon same-account write");
-            return false;
-        }
-
-        var accountId = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(oppoSsoid);
-        var json = JsonSerializer.Serialize(new Dictionary<string, object>
-        {
-            ["method"] = "iBeacon_advertise",
-            ["data"] = new Dictionary<string, object>
-            {
-                ["cpv"] = "A",
-                ["device_id"] = deviceId,
-                ["device_name"] = deviceName,
-                ["is_same_account"] = true,
-                ["device_type"] = "6", // DeviceType.PC isn't in the observed set (4=iPhone); best-effort placeholder
-                ["account_id"] = accountId,
-            },
-        });
-        Log.Info($"BLE: 9892 iBeacon_advertise <- {json}");
-        var payload = System.Text.Encoding.UTF8.GetBytes(json);
-        var result = await IBeaconChar.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse);
-        Log.Info($"BLE: 9892 write result = {result}");
-        return result == GattCommunicationStatus.Success;
-    }
-
     private static string ReadString(IBuffer buffer)
     {
         var reader = DataReader.FromBuffer(buffer);

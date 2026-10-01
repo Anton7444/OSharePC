@@ -12,7 +12,6 @@ namespace OShareSender;
 /// </summary>
 internal static class OfficialStoredZipWriter
 {
-    private const int CrcBufferSize = 512 * 1024;
     private const int TransferBufferSize = 1024 * 1024;
     private const ushort Utf8Flag = 0x0800;
     private const ushort StoredMethod = 0;
@@ -141,21 +140,6 @@ internal static class OfficialStoredZipWriter
 
     private static Task<uint> ComputeCrc32Async(string path, CancellationToken cancellationToken) =>
         PreparedCrcCache.GetCrc32Async(path, cancellationToken);
-
-    private static readonly uint[] CrcTable = BuildCrcTable();
-
-    private static uint[] BuildCrcTable()
-    {
-        var table = new uint[256];
-        for (uint i = 0; i < table.Length; i++)
-        {
-            var value = i;
-            for (var bit = 0; bit < 8; bit++)
-                value = (value & 1) != 0 ? 0xEDB88320u ^ (value >> 1) : value >> 1;
-            table[i] = value;
-        }
-        return table;
-    }
 
     private static (ushort time, ushort date) ToDosTime(DateTime dateTime)
     {

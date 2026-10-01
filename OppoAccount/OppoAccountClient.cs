@@ -188,10 +188,6 @@ public sealed class OppoAccountClient : IDisposable
         return new QrCodeInfo(data.GetProperty("qid").GetString()!, data.GetProperty("qrcodeUrl").GetString()!);
     }
 
-    /// <summary>Downloads the QR code image bytes for display (e.g. in a WinForms PictureBox).</summary>
-    public Task<byte[]> DownloadQrCodeImageAsync(string qrcodeUrl, CancellationToken ct = default) =>
-        _http.GetByteArrayAsync(qrcodeUrl, ct);
-
     /// <summary>One status poll. Caller decides polling cadence/timeout (e.g. every 2-3s).</summary>
     public async Task<QrCodeStatus> CheckQrCodeAsync(string qid, CancellationToken ct = default)
     {

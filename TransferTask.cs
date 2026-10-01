@@ -10,10 +10,8 @@ public sealed class TransferTask
     public string SenderId { get; init; } = "0000";
 
     public long TotalSize { get; private set; }
-    public long SentBytes;
     public int FileCount => Files.Count;
     public bool Complete;
-    public bool Refused;
 
     public string FirstFileName => Files.Count > 0 ? Path.GetFileName(Files[0]) : "file";
     public string MimeType =>

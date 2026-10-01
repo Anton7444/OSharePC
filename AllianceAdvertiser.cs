@@ -46,44 +46,6 @@ public sealed class AllianceAdvertiser : IDisposable
     /// <summary>Hex dump of the reconstructed ADV + SCAN_RSP record, for verification.</summary>
     public string LastRecordHex { get; private set; } = "";
 
-    /// <summary>
-    /// Probes what this machine's Bluetooth stack actually supports and logs it.
-    /// Findings on Win10 22H2 + Microsoft inbox driver for Intel AX201 (8087:0AA7):
-    ///   - Publisher.ServiceUuids → E_INVALIDARG for ANY uuid (16/32/128-bit)
-    ///   - raw 0x06/0x07 data sections → "unauthorized operation"
-    ///   - data sections land in the scan response, capped at ~31 bytes
-    ///   - UseExtendedAdvertisement → unsupported
-    ///   - GattServiceProvider.StartAdvertising(custom uuid) → Aborted
-    ///   ⇒ the 62-byte alliance record cannot be emitted on such stacks; a proper
-    ///   vendor driver (Intel) or Windows 11 may lift these limits.
-    /// </summary>
-    public static void ProbeAndLog()
-    {
-        // (a) publisher with a 16-bit service uuid
-        try
-        {
-            var a = new BluetoothLEAdvertisement();
-            a.ServiceUuids.Add(new Guid("0000180a-0000-1000-8000-00805f9b34fb"));
-            var p = new BluetoothLEAdvertisementPublisher(a);
-            p.Start(); p.Stop();
-            Log.Info("BLE probe: ServiceUuids advertising = SUPPORTED");
-        }
-        catch (Exception ex) { Log.Warn($"BLE probe: ServiceUuids advertising = UNSUPPORTED ({ex.Message.Split('\n')[0]})"); }
-
-        // (b) publisher with a 27-byte service data section (scan response)
-        try
-        {
-            var a = new BluetoothLEAdvertisement();
-            var w = new DataWriter();
-            w.WriteBytes(new byte[] { 0x00, 0x65 }.Concat(new byte[27]).ToArray());
-            a.DataSections.Add(new BluetoothLEAdvertisementDataSection { DataType = 0x16, Data = w.DetachBuffer() });
-            var p = new BluetoothLEAdvertisementPublisher(a);
-            p.Start(); p.Stop();
-            Log.Info("BLE probe: 27-byte service-data section = SUPPORTED");
-        }
-        catch (Exception ex) { Log.Warn($"BLE probe: 27-byte service-data section = UNSUPPORTED ({ex.Message.Split('\n')[0]})"); }
-    }
-
     public void Start(string lanMacHex12)
     {
         if (IsRunning) return;

@@ -923,20 +923,6 @@ class BridgeClient extends ChangeNotifier {
     }
   }
 
-  void dismissIncomingOffer() {
-    if (_pendingIncomingOffer != null) {
-      final id = _pendingIncomingOffer!.id;
-      _dismissedTransferIds.add(id);
-      _pendingIncomingOffer = null;
-      if (_disposed) return;
-      notifyListeners();
-      _postJson('/api/confirm-receive', {
-        'id': id,
-        'accept': false,
-      }).catchError((_) => http.Response('', 500));
-    }
-  }
-
   Future<bool> updateSettings({
     String? saveDirectory,
     int? themeMode,
