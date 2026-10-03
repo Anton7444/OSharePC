@@ -400,23 +400,37 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         // connection the peer will refuse. (The PC's own Bluetooth radio is NEVER
         // touched automatically — clearing the link must happen on the phone side.)
         Receiver.PauseAdvertising("outbound send");
-        var establishedLinks = await BleLinkDiagnostics.GetConnectedLeDevicesAsync();
-        if (establishedLinks.Count == 0)
-            Log.Info($"BLEDIAG[send-start -> {device.Name}]: no established LE links before connecting");
-        foreach (var l in establishedLinks)
-            Log.Info($"BLEDIAG[send-start -> {device.Name}]: established LE link -> '{l.Name}' {l.Address} paired={l.Paired}");
-        if (establishedLinks.Any(l => string.Equals(l.Address, device.AddressStr, StringComparison.OrdinalIgnoreCase)))
+        // Diagnostics only: the AEP enumeration below (DeviceInformation.FindAllAsync) can take
+        // hundreds of milliseconds and is not part of the connect decision — the code deliberately
+        // proceeds even when the target already holds a link. Run it in the background so it never
+        // delays the send, and log from there. The name/address are captured now because `device` is
+        // reassigned during the retry loop below.
+        var diagDeviceName = device.Name;
+        var diagDeviceAddress = device.AddressStr;
+        _ = Task.Run(async () =>
         {
-            // Do NOT fail fast: the tablet keeps a permanent senseless link to our
-            // receive server (re-establishes within a minute of any BT restart, so it
-            // cannot be cleared from the PC side), AND its OShare GATT server is up
-            // whenever its 互傳 UI is foreground. BLE links carry client+server roles
-            // simultaneously, so the existing link can serve our outbound discovery —
-            // observed working when the server is up, timing out only when it is not.
-            // Proceed and let the (bounded) discovery attempts decide.
-            Log.Warn($"SEND: {device.Name} already has an established LE link to this PC — " +
-                     "attempting GATT over the existing link (its 互傳 GATT server must be running, e.g. 互傳 UI foreground)");
-        }
+            try
+            {
+                var establishedLinks = await BleLinkDiagnostics.GetConnectedLeDevicesAsync();
+                if (establishedLinks.Count == 0)
+                    Log.Info($"BLEDIAG[send-start -> {diagDeviceName}]: no established LE links before connecting");
+                foreach (var l in establishedLinks)
+                    Log.Info($"BLEDIAG[send-start -> {diagDeviceName}]: established LE link -> '{l.Name}' {l.Address} paired={l.Paired}");
+                if (establishedLinks.Any(l => string.Equals(l.Address, diagDeviceAddress, StringComparison.OrdinalIgnoreCase)))
+                {
+                    // Do NOT fail fast: the tablet keeps a permanent senseless link to our
+                    // receive server (re-establishes within a minute of any BT restart, so it
+                    // cannot be cleared from the PC side), AND its OShare GATT server is up
+                    // whenever its 互傳 UI is foreground. BLE links carry client+server roles
+                    // simultaneously, so the existing link can serve our outbound discovery —
+                    // observed working when the server is up, timing out only when it is not.
+                    // Proceed and let the (bounded) discovery attempts decide.
+                    Log.Warn($"SEND: {diagDeviceName} already has an established LE link to this PC — " +
+                             "attempting GATT over the existing link (its 互傳 GATT server must be running, e.g. 互傳 UI foreground)");
+                }
+            }
+            catch (Exception ex) { Log.Info($"BLEDIAG[send-start -> {diagDeviceName}]: enumeration failed: {ex.Message}"); }
+        });
 
         GattLink? connectedLink = null;
         Exception? lastConnectError = null;
@@ -650,10 +664,16 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                         var restart = false;
                         if (ex is LinkNotRespondingException nr)
                         {
-                            // The receive service is listed but dead (typically after its idle timeout): restart it.
-                            Log.Warn($"CONTACTS: receiver not answering ({ex.Message}); restarting its receive service");
                             AvoidAddress(nr.Address, TimeSpan.FromSeconds(35));
-                            restart = true;
+                            // A failed 9897 READ means the receive service is listed but dead (typically after its
+                            // idle timeout), so it must be restarted. A failed state-1 WRITE is different: the 9897
+                            // read just succeeded on this link and the receiver's 9999 server is up, and forcing a
+                            // re-wake only re-triggers the receiver restart that broke the write — so reconnect and
+                            // handshake again without waking.
+                            restart = !nr.DuringHandshakeWrite;
+                            Log.Warn(restart
+                                ? $"CONTACTS: receiver not answering ({ex.Message}); restarting its receive service"
+                                : $"CONTACTS: state-1 write failed ({ex.Message}); reconnecting without re-waking (the receive service is up)");
                         }
                         else
                             Log.Warn($"CONTACTS: handshake failed (try {busyTry}: {ex.GetType().Name} {ex.Message}); reconnecting and retrying");

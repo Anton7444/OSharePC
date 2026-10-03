@@ -268,6 +268,10 @@ public sealed class TransferServer : IAsyncDisposable
             var builder = WebApplication.CreateBuilder();
             builder.Logging.ClearProviders();
             builder.Logging.AddProvider(new ForwardingLoggerProvider());
+            // TCP_NODELAY: the WebSocket handshake and control frames (versionNegotiation, sendRequest,
+            // acks, the "files" trigger) are many small messages, and Nagle would add up to ~40 ms of delay
+            // to each. The bulk ZIP body is written in 1 MiB chunks and is unaffected either way.
+            builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.SocketTransportOptions>(o => o.NoDelay = true);
             builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(o =>
             {
                 o.AddServerHeader = false;

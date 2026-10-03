@@ -163,6 +163,20 @@ class _SendTabState extends State<SendTab> {
                         ),
                       ),
                       const Spacer(),
+                      TextButton.icon(
+                        onPressed: widget.client.scanNow,
+                        icon: const Icon(Icons.radar_rounded, size: 16),
+                        label: Text(appText(widget.language, 'scanNow')),
+                      ),
+                      if (widget.client.isScanning) ...[
+                        const SizedBox(width: 10),
+                        const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ],
+                      const SizedBox(width: 8),
                       Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 10,
@@ -535,7 +549,7 @@ class _SendTabState extends State<SendTab> {
       physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 320,
-        mainAxisExtent: 110,
+        mainAxisExtent: 124,
         crossAxisSpacing: 14,
         mainAxisSpacing: 14,
       ),
@@ -619,6 +633,21 @@ class _SendTabState extends State<SendTab> {
                       ),
                     ),
                   ),
+                  // Only surfaced when the receive probe says this device is not receiving; a healthy
+                  // device needs no tag.
+                  if (device.receiveState == 'receiveoff') ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      appText(widget.language, 'receiveOff'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFFE0533D),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

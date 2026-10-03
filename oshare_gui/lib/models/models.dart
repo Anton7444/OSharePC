@@ -8,6 +8,9 @@ class DeviceModel {
   final bool oShare;
   final String addressText;
 
+  /// discoverable | stale | receiveoff | unknown. Only 'receiveoff' is surfaced in the UI.
+  final String receiveState;
+
   DeviceModel({
     required this.address,
     required this.name,
@@ -15,6 +18,7 @@ class DeviceModel {
     required this.rssi,
     required this.oShare,
     required this.addressText,
+    this.receiveState = 'unknown',
   });
 
   factory DeviceModel.fromJson(Map<String, dynamic> json) {
@@ -25,6 +29,7 @@ class DeviceModel {
       rssi: json['rssi'] is num ? (json['rssi'] as num).toInt() : -70,
       oShare: json['oShare'] == true,
       addressText: json['addressText']?.toString() ?? '',
+      receiveState: json['receiveState']?.toString() ?? 'unknown',
     );
   }
 }

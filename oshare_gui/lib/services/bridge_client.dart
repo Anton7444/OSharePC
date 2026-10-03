@@ -187,6 +187,38 @@ class BridgeClient extends ChangeNotifier {
     _schedulePoll(Duration.zero);
   }
 
+  DateTime? _burstPollUntil;
+  DateTime? _lastDeviceSeenRefresh;
+  bool _scanning = false;
+  Timer? _scanResetTimer;
+
+  bool get isScanning => _scanning;
+
+  /// Asks the backend to rescan (BLE watcher restart + LAN discovery burst + Contacts receive probe) and
+  /// polls the device list faster for a few seconds. The nearby list is emptied first so the refresh is
+  /// visible; the backend keeps its own discovery, so devices that are still present reappear on the next
+  /// fast poll. Discovery only: nothing is ever sent to a phone.
+  Future<void> scanNow() async {
+    _burstPollUntil = DateTime.now().add(const Duration(seconds: 6));
+    _devices = [];
+    _scanning = true;
+    notifyListeners();
+    _schedulePoll(Duration.zero);
+    _scanResetTimer?.cancel();
+    _scanResetTimer = Timer(const Duration(seconds: 4), () {
+      if (_disposed) return;
+      _scanning = false;
+      _burstPollUntil = DateTime.now().add(const Duration(seconds: 2));
+      _schedulePoll(Duration.zero);
+      notifyListeners();
+    });
+    try {
+      await _post('/api/scan').timeout(const Duration(milliseconds: 1500));
+    } catch (_) {
+      // The next poll shows whatever discovery found anyway.
+    }
+  }
+
   void _schedulePoll(Duration delay) {
     if (_disposed) return;
     _pollTimer?.cancel();
@@ -197,7 +229,13 @@ class BridgeClient extends ChangeNotifier {
         await _poll();
       } finally {
         _pollInFlight = false;
-        _schedulePoll(const Duration(seconds: 1));
+        final bursting =
+            _burstPollUntil != null && DateTime.now().isBefore(_burstPollUntil!);
+        _schedulePoll(
+          bursting
+              ? const Duration(milliseconds: 300)
+              : const Duration(seconds: 1),
+        );
       }
     });
   }
@@ -640,6 +678,17 @@ class BridgeClient extends ChangeNotifier {
         _oppoSsoid = null;
         _oppoAvatarUrl = null;
         _oppoWebLoginSuccess = false;
+      } else if (type == 'deviceSeen') {
+        // A device (or a Contacts beacon) was just published by the scanner: refresh the nearby list
+        // promptly instead of waiting up to a full second for the next poll. Debounced so a
+        // continuously-advertising device cannot pin the poller at its fast cadence forever.
+        final now = DateTime.now();
+        if (_lastDeviceSeenRefresh == null ||
+            now.difference(_lastDeviceSeenRefresh!) >
+                const Duration(seconds: 1)) {
+          _lastDeviceSeenRefresh = now;
+          _burstPollUntil = now.add(const Duration(milliseconds: 800));
+        }
       } else if (type == 'state' && data is Map) {
         final st = data['state']?.toString() ?? '';
         if (st.contains('fail') ||
@@ -1003,6 +1052,7 @@ class BridgeClient extends ChangeNotifier {
     _pollTimer?.cancel();
     _restartTimer?.cancel();
     _clearTransferTimer?.cancel();
+    _scanResetTimer?.cancel();
     _httpClient.close();
     try {
       _backendProcess?.kill();

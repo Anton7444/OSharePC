@@ -268,7 +268,9 @@ public sealed class LanDiscovery : IDisposable
                 }
             }
             catch (Exception ex) { Log.Warn($"DISC: announce/query send: {ex.Message}"); }
-        }, null, 0, 3000);
+            finally { ScheduleNextDiscovery(); }
+        }, null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+        Nudge();
 
         // TCP command channel on 10150
         _ = Task.Run(async () =>
@@ -300,6 +302,24 @@ public sealed class LanDiscovery : IDisposable
                 catch { await Task.Delay(10000, ct); }
             }
         }, ct);
+    }
+
+    // Fast start: 0, 250, 500 ms, then 1 s, 2 s, settling at the steady 3 s cadence. One timer, so there is only
+    // ever one discovery round in flight. Nudge() restarts the burst (Scan now, interface change).
+    private static readonly int[] BurstDelaysMs = [250, 250, 500, 1000, 2000];
+    private int _burstStep;
+
+    public void Nudge()
+    {
+        Interlocked.Exchange(ref _burstStep, 0);
+        try { _queryTimer?.Change(0, System.Threading.Timeout.Infinite); } catch (ObjectDisposedException) { }
+    }
+
+    private void ScheduleNextDiscovery()
+    {
+        var step = Interlocked.Increment(ref _burstStep) - 1;
+        var delay = step < BurstDelaysMs.Length ? BurstDelaysMs[step] : 3000;
+        try { _queryTimer?.Change(delay, System.Threading.Timeout.Infinite); } catch (ObjectDisposedException) { }
     }
 
     // Structured decoder for the NSDATA TLV that real devices attach to NS=4

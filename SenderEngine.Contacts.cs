@@ -1,4 +1,4 @@
-﻿using OShareSender.Ui;
+using OShareSender.Ui;
 
 namespace OShareSender;
 
@@ -29,11 +29,16 @@ public sealed partial class SenderEngine
     /// <summary>The device a running pre-warm is working on (null when none runs).</summary>
     private string? _prewarmDeviceKey;
 
-    /// <summary>How long a pre-warmed link is trusted before it is replaced by a fresh one.</summary>
-    private static readonly TimeSpan WarmLinkLifetime = TimeSpan.FromMinutes(5);
-    /// <summary>How long after files were staged (or a send ended, or the GUI asked) the Contacts devices are kept
-    /// warm. Short on purpose: each kept link costs the phone a little battery.</summary>
-    private static readonly TimeSpan KeepWarmWindow = TimeSpan.FromMinutes(5);
+    /// <summary>How long a pre-warmed link is trusted. A parked link can silently go dead (the receiver restarts its
+    /// GATT server in the background: seen at 47 s and 182 s), and the first request on a dead link leaves the
+    /// receiver unreachable for about half a minute, failing the send. So a link is only reused while it is fresh
+    /// (a drag-then-drop or stage-then-send is well inside this); an older one is dropped and the send connects anew.</summary>
+    private static readonly TimeSpan WarmLinkLifetime = TimeSpan.FromSeconds(30);
+    /// <summary>How long after a trigger (files staged, a drag, the window gaining focus, a send ending) the keeper
+    /// stays alive to pre-warm. It connects once per trigger, never to replace an expired link on its own.</summary>
+    private static readonly TimeSpan KeepWarmWindow = TimeSpan.FromSeconds(60);
+    private long _prewarmTrigger;
+    private readonly Dictionary<string, long> _prewarmDoneFor = new();
     // A warm link is only parked after the full OConnect service has been
     // discovered.  Keeping a bare connected BLE link here caused sends to
     // rediscover 9999 (or hit a stale receiver) after the fast path had already
@@ -163,6 +168,7 @@ public sealed partial class SenderEngine
         if (string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid)) return;
         lock (_keeperGate)
         {
+            Interlocked.Increment(ref _prewarmTrigger);
             _keepWarmUntil = DateTimeOffset.UtcNow + KeepWarmWindow;
             if (_keeperTask is { IsCompleted: false }) return;
             _keeperCts?.Dispose();
@@ -195,6 +201,13 @@ public sealed partial class SenderEngine
                             continue;
                         }
                         if (HasWarmLink(d.LanPdid)) continue;
+                        // One attempt per trigger: an expired link is not replaced on its own, only when asked again.
+                        var trigger = Interlocked.Read(ref _prewarmTrigger);
+                        lock (_prewarmDoneFor)
+                        {
+                            if (_prewarmDoneFor.TryGetValue(d.LanPdid, out var doneFor) && doneFor == trigger) continue;
+                            _prewarmDoneFor[d.LanPdid] = trigger;
+                        }
                         lock (_prewarmBackoff)
                             if (_prewarmBackoff.TryGetValue(d.LanPdid, out var b) && b.NextTry > DateTimeOffset.UtcNow) continue;
                         await PrewarmOneAsync(d, ct);
@@ -210,6 +223,69 @@ public sealed partial class SenderEngine
             DropWarmLinks();
             Log.Info("CONTACTS: stopped keeping Contacts devices warm");
         }
+    }
+
+    private int _receiveProbeRunning;
+
+    /// <summary>On "Scan now": actively probe each nearby Contacts device's receive service and record whether
+    /// it answered. A read of DCP 0x9996 is the only signal the protocol exposes for "receiving is off": the
+    /// OShare BleServer (com.oplus.oshare.ble.impl.w) answers it by starting the receive task when receiving is
+    /// available, and leaves it unanswered otherwise. Runs off the UI path, bounded, skipped while a transfer
+    /// or pre-warm owns the radio.</summary>
+    public void ProbeContactsReceiveStates()
+    {
+        if (string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid)) return;
+        if (Interlocked.Exchange(ref _receiveProbeRunning, 1) != 0) return;
+        _ = Task.Run(async () =>
+        {
+            try { await ProbeContactsReceiveStatesAsync(); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log.Info($"CONTACTS: receive probe failed: {ex.Message}"); }
+            finally { Volatile.Write(ref _receiveProbeRunning, 0); }
+        });
+    }
+
+    private async Task ProbeContactsReceiveStatesAsync()
+    {
+        var devices = Scanner.Devices.Where(d => d.Kind == PhoneKind.Lan && d.IsContactsBeacon).ToList();
+        if (devices.Count == 0) return;
+        if (_sendGate.CurrentCount == 0) return;   // a transfer owns the radio
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        if (!await _contactsGate.WaitAsync(TimeSpan.FromSeconds(5), cts.Token)) return;
+        try
+        {
+            var digest = OppoAccount.OppoAccountBleHash.ComputeDsfAccountIdHex(SettingsStore.Current.OppoSsoid!);
+            foreach (var device in devices)
+            {
+                cts.Token.ThrowIfCancellationRequested();
+                if (_sendGate.CurrentCount == 0) return;
+                var beacon = await Scanner.WaitForContactsBeaconAsync((byte)device.LanDeviceType, digest,
+                    DateTimeOffset.UtcNow - TimeSpan.FromSeconds(45), TimeSpan.FromSeconds(2), cts.Token);
+                if (beacon is null) continue;
+                GattLink? link = null;
+                try
+                {
+                    link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, null, cts.Token,
+                        beacon.AddressType, fast: true, allowMissingTarget: true);
+                    if (link.HasOConnect)
+                    {
+                        Scanner.SetReceiveOff(device.LanPdid, false);   // the receive service is already running
+                        continue;
+                    }
+                    var outcome = await link.WakeOnLinkAsync(cts.Token, WakeClearViaDcp(device));
+                    Log.Info($"CONTACTS: receive probe {device.Name}: {outcome}");
+                    if (outcome is GattLink.WakeOutcome.ServiceUp or GattLink.WakeOutcome.LinkDropped)
+                        Scanner.SetReceiveOff(device.LanPdid, false);
+                    else if (outcome == GattLink.WakeOutcome.NotResponding)
+                        Scanner.SetReceiveOff(device.LanPdid, true);
+                    // Failed (no DCP 0x9996 = not in Contacts mode) leaves the previous state alone.
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { Log.Info($"CONTACTS: receive probe for {device.Name}: {ex.GetType().Name} {ex.Message}"); }
+                finally { link?.DisposeInBackground(); }
+            }
+        }
+        finally { _contactsGate.Release(); }
     }
 
     public async Task StopContactsAsync()
@@ -244,7 +320,12 @@ public sealed partial class SenderEngine
         if (links.Count == 0) return;
         Log.Info($"SEND: releasing {links.Count} kept Contacts link(s) before an Everyone-mode send");
         foreach (var l in links) l.DisposeInBackground();
-        await Task.WhenAll(links.Select(l => GattLink.WaitForLinkDownAsync(l.Address, l.AddressType, TimeSpan.FromSeconds(2), ct)));
+        // Give the links a brief moment to come down (an Everyone-mode connect to the same phone needs the old
+        // link gone), but never block the send for long: Windows often keeps reporting a disposing link as
+        // Connected for ~2 s, so awaiting the full wait added ~2.2 s to every Everyone send before it even
+        // started connecting. The underlying wait keeps polling in the background.
+        var down = Task.WhenAll(links.Select(l => GattLink.WaitForLinkDownAsync(l.Address, l.AddressType, TimeSpan.FromSeconds(2), ct)));
+        await Task.WhenAny(down, Task.Delay(TimeSpan.FromMilliseconds(500), ct));
         SendTimeline.Mark("warm-links-released");
     }
 
@@ -257,6 +338,7 @@ public sealed partial class SenderEngine
             _warmLinks.Clear();
         }
         lock (_prewarmBackoff) _prewarmBackoff.Clear();
+        lock (_prewarmDoneFor) _prewarmDoneFor.Clear();
     }
 
     /// <summary>Called when the OPPO account changes (login, switch, logout): links made for the previous account
@@ -343,13 +425,21 @@ public sealed partial class SenderEngine
         var since = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(45);
         var woke = false;
         var wakeTaskPending = false;
+        // NotResponding means the device answered the GATT connect/discovery but never
+        // replied to the wake attempt itself -- the one outcome that specifically matches
+        // "receiving is turned off on the other device" rather than a transient radio
+        // hiccup (a stale link, a dropped link, or a plain Unreachable all have their own
+        // distinct outcomes already). One recurrence could still be a fluke; a second in a
+        // row is not worth burning the remaining ~60-90s of retries on, so stop early with
+        // a clear reason instead of silently repeating the same failure four times.
+        var consecutiveNotResponding = 0;
         for (var attempt = 1; attempt <= 4; attempt++)
         {
             status?.Invoke(attempt == 1 ? $"waiting for {device.Name} to be reachable…" : $"retrying {device.Name} (attempt {attempt}/4)…");
             var wait = attempt == 1 ? firstBeaconWait : TimeSpan.FromSeconds(30);
             // Prefer an address that is not avoided, but a receiver may keep one address for many minutes: after a
             // few seconds take the avoided one again (its bad link has usually dropped by then).
-            var preferWait = TimeSpan.FromSeconds(4) < wait ? TimeSpan.FromSeconds(4) : wait;
+            var preferWait = TimeSpan.FromSeconds(2) < wait ? TimeSpan.FromSeconds(2) : wait;
             var beacon = await Scanner.WaitForContactsBeaconAsync(type, digest, since, preferWait, ct, IsAvoided)
                          ?? await Scanner.WaitForContactsBeaconAsync(type, digest, since, wait - preferWait, ct);
             if (beacon is null)
@@ -402,7 +492,12 @@ public sealed partial class SenderEngine
                     link = null;
                     if (outcome != GattLink.WakeOutcome.LinkDropped)
                     {
-                        if (outcome == GattLink.WakeOutcome.NotResponding) AvoidAddress(beacon.Address, TimeSpan.FromSeconds(35));
+                        if (outcome == GattLink.WakeOutcome.NotResponding)
+                        {
+                            AvoidAddress(beacon.Address, TimeSpan.FromSeconds(35));
+                            consecutiveNotResponding++;
+                        }
+                        else consecutiveNotResponding = 0;
                         break;
                     }
                     // The receiver restarted its GATT server and dropped us; the beacon address stays valid.
@@ -436,10 +531,21 @@ public sealed partial class SenderEngine
             catch (Exception ex)
             {
                 Log.Warn($"CONTACTS: attempt {attempt} failed ({ex.Message})");
+                // The receiver rotates its beacon address; one that never answers discovery (seen: the same address
+                // tried four times, 8 s each) is skipped briefly so the next attempt takes another address if one exists.
+                if (ex.Message.Contains("Unreachable", StringComparison.Ordinal))
+                    AvoidAddress(beacon.Address, TimeSpan.FromSeconds(20));
             }
             finally
             {
                 link?.DisposeInBackground();
+            }
+            if (consecutiveNotResponding >= 2)
+            {
+                Log.Warn($"CONTACTS: {device.Name} did not respond to wake {consecutiveNotResponding} times in a row -- " +
+                         "likely has receiving turned off, not a transient link issue; stopping early instead of using the remaining retries.");
+                status?.Invoke($"{device.Name} isn't responding -- check that receiving/互传 is turned on there");
+                return null;
             }
         }
         return null;

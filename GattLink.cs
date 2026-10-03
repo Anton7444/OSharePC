@@ -325,10 +325,12 @@ public sealed partial class GattLink : IDisposable
                 }
                 SendTimeline.Mark("device-opened");
 
-                if (fast)
+                if (ConnectionParametersApiPresent)
                 {
                     // Ask for the fast interval now and again the moment the link comes up (a request made before the
-                    // connection exists may be refused); the discovery below then runs on the short interval.
+                    // connection exists may be refused); the discovery below then runs on the short interval. This is
+                    // not only for the Contacts fast path: an Everyone-mode send pays the same default ~30 ms interval
+                    // for its uncached service discovery and handshake, which is exactly where its connect is slowest.
                     parameters = new ConnectionParametersHolder { Request = RequestFastConnectionParameters(device) };
                     var dev = device;
                     var timeline = SendTimeline.Current;
@@ -420,6 +422,29 @@ public sealed partial class GattLink : IDisposable
                     }
                 }
                 catch (Exception ex) { Log.Warn($"BLE: GattSession unavailable ({ex.Message})"); }
+
+                // The fast-parameters request above is fire-and-forget: Windows can still settle on a
+                // slow interval (seen: 30ms instead of the requested ~15ms), and every uncached GATT
+                // operation below pays for that difference since each ATT round-trip is gated by the
+                // connection interval. One cheap check + a single re-request + a short grace window
+                // costs far less than discovering a whole service table over a slow link.
+                if (parameters is not null)
+                {
+                    try
+                    {
+                        var p = device.GetConnectionParameters();
+                        var intervalMs = p.ConnectionInterval * 1.25;
+                        if (intervalMs > 20)
+                        {
+                            Log.Info($"BLE: connection interval negotiated slow ({intervalMs:0.##}ms) -- re-requesting fast parameters before discovery");
+                            parameters?.Request?.Dispose();
+                            if (parameters is not null) parameters.Request = RequestFastConnectionParameters(device);
+                            await Task.Delay(150, ct);
+                            LogConnectionParameters(device);
+                        }
+                    }
+                    catch (Exception intervalEx) { Log.Info($"BLE: connection interval check skipped ({intervalEx.Message})"); }
+                }
 
                 var discoveredServices = new List<GattDeviceService>();
                 GattCommunicationStatus discoveryStatus;
@@ -953,9 +978,10 @@ public sealed partial class GattLink : IDisposable
             GattReadResult read;
             try
             {
-                // A healthy receiver answers in well under a second. A listed-but-dead 9999 service (its app-side
-                // server already closed) never answers; fail fast instead of the OS default of ~30s.
-                read = await ReadWithTimeoutAsync(OConnectReadChar, TimeSpan.FromSeconds(3.5), ct);
+                // A healthy receiver answers in 40-130 ms (every send so far). A listed-but-dead 9999 service (its
+                // app-side server already closed, e.g. on a stale parked link) never answers; fail fast instead of
+                // the OS default of ~30s.
+                read = await ReadWithTimeoutAsync(OConnectReadChar, TimeSpan.FromSeconds(1.5), ct);
             }
             catch (TimeoutException)
             {
@@ -1231,15 +1257,21 @@ public sealed partial class GattLink : IDisposable
     private async Task WriteOConnectSingle(string json)
     {
         var payload = System.Text.Encoding.UTF8.GetBytes(json);
+        // Cancel the underlying WinRT write on timeout, not just the wait. A write that is merely abandoned
+        // stays queued on the link until Windows' ~30 s ATT timeout, and that queued request is what makes the
+        // next reconnect see an "already established" link and stall ~17-30 s (observed in the sender log after
+        // the state-1 write timed out). Passing the token to AsTask aborts the operation so the link can drop.
+        using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         GattCommunicationStatus result;
         try
         {
             result = await OConnectWriteChar!.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse)
-                .AsTask().WaitAsync(TimeSpan.FromSeconds(4));
+                .AsTask(writeCts.Token).WaitAsync(TimeSpan.FromSeconds(4));
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
         {
-            throw new LinkNotRespondingException(Address, "BLE: receiver not responding (write 9896 timed out)");
+            throw new LinkNotRespondingException(Address, "BLE: receiver not responding (write 9896 timed out)")
+            { DuringHandshakeWrite = true };
         }
         if (result != GattCommunicationStatus.Success)
             throw new InvalidOperationException($"BLE: 9896 write failed ({result})");
@@ -1370,4 +1402,7 @@ public sealed class LinkNotRespondingException(ulong address, string message) : 
     public ulong Address { get; } = address;
     /// <summary>The unanswered request was the cancel of the receive task a wake read opened.</summary>
     public bool DuringWakeClear { get; init; }
+    /// <summary>The unanswered request was the state-1 write (0x9896) of the handshake — the 9897 read that
+    /// precedes it succeeded, so the receive service is alive and does not need a re-wake.</summary>
+    public bool DuringHandshakeWrite { get; init; }
 }

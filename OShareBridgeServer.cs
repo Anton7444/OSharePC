@@ -22,6 +22,8 @@ public sealed class OShareBridgeServer : IAsyncDisposable
     private readonly ConcurrentQueue<BridgeEvent> _events = new();
     private readonly ConcurrentDictionary<string, PendingTransferInfo> _pendingTransfers = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentlyRejected = new();
+    /// <summary>Last time each device address was forwarded as a "deviceSeen" event (see the throttle below).</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _recentDeviceSeen = new();
     private readonly byte[] _authTokenBytes;
     private long _seq = 0;
     // Regenerated each process start so a client can tell a fresh backend (event
@@ -49,7 +51,20 @@ public sealed class OShareBridgeServer : IAsyncDisposable
 
     public async Task StartAsync()
     {
-        _engine.DeviceSeen += device => Push("deviceSeen", new { name = DisplayName(device), address = device.Address.ToString(), kind = device.KindLabel, rssi = device.Rssi });
+        // The scanner raises this for every advertisement (several per second per device). Forward at most
+        // one per address every couple of seconds: the GUI uses it only to refresh the nearby list promptly,
+        // and an unthrottled flood would waste a poll's worth of JSON parsing and crowd out transfer events.
+        _engine.DeviceSeen += device =>
+        {
+            var key = device.Address.ToString();
+            var now = DateTimeOffset.UtcNow;
+            if (_recentDeviceSeen.TryGetValue(key, out var last) && now - last < TimeSpan.FromSeconds(2)) return;
+            _recentDeviceSeen[key] = now;
+            if (_recentDeviceSeen.Count > 256)
+                foreach (var stale in _recentDeviceSeen.Where(kv => now - kv.Value > TimeSpan.FromSeconds(30)).Select(kv => kv.Key).Take(32).ToArray())
+                    _recentDeviceSeen.TryRemove(stale, out _);
+            Push("deviceSeen", new { name = DisplayName(device), address = device.Address.ToString(), kind = device.KindLabel, rssi = device.Rssi });
+        };
         _engine.TransferStateChanged += (taskId, state) =>
         {
             _lastState = state;
@@ -198,15 +213,37 @@ public sealed class OShareBridgeServer : IAsyncDisposable
         app.MapGet("/api/devices", () =>
         {
             var devices = _engine.Scanner.Devices;
-            return Results.Json(devices.Select(d => new
+            var now = DateTimeOffset.UtcNow;
+            return Results.Json(devices.Select(d =>
             {
-                address = d.Address.ToString(),
-                name = DisplayName(d, devices),
-                kind = d.KindLabel,
-                rssi = d.Rssi,
-                oShare = d.Kind == PhoneKind.OShare,
-                addressText = d.AddressStr,
+                var status = d.GetReceiveStatus(now);
+                return new
+                {
+                    address = d.Address.ToString(),
+                    name = DisplayName(d, devices),
+                    kind = d.KindLabel,
+                    rssi = d.Rssi,
+                    oShare = d.Kind == PhoneKind.OShare,
+                    addressText = d.AddressStr,
+                    transport = d.Kind == PhoneKind.Lan ? (d.IsContactsBeacon ? "ble-beacon" : "lan") : "ble",
+                    lastSeen = d.LastSeen == default ? null : d.LastSeen.ToString("o"),
+                    lastBeacon = d.LastBeacon == default ? null : d.LastBeacon.ToString("o"),
+                    receiveState = status.State.ToString().ToLowerInvariant(),
+                    receiveStateEvidence = status.Evidence.ToString().ToLowerInvariant(),
+                    statusMessage = status.Message,
+                };
             }));
+        });
+
+        // "Scan now": restarts the fast LAN discovery burst and the BLE advertisement watcher. Never sends
+        // anything to a phone.
+        app.MapPost("/api/scan", () =>
+        {
+            Log.Info("SCAN: scan_start (requested from the UI)");
+            _engine.LanDisc?.Nudge();
+            _engine.Scanner.Nudge();
+            _engine.ProbeContactsReceiveStates();
+            return Results.Ok(new { started = true });
         });
 
         app.MapGet("/api/events", (long? since) =>
@@ -359,7 +396,7 @@ public sealed class OShareBridgeServer : IAsyncDisposable
                 Interlocked.Exchange(ref _sendRequestId, requestId);
                 Interlocked.Exchange(ref _sendQuiet, body.Quiet ? 1 : 0);
                 Push("sendStarted", new { device = device.Name, quiet, requestId });
-                _sendTask = _engine.SendToAsync(device);
+                _sendTask = _engine.SendToAsync(device, SendFlow.OConnectLan);
             }
             finally { _sendGate.Release(); }
             _ = _sendTask.ContinueWith(t =>

@@ -865,6 +865,27 @@ internal static class Program
             else Log.Info("SELFTEST ok: contact discovery account reset");
         }
 
+        // 13) Receive-state model: silence is Stale/Unknown, never ReceiveOff; only positive evidence says off,
+        // and a later beacon supersedes it.
+        {
+            var t0 = DateTimeOffset.UtcNow;
+            var contacts = (PhoneKind.Lan, true);
+            ReceiveStatus St(DateTimeOffset seen, DateTimeOffset beacon, DateTimeOffset off, TimeSpan after) =>
+                PhoneDevice.ComputeReceiveStatus(contacts.Item1, contacts.Item2, seen, beacon, off, t0 + after);
+            var checks = new (string Name, ReceiveState Got, ReceiveState Want)[]
+            {
+                ("never heard", St(default, default, default, TimeSpan.Zero).State, ReceiveState.Unknown),
+                ("fresh beacon", St(t0, t0, default, TimeSpan.FromSeconds(5)).State, ReceiveState.Discoverable),
+                ("beacon expiry", St(t0, t0, default, TimeSpan.FromSeconds(120)).State, ReceiveState.Stale),
+                ("explicit off", St(t0, t0, t0 + TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5)).State, ReceiveState.ReceiveOff),
+                ("off then new beacon", St(t0 + TimeSpan.FromSeconds(10), t0 + TimeSpan.FromSeconds(10), t0 + TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(11)).State, ReceiveState.Discoverable),
+            };
+            var bad = checks.Where(c => c.Got != c.Want).ToList();
+            foreach (var c in bad) Log.Error($"SELFTEST FAIL: receive state '{c.Name}' was {c.Got}, wanted {c.Want}");
+            failures += bad.Count;
+            if (bad.Count == 0) Log.Info("SELFTEST ok: receive state model");
+        }
+
         Log.Info(failures == 0 ? "SELFTEST PASSED" : $"SELFTEST FAILED ({failures})");
         return failures == 0 ? 0 : 1;
     }

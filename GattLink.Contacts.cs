@@ -136,14 +136,17 @@ public sealed partial class GattLink
         {
             // A receiver that will answer this has always done so within ~1.3 s (observed); one that won't never
             // answers at all, so a short local timeout only trims wasted waiting — it does not affect correctness.
+            // Cancel the underlying write on timeout so it does not stay queued and poison the link.
+            using var clearCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            clearCts.CancelAfter(TimeSpan.FromSeconds(2));
             var w = await cancel.WriteValueAsync(ToBuffer(new byte[] { 2 }), GattWriteOption.WriteWithResponse)
-                .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(2), ct);
+                .AsTask(clearCts.Token).WaitAsync(TimeSpan.FromSeconds(2), ct);
             _wakeTaskPending = false;
             Log.Info($"CONTACTS: wake: cancelled the receive task the wake read opened via {via} 9995 ({w})");
             SendTimeline.Mark($"wake-task-cleared-{via}");
             await Task.Delay(300, ct);
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
             throw new LinkNotRespondingException(Address, $"BLE: receiver not responding (cancelling the wake task via {via} 9995 timed out)")
             { DuringWakeClear = true };
@@ -160,8 +163,12 @@ public sealed partial class GattLink
             if (!IsConnected) return WakeOutcome.LinkDropped;
             try
             {
+                // Cancel the discovery on this iteration's timeout instead of only abandoning the wait, so a
+                // slow round cannot leave a pending uncached discovery queued on the link each pass.
+                using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                pollCts.CancelAfter(TimeSpan.FromSeconds(1.5));
                 var svcs = await _device!.GetGattServicesForUuidAsync(OConnectServiceUuid, BluetoothCacheMode.Uncached)
-                    .AsTask(ct).WaitAsync(TimeSpan.FromSeconds(1.5), ct);
+                    .AsTask(pollCts.Token).WaitAsync(TimeSpan.FromSeconds(1.5), ct);
                 if (svcs.Status == GattCommunicationStatus.Success && svcs.Services.Count > 0)
                 {
                     _services.AddRange(svcs.Services);
@@ -174,7 +181,7 @@ public sealed partial class GattLink
                     }
                 }
             }
-            catch (TimeoutException) { }
+            catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && !ct.IsCancellationRequested)) { }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 Log.Info($"CONTACTS: wake: 9999 re-discovery: {ex.GetType().Name}");

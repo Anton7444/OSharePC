@@ -81,6 +81,10 @@ internal static class OfficialStoredZipWriter
             var transferStarted = System.Diagnostics.Stopwatch.StartNew();
             var buffer = ArrayPool<byte>.Shared.Rent(TransferBufferSize);
             long fileSent = 0;
+            // Report at most ~10 times a second. A callback per 1 MiB write floods the bridge/GUI
+            // event queue (and can crowd out real transfer events) without any benefit to the user.
+            var progressInterval = System.Diagnostics.Stopwatch.Frequency / 10;
+            var lastProgress = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 await using var fs = new FileStream(
@@ -100,13 +104,22 @@ internal static class OfficialStoredZipWriter
                     await writer.WriteRawAsync(buffer.AsMemory(0, read), cancellationToken);
                     fileSent += read;
                     sent += read;
-                    try { progress?.Invoke(sent, totalBytes); } catch { }
+                    var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (progress is not null && now - lastProgress >= progressInterval)
+                    {
+                        lastProgress = now;
+                        try { progress(sent, totalBytes); } catch { }
+                    }
                 }
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
+
+            // Always publish the end-of-file total so the UI advances even when the whole file
+            // finished inside the throttle window.
+            try { progress?.Invoke(sent, totalBytes); } catch { }
 
             var finalInfo = new FileInfo(path);
             if (fileSent != size || !finalInfo.Exists || finalInfo.Length != size ||

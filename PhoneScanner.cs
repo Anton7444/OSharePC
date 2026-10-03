@@ -23,8 +23,21 @@ public enum PhoneKind
     Lan
 }
 
+/// <summary>What we can honestly say about whether a listed device can be sent to right now. Silence is never
+/// <see cref="ReceiveOff"/>: that needs positive phone-state evidence, which no discovery channel we can read provides yet.</summary>
+public enum ReceiveState { Discoverable, ReceiveOff, Stale, Unknown }
+
+public enum ReceiveStateEvidence { None, Beacon, PhoneStateQuery, LanState, Timeout }
+
+public readonly record struct ReceiveStatus(ReceiveState State, ReceiveStateEvidence Evidence, string Message);
+
 public sealed class PhoneDevice
 {
+    /// <summary>A beacon is "fresh" for this long (Contacts beacons arrive every ~25 s).</summary>
+    public static readonly TimeSpan BeaconFresh = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan BleFresh = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan LanFresh = TimeSpan.FromSeconds(20);
+
     public ulong Address { get; set; }
     public BluetoothAddressType AddressType { get; set; } = BluetoothAddressType.Unspecified;
     public string AddressStr => FormatAddress(Address);
@@ -63,7 +76,38 @@ public sealed class PhoneDevice
     public int Version { get; set; }
     public short Rssi { get; set; }
     public DateTimeOffset LastSeen { get; set; }
+    /// <summary>Contacts beacons only: when the last fresh (not cached, RSSI &gt; -127) beacon was heard.</summary>
+    public DateTimeOffset LastBeacon { get; set; }
+    /// <summary>When a positive phone-state query reported receiving as off. Superseded by any later beacon.</summary>
+    public DateTimeOffset ReceiveOffAt { get; set; }
+    public ReceiveState LoggedState { get; set; } = ReceiveState.Unknown;
     public int SeenCount { get; set; }
+
+    public bool IsContactsBeacon => LanPdid.StartsWith("FC70", StringComparison.Ordinal);
+
+    public ReceiveStatus GetReceiveStatus(DateTimeOffset now) =>
+        ComputeReceiveStatus(Kind, IsContactsBeacon, LastSeen, LastBeacon, ReceiveOffAt, now);
+
+    public static ReceiveStatus ComputeReceiveStatus(PhoneKind kind, bool contactsBeacon, DateTimeOffset lastSeen,
+        DateTimeOffset lastBeacon, DateTimeOffset receiveOffAt, DateTimeOffset now)
+    {
+        // Explicit off counts only until the device is heard advertising again.
+        if (receiveOffAt != default && receiveOffAt >= lastBeacon && receiveOffAt >= lastSeen)
+            return new(ReceiveState.ReceiveOff, ReceiveStateEvidence.PhoneStateQuery, "Receiving off");
+        if (contactsBeacon)
+        {
+            if (lastBeacon == default) return new(ReceiveState.Unknown, ReceiveStateEvidence.None, "Checking");
+            return now - lastBeacon < BeaconFresh
+                ? new(ReceiveState.Discoverable, ReceiveStateEvidence.Beacon, "Ready")
+                : new(ReceiveState.Stale, ReceiveStateEvidence.Beacon, "Not recently discoverable");
+        }
+        if (lastSeen == default) return new(ReceiveState.Unknown, ReceiveStateEvidence.None, "Checking");
+        var fresh = kind == PhoneKind.Lan ? LanFresh : BleFresh;
+        var evidence = kind == PhoneKind.Lan ? ReceiveStateEvidence.LanState : ReceiveStateEvidence.Beacon;
+        return now - lastSeen < fresh
+            ? new(ReceiveState.Discoverable, evidence, "Ready")
+            : new(ReceiveState.Stale, evidence, "Not recently discoverable");
+    }
 
     // Android's ScanRecord gives OnePlus Share a merged ADV+SCAN_RSP. Windows emits
     // those pieces separately, so remember when every official field arrived and
@@ -176,9 +220,11 @@ public sealed class PhoneScanner : IDisposable
     public static readonly Guid AllianceServiceUuid = new("00003331-0000-1000-8000-008123456789");
     private static readonly TimeSpan AllianceMergeWindow = TimeSpan.FromSeconds(3);
     /// <summary>Contacts beacons arrive every ~25 s; a device heard within this window is in Contacts mode now.</summary>
-    private static readonly TimeSpan LiveBeacon = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan LiveBeacon = PhoneDevice.BeaconFresh;
 
     private BluetoothLEAdvertisementWatcher? _watcher;
+    private DateTimeOffset _watcherStartedAt;
+    private int _watcherRestarts;
     private readonly Dictionary<ulong, PhoneDevice> _devices = new();
     // Keyed by PDID (a string, not a BLE address) since LAN devices arrive over UDP,
     // not BLE — kept separate from _devices rather than shoehorning a synthetic BLE
@@ -261,9 +307,11 @@ public sealed class PhoneScanner : IDisposable
     public void UpsertLanDevice(string pdid, string ip, string deviceName, string? deviceType = null, bool sameAccount = false)
     {
         if (string.IsNullOrWhiteSpace(pdid)) return;
+        PhoneDevice device;
+        var added = false;
         lock (_gate)
         {
-            if (!_lanDevices.TryGetValue(pdid, out var device))
+            if (!_lanDevices.TryGetValue(pdid, out device!))
             {
                 device = new PhoneDevice
                 {
@@ -272,6 +320,8 @@ public sealed class PhoneScanner : IDisposable
                     LanPdid = pdid,
                 };
                 _lanDevices[pdid] = device;
+                added = true;
+                Log.Info($"SCAN: device_published {pdid} elapsed_ms={(long)(DateTimeOffset.UtcNow - _startedAt).TotalMilliseconds}");
             }
             device.LanIp = ip;
             device.LanSameAccount = sameAccount;
@@ -325,6 +375,10 @@ public sealed class PhoneScanner : IDisposable
         }
         Log.Info($"SCAN: LAN device upserted pdid={pdid} ip={ip} name={deviceName}");
         PulseAdvertisement();
+        // A newly listed device (a first LAN announce, or the first Contacts beacon for a device) is worth
+        // telling the UI about right away instead of waiting for its next poll. Raised outside the lock, and
+        // only on first add so repeated QUERY/beacon packets do not spam the event.
+        if (added) DeviceSeen?.Invoke(device);
     }
 
     private static ulong SyntheticAddressFromPdid(string pdid)
@@ -422,15 +476,19 @@ public sealed class PhoneScanner : IDisposable
     {
         var key = $"{deviceType:X2}{digest}";
         if (ContactNameLookupsPaused) return; // do not spend a try while a send/pre-warm owns the link
+        var started = Environment.TickCount64;
         lock (_gate)
         {
             _nameResolveState.TryGetValue(key, out var st);
-            if (st.Tries >= 3 || DateTimeOffset.UtcNow - st.Last < TimeSpan.FromMinutes(3)) return;
+            // Exponential backoff after each failed read: 30 s, 60 s, 2 min, 4 min, then give up.
+            if (st.Tries >= 5 ||
+                (st.Tries > 0 && DateTimeOffset.UtcNow - st.Last < TimeSpan.FromSeconds(30 * (1 << (st.Tries - 1))))) return;
             _nameResolveState[key] = (DateTimeOffset.UtcNow, st.Tries + 1);
         }
+        Log.Info($"SCAN: state_probe_start kind=gap-name type={deviceType}");
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var cts = new CancellationTokenSource(NameProbeBudget);
             using var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(address, type).AsTask(cts.Token);
             if (dev is null) return;
             var ok = Windows.Devices.Bluetooth.GenericAttributeProfile.GattCommunicationStatus.Success;
@@ -444,8 +502,47 @@ public sealed class PhoneScanner : IDisposable
             var bytes = new byte[read.Value.Length];
             reader.ReadBytes(bytes);
             RememberContactName(deviceType, digest, Encoding.UTF8.GetString(bytes));
+            Log.Info($"SCAN: state_probe_end kind=gap-name type={deviceType} result=ok elapsed_ms={Environment.TickCount64 - started}");
         }
-        catch (Exception ex) { Log.Info($"NAMES: name read for type {deviceType} did not work this time ({ex.GetType().Name})"); }
+        catch (Exception ex)
+        {
+            // A failed name read says nothing about whether the phone is receiving: no state is derived from it.
+            Log.Info($"SCAN: state_probe_end kind=gap-name type={deviceType} result={ex.GetType().Name} state_reason=none elapsed_ms={Environment.TickCount64 - started}");
+        }
+    }
+
+    private static readonly TimeSpan NameProbeBudget = TimeSpan.FromSeconds(3);
+    private readonly Dictionary<string, (ulong Address, BluetoothAddressType Type, int DeviceType, string Digest)> _nameQueue = new();
+    private bool _nameWorkerActive;
+
+    /// <summary>Hands a name read to the single background worker, keeping only the newest address per device, so the
+    /// advertisement callback never waits on GATT and concurrent beacons never start parallel connections.</summary>
+    private void QueueNameResolve(ulong address, BluetoothAddressType type, int deviceType, string digest)
+    {
+        lock (_gate)
+        {
+            _nameQueue[$"{deviceType:X2}{digest}"] = (address, type, deviceType, digest);
+            if (_nameWorkerActive) return;
+            _nameWorkerActive = true;
+        }
+        _ = Task.Run(NameWorkerAsync);
+    }
+
+    private async Task NameWorkerAsync()
+    {
+        while (true)
+        {
+            (ulong Address, BluetoothAddressType Type, int DeviceType, string Digest) item;
+            lock (_gate)
+            {
+                if (_nameQueue.Count == 0) { _nameWorkerActive = false; return; }
+                var key = _nameQueue.Keys.First();
+                item = _nameQueue[key];
+                _nameQueue.Remove(key);
+            }
+            try { await TryResolveContactNameAsync(item.Address, item.Type, item.DeviceType, item.Digest); }
+            catch (Exception ex) { Log.Warn($"SCAN: name worker: {ex.Message}"); }
+        }
     }
 
     private int _nameLookupPauses;
@@ -485,6 +582,29 @@ public sealed class PhoneScanner : IDisposable
         if (string.IsNullOrWhiteSpace(name)) return;
         if (ContactNames.Set(deviceType, digest, name))
             UpsertLanDevice($"FC70{deviceType:X2}{digest}", "", name.Trim(), deviceType.ToString());
+    }
+
+    /// <summary>Records the result of an active "is this Contacts device receiving?" probe: the OShare
+    /// BleServer answers a read of DCP 0x9996 by starting its receive task when receiving is on, and leaves
+    /// it unanswered when it is off. A newer beacon (LastSeen/LastBeacon past ReceiveOffAt) supersedes the
+    /// mark in <see cref="PhoneDevice.ComputeReceiveStatus"/> automatically.</summary>
+    public void SetReceiveOff(string pdid, bool off)
+    {
+        if (string.IsNullOrWhiteSpace(pdid)) return;
+        var changed = false;
+        lock (_gate)
+        {
+            if (!_lanDevices.TryGetValue(pdid, out var device)) return;
+            var value = off ? DateTimeOffset.UtcNow : default;
+            if (device.ReceiveOffAt == value) return;
+            device.ReceiveOffAt = value;
+            changed = true;
+        }
+        if (changed)
+        {
+            Log.Info($"CONTACTS: receive probe says {pdid} is {(off ? "NOT receiving" : "receiving again")}");
+            PulseAdvertisement();
+        }
     }
 
     public sealed record ContactsBeacon(ulong Address, BluetoothAddressType AddressType, byte DeviceType, string AccountDigest, DateTimeOffset SeenAt);
@@ -611,6 +731,12 @@ public sealed class PhoneScanner : IDisposable
     {
         if (IsScanning) return;
         _startedAt = DateTimeOffset.UtcNow;
+        Log.Info("SCAN: scan_start");
+        CreateAndStartWatcher();
+    }
+
+    private void CreateAndStartWatcher()
+    {
         // Always active: the Everyone-mode (Alliance) path needs the scan responses to identify a phone.
         _watcher = new BluetoothLEAdvertisementWatcher
         {
@@ -619,18 +745,73 @@ public sealed class PhoneScanner : IDisposable
             AllowExtendedAdvertisements = true
         };
         _watcher.Received += OnReceived;
-        _watcher.Stopped += (_, e) => Log.Info($"BLE: scanner stopped (error={e.Error})");
+        _watcher.Stopped += OnWatcherStopped;
         _watcher.Start();
+        _watcherStartedAt = DateTimeOffset.UtcNow;
         IsScanning = true;
+    }
+
+    /// <summary>"Scan now": replace the advertisement watcher so Windows rescans from scratch. Scanning runs
+    /// continuously, so this does not "enable" discovery — it recovers a watcher that has gone quiet or is only
+    /// replaying cached advertisements, which is what a manual scan is actually for.</summary>
+    public void Nudge()
+    {
+        if (!IsScanning) return;
+        var old = _watcher;
+        if (old is not null)
+        {
+            // Detach first so the auto-restart handler does not read our intentional stop as an unexpected one.
+            old.Received -= OnReceived;
+            old.Stopped -= OnWatcherStopped;
+            try { old.Stop(); } catch { }
+        }
+        CreateAndStartWatcher();
+        Log.Info("SCAN: advertisement watcher restarted (Scan now)");
+        PulseAdvertisement();
     }
 
     public void Stop()
     {
         if (!IsScanning) return;
-        try { _watcher?.Stop(); } catch { }
-        _watcher = null;
+        // Clear the state BEFORE stopping so the Stopped callback does not read this as an
+        // unexpected stop and try to restart a watcher we are deliberately shutting down.
         IsScanning = false;
+        var watcher = _watcher;
+        _watcher = null;
+        try { watcher?.Stop(); } catch { }
         PulseAdvertisement();
+    }
+
+    /// <summary>Windows can stop the advertisement watcher on its own (radio reset, driver hiccup). Without a
+    /// restart the PC would silently stop discovering devices until the app is relaunched, so resume scanning
+    /// with backoff — but do not hammer a permanently broken radio.</summary>
+    private void OnWatcherStopped(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementWatcherStoppedEventArgs e)
+    {
+        Log.Info($"BLE: scanner stopped (error={e.Error})");
+        if (!IsScanning || !ReferenceEquals(_watcher, sender)) return;
+        // Only count a stop as a fresh failure if the watcher had been running for a while; otherwise a
+        // broken radio that starts and immediately stops would reset the counter and loop forever.
+        if (DateTimeOffset.UtcNow - _watcherStartedAt > TimeSpan.FromSeconds(60))
+            Interlocked.Exchange(ref _watcherRestarts, 0);
+        var attempt = Interlocked.Increment(ref _watcherRestarts);
+        if (attempt > 8)
+        {
+            Log.Warn("BLE: scanner stopped repeatedly and was not restarted again — toggle Bluetooth off/on");
+            return;
+        }
+        var delay = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, Math.Min(attempt, 5))));
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(delay);
+            if (!IsScanning || !ReferenceEquals(_watcher, sender)) return;
+            try
+            {
+                sender.Start();
+                _watcherStartedAt = DateTimeOffset.UtcNow;
+                Log.Info("BLE: scanner restarted after an unexpected stop");
+            }
+            catch (Exception ex) { Log.Warn($"BLE: scanner restart failed: {ex.Message}"); }
+        });
     }
 
     /// <summary>Forget devices not seen in the last 10 seconds.</summary>
@@ -655,7 +836,18 @@ public sealed class PhoneScanner : IDisposable
                          .Where(kv => kv.Value.LastSeen < lanCutoff)
                          .Select(kv => kv.Key)
                          .ToArray())
+            {
+                Log.Info($"SCAN: device_expired {key} elapsed_ms={(long)(DateTimeOffset.UtcNow - _lanDevices[key].LastSeen).TotalMilliseconds}");
                 _lanDevices.Remove(key);
+            }
+            var stateNow = DateTimeOffset.UtcNow;
+            foreach (var d in _lanDevices.Values.Where(d => d.IsContactsBeacon))
+            {
+                var st = d.GetReceiveStatus(stateNow);
+                if (st.State == d.LoggedState) continue;
+                d.LoggedState = st.State;
+                Log.Info($"SCAN: state_reason {d.LanPdid} state={st.State} evidence={st.Evidence}");
+            }
         }
         foreach (var addr in gone) DeviceExpired?.Invoke(addr);
     }
@@ -746,8 +938,9 @@ public sealed class PhoneScanner : IDisposable
             {
                 var digest = Convert.ToHexString(sec.Payload, 6, 3);
                 // -127 dBm is Windows replaying a cached advertisement, not a packet heard now: that address may be
-                // off the air already, so it must not count as a fresh (connectable) beacon.
-                if (args.RawSignalStrengthInDBm > -127)
+                // off the air already, so it must not count as a fresh (connectable) beacon, nor keep a row alive.
+                var freshBeacon = args.RawSignalStrengthInDBm > -127;
+                if (freshBeacon)
                 {
                     var now = DateTimeOffset.UtcNow;
                     lock (_gate)
@@ -764,7 +957,7 @@ public sealed class PhoneScanner : IDisposable
                 }
                 // A same-account device in Contacts-only visibility: list it (keyed by type+digest, since the
                 // beacon's address rotates) so it can be picked as a send target.
-                if (!string.IsNullOrEmpty(ContactsAccountDigest) &&
+                if (freshBeacon && !string.IsNullOrEmpty(ContactsAccountDigest) &&
                     string.Equals(digest, ContactsAccountDigest, StringComparison.OrdinalIgnoreCase))
                 {
                     var dtName = ContactNames.Get(sec.Payload[4], digest) ??
@@ -773,9 +966,14 @@ public sealed class PhoneScanner : IDisposable
                     UpsertLanDevice(beaconPdid, "", dtName, sec.Payload[4].ToString());
                     lock (_gate)
                         if (_lanDevices.TryGetValue(beaconPdid, out var beaconDevice))
+                        {
                             beaconDevice.Rssi = args.RawSignalStrengthInDBm;
+                            beaconDevice.LastBeacon = beaconDevice.LastSeen;
+                        }
+                    if (Log.Every($"beacon:{beaconPdid}", TimeSpan.FromSeconds(30)))
+                        Log.Info($"SCAN: beacon_seen {beaconPdid} rssi={args.RawSignalStrengthInDBm} addr={args.BluetoothAddress:X12} since_scan_start_ms={(long)(DateTimeOffset.UtcNow - _startedAt).TotalMilliseconds}");
                     if (ContactNames.Get(sec.Payload[4], digest) is null && !ContactNameLookupsPaused)
-                        Task.Run(() => TryResolveContactNameAsync(args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest));
+                        QueueNameResolve(args.BluetoothAddress, args.BluetoothAddressType, sec.Payload[4], digest);
                 }
             }
         }
