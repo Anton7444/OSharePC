@@ -352,8 +352,10 @@ implementation. Write a separate design doc first; do not start it inside this t
 - **Tablet 16.10.61 differs:** after the wake, its 9896 write-with-response on 9999 is answered normally. It needs no workaround.
 - **E (wake + BB15 cancel, then 9896 sent as an ATT Write Command, no response) works on the phone:** cold send
   2.7-2.9 s, transfer completed, warm send ~0.7 s. The receiver's handler processes the command; only its reply was
-  misrouted. This is what the code now does: a write-without-response when the link did a wake read and the peer's
-  9897 `version` is >= 17000000 (`GattLink.WriteOConnectSingle`).
+  misrouted. This is what the code now does: on Contacts sends to a peer whose 9897 `version` is >= 17000000, the 9896
+  handshake is written without response (`GattLink.WriteOConnectSingle`). It must NOT be gated on "this link sent a
+  wake read": a link that finds 9999 already listed (e.g. a pre-warm) can meet a receiver still in DCP mode, and the
+  with-response write then stalled again (46 s send in the first build that gated on the wake read).
 - Trade-off: a write command gives no delivery confirmation; the receiver connecting back to our server is the
   confirmation (already how the flow ends).
 - Still open: rare `ObjectDisposedException` on a parked link (retried successfully); Phases 2-3 are unchanged;

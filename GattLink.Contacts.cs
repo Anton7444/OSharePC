@@ -60,10 +60,6 @@ public sealed partial class GattLink
         Failed,
     }
 
-    /// <summary>True once this connection sent a BB15 wake read. The receiver then routes its replies through the system
-    /// DCP service (docs/contacts-connect-fix-guide.md §1.2), so a 9896 write-with-response on 9999 goes unanswered.</summary>
-    public bool WokeOnThisLink { get; private set; }
-
     /// <summary>Starts the receiver's 9999 server over THIS link (no separate wake connection): read 0x9996 on the DCP
     /// service, then clear the receive task that read opens (the 9995 cancel is accepted right after our own read,
     /// otherwise the next handshake finds the receiver busy), then wait for 9999 to appear on the same link.</summary>
@@ -76,7 +72,6 @@ public sealed partial class GattLink
             return WakeOutcome.Failed;
         }
         SendTimeline.Mark("wake-read");
-        WokeOnThisLink = true;
         try
         {
             var r = await _dcpWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);

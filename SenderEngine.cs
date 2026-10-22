@@ -633,6 +633,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                 {
                     try
                     {
+                        activeLink.HandshakeWriteCommands = contactsPath;
                         await activeLink.OConnectLanSendAsync(
                             Lan,
                             Port,

@@ -99,6 +99,9 @@ public sealed partial class GattLink : IDisposable
     private GattCharacteristic? _dcpWifiChar, _dcpCancelChar;
     /// <summary>The receiver's OShare version from the 9897 status (e.g. 17002036), 0 when unknown.</summary>
     private int _peerVersion;
+    /// <summary>Contacts-mode sends: write the 9896 handshake as ATT Write Commands to 17.x receivers (see
+    /// <see cref="WriteOConnectSingle"/>). Set by the sender engine before the handshake.</summary>
+    public bool HandshakeWriteCommands { get; set; }
     private static readonly Guid DcpServiceUuid = new("0000bb15-0000-1000-8000-00805f9b34fb");
     private static readonly Guid WifiCharUuid = new("00009996-0000-1000-8000-00805f9b34fb");
     private static readonly Guid CancelCharUuid = new("00009995-0000-1000-8000-00805f9b34fb");
@@ -1269,11 +1272,13 @@ public sealed partial class GattLink : IDisposable
         var writeChar = OConnectWriteChar ?? throw new InvalidOperationException("BLE: this link has no 0x9896 to write to");
         try
         {
-            // After a BB15 wake, a 17.x receiver answers 9896 write requests only on BB15, which has no 9896, so a write
-            // with response stalls the link for Windows' 30 s ATT timeout (device logs, Phase 0: experiments B/C/D). Its
-            // handler still processes a Write Command, which needs no response; the handshake's confirmation is the
-            // receiver connecting to our server. Older receivers (16.x) answer normally and keep the acknowledged write.
-            var option = WokeOnThisLink && _peerVersion >= 17000000 ? GattWriteOption.WriteWithoutResponse : GattWriteOption.WriteWithResponse;
+            // A 17.x receiver that is in DCP-routed mode (it was woken over BB15 and its previous peer has not disconnected,
+            // which also happens on a link that found 9999 already listed) answers 9896 write requests only on BB15, which
+            // has no 9896: a write with response then stalls the link for Windows' 30 s ATT timeout (device logs,
+            // docs/contacts-connect-fix-guide.md Phase 0). Its handler still processes a Write Command, and the handshake
+            // never uses the write response (confirmation is the receiver connecting to our server). Older receivers
+            // (16.x) answer normally and keep the acknowledged write.
+            var option = HandshakeWriteCommands && _peerVersion >= 17000000 ? GattWriteOption.WriteWithoutResponse : GattWriteOption.WriteWithResponse;
             result = await writeChar.WriteValueAsync(ToBuffer(payload), option)
                 .AsTask(writeCts.Token).WaitAsync(TimeSpan.FromSeconds(4));
         }
