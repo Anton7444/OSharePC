@@ -10,7 +10,9 @@ namespace OShareSender;
 /// OSHARE_CONTACTS_EXPERIMENT (A, B or C; anything else = off). A: after a wake on the same link, read 9897 on 9999 and
 /// write 9896 on BB15. B: same, but write 9896 on 9999 (expected to time out, confirming the routing model). C: after
 /// the wake and the BB15 cancel, drop the link, reconnect and do everything on 9999. D: like C, but measures how long
-/// the link takes to go down after the release and whether dropping every WinRT reference (GC) is what lets it go. Temporary: remove once Phase 1 lands.</summary>
+/// the link takes to go down after the release and whether dropping every WinRT reference (GC) is what lets it go.
+/// E: wake + BB15 cancel on the same link, then the 9896 handshake writes go out as ATT Write Commands (no response), so a
+/// receiver that answers them on the wrong service (DCP mode) cannot stall the link. Temporary: remove once Phase 1 lands.</summary>
 internal static class ContactsExperiment
 {
     public static readonly char Mode = Read();
@@ -32,7 +34,7 @@ internal static class ContactsExperiment
             catch { }
         }
         v = v?.Trim().ToUpperInvariant();
-        var mode = v is "A" or "B" or "C" or "D" ? v[0] : '\0';
+        var mode = v is "A" or "B" or "C" or "D" or "E" ? v[0] : '\0';
         Log.Info(mode != '\0' ? $"CONTACTS: experiment {mode} enabled ({source})" : "CONTACTS: no experiment set");
         return mode;
     }

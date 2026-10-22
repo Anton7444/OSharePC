@@ -1275,7 +1275,9 @@ public sealed partial class GattLink : IDisposable
         Log.Info($"CONTACTS: 9896 write goes to {(ReferenceEquals(writeChar, OConnectWriteChar) ? "9999" : "BB15")}");
         try
         {
-            result = await writeChar.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse)
+            // Experiment E: an ATT Write Command has no response to lose, so DCP-mode routing cannot leave it unanswered.
+            var option = ContactsExperiment.Mode == 'E' ? GattWriteOption.WriteWithoutResponse : GattWriteOption.WriteWithResponse;
+            result = await writeChar.WriteValueAsync(ToBuffer(payload), option)
                 .AsTask(writeCts.Token).WaitAsync(TimeSpan.FromSeconds(4));
         }
         catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
@@ -1284,6 +1286,7 @@ public sealed partial class GattLink : IDisposable
             throw new LinkNotRespondingException(Address, "BLE: receiver not responding (write 9896 timed out)")
             { DuringHandshakeWrite = true };
         }
+        if (ContactsExperiment.Mode == 'E') Log.Info($"CONTACTS: experiment E: 9896 write without response -> {result}");
         if (result != GattCommunicationStatus.Success)
             throw new InvalidOperationException($"BLE: 9896 write failed ({result})");
     }
