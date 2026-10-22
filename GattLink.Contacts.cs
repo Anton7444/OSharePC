@@ -9,7 +9,8 @@ namespace OShareSender;
 /// <summary>Phase 0 experiment switch of docs/contacts-connect-fix-guide.md, read once from the environment variable
 /// OSHARE_CONTACTS_EXPERIMENT (A, B or C; anything else = off). A: after a wake on the same link, read 9897 on 9999 and
 /// write 9896 on BB15. B: same, but write 9896 on 9999 (expected to time out, confirming the routing model). C: after
-/// the wake and the BB15 cancel, drop the link, reconnect and do everything on 9999. Temporary: remove once Phase 1 lands.</summary>
+/// the wake and the BB15 cancel, drop the link, reconnect and do everything on 9999. D: like C, but measures how long
+/// the link takes to go down after the release and whether dropping every WinRT reference (GC) is what lets it go. Temporary: remove once Phase 1 lands.</summary>
 internal static class ContactsExperiment
 {
     public static readonly char Mode = Read();
@@ -31,7 +32,7 @@ internal static class ContactsExperiment
             catch { }
         }
         v = v?.Trim().ToUpperInvariant();
-        var mode = v is "A" or "B" or "C" ? v[0] : '\0';
+        var mode = v is "A" or "B" or "C" or "D" ? v[0] : '\0';
         Log.Info(mode != '\0' ? $"CONTACTS: experiment {mode} enabled ({source})" : "CONTACTS: no experiment set");
         return mode;
     }
@@ -240,6 +241,52 @@ public sealed partial class GattLink
         if (IsConnected) return WakeOutcome.Failed;
         SendTimeline.Mark("wake-link-dropped");
         return WakeOutcome.LinkDropped;
+    }
+
+    /// <summary>Experiment D (docs/contacts-connect-fix-guide.md): disposes this link, then polls how long Windows keeps the
+    /// LE link up. After 1.5 s still up, drops the remaining managed references (characteristic objects) and forces a GC,
+    /// to tell "someone in this process still holds the link" from "Windows is slow". Returns the time to link-down in
+    /// ms (-1 = still up at <paramref name="timeout"/>) and whether the GC step was needed.</summary>
+    public async Task<(long DownMs, bool NeededGc)> ReleaseAndMeasureAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var address = Address;
+        var addressType = AddressType;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Dispose();
+        SendTimeline.Mark("exp-d-disposed");
+        BluetoothLEDevice? dev = null;
+        try
+        {
+            using var openCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            openCts.CancelAfter(TimeSpan.FromSeconds(2));
+            dev = await BluetoothLEDevice.FromBluetoothAddressAsync(address, addressType).AsTask(openCts.Token);
+            if (dev is null) return (watch.ElapsedMilliseconds, false);
+            var gcDone = false;
+            while (dev.ConnectionStatus == BluetoothConnectionStatus.Connected)
+            {
+                if (watch.Elapsed >= timeout) return (-1, gcDone);
+                if (!gcDone && watch.ElapsedMilliseconds >= 1500)
+                {
+                    gcDone = true;
+                    OConnectReadChar = OConnectWriteChar = OConnectNotifyChar = OConnectWifiChar = OConnectCancelChar = null;
+                    _dcpWifiChar = _dcpCancelChar = _dcpHandshakeWriteChar = null;
+                    IBeaconChar = null;
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+                    SendTimeline.Mark("exp-d-gc");
+                    Log.Info($"CONTACTS: experiment D: link still up {watch.ElapsedMilliseconds} ms after the release; forced a GC");
+                }
+                await Task.Delay(100, ct);
+            }
+            return (watch.ElapsedMilliseconds, gcDone);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            Log.Info($"CONTACTS: experiment D: link state check failed: {ex.Message}");
+            return (-1, false);
+        }
+        finally { dev?.Dispose(); }
     }
 
     /// <summary>Waits until Windows no longer holds an LE link to this address. True = it is down (or unknown to

@@ -486,7 +486,25 @@ public sealed partial class SenderEngine
                     if (outcome == GattLink.WakeOutcome.ServiceUp)
                     {
                         if (wakeTaskPending) await link.ClearWakeTaskAsync(ct, WakeClearViaDcp(device));
-                        if (ContactsExperiment.Mode == 'C')
+                        if (ContactsExperiment.Mode == 'D')
+                        {
+                            Log.Info("CONTACTS: experiment D: releasing the wake link and timing how long it takes to go down");
+                            var (downMs, neededGc) = await link.ReleaseAndMeasureAsync(TimeSpan.FromSeconds(20), ct);
+                            link = null;
+                            Log.Info($"CONTACTS: experiment D RESULT: link down after {(downMs < 0 ? "NEVER (20 s)" : downMs + " ms")}, GC needed={neededGc}");
+                            SendTimeline.Mark(downMs < 0 ? "exp-d-never-down" : $"exp-d-down-{downMs}ms{(neededGc ? "-after-gc" : "")}");
+                            link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, status, ct, beacon.AddressType,
+                                fast: true, allowMissingTarget: true);
+                            if (!link.HasOConnect)
+                            {
+                                Log.Warn("CONTACTS: experiment D: no 9999 after the reconnect");
+                                link.DisposeInBackground();
+                                link = null;
+                                break;
+                            }
+                            SendTimeline.Mark("exp-d-reconnected");
+                        }
+                        else if (ContactsExperiment.Mode == 'C')
                         {
                             // Experiment C: the wake task is cancelled on BB15; release this link so the receiver leaves
                             // DCP mode, then reconnect and run the whole handshake on 9999.
