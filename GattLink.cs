@@ -97,9 +97,8 @@ public sealed partial class GattLink : IDisposable
     // while its OShare app runs no 9999 server. OnePlus Share's own sender falls back to 0xBB15 for its Android
     // protocol (BleClient.s1()), but 0xBB15 carries no 9897/9896, so the OConnect handshake always needs 9999.
     private GattCharacteristic? _dcpWifiChar, _dcpCancelChar;
-    /// <summary>BB15 0x9896, if the system DCP service exposes one (Phase 0 of docs/contacts-connect-fix-guide.md; only
-    /// experiment A writes to it).</summary>
-    private GattCharacteristic? _dcpHandshakeWriteChar;
+    /// <summary>The receiver's OShare version from the 9897 status (e.g. 17002036), 0 when unknown.</summary>
+    private int _peerVersion;
     private static readonly Guid DcpServiceUuid = new("0000bb15-0000-1000-8000-00805f9b34fb");
     private static readonly Guid WifiCharUuid = new("00009996-0000-1000-8000-00805f9b34fb");
     private static readonly Guid CancelCharUuid = new("00009995-0000-1000-8000-00805f9b34fb");
@@ -998,6 +997,7 @@ public sealed partial class GattLink : IDisposable
             using var hsDoc = JsonDocument.Parse(hsJson);
             var phonePub = hsDoc.RootElement.TryGetProperty("key", out var k) ? k.GetString() : null;
             var state = hsDoc.RootElement.TryGetProperty("state", out var st) ? st.GetInt32() : -1;
+            _peerVersion = hsDoc.RootElement.TryGetProperty("version", out var ver) && int.TryParse(ver.GetString(), out var vn) ? vn : 0;
             if (string.IsNullOrEmpty(phonePub))
                 throw new InvalidOperationException("BLE: 9897 reply has no key");
             if (state != 0 && OConnectWifiChar is not null && OConnectCancelChar is not null)
@@ -1266,17 +1266,14 @@ public sealed partial class GattLink : IDisposable
         // the state-1 write timed out). Passing the token to AsTask aborts the operation so the link can drop.
         using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         GattCommunicationStatus result;
-        // Experiment A (docs/contacts-connect-fix-guide.md, Phase 0): the handshake write goes to BB15 0x9896.
-        var writeChar = ContactsExperiment.Mode == 'A' ? _dcpHandshakeWriteChar : OConnectWriteChar;
-        if (writeChar is null)
-            throw new InvalidOperationException(ContactsExperiment.Mode == 'A'
-                ? "CONTACTS: experiment A needs a 0x9896 on the DCP service 0xBB15, which this receiver does not list"
-                : "BLE: this link has no 0x9896 to write to");
-        Log.Info($"CONTACTS: 9896 write goes to {(ReferenceEquals(writeChar, OConnectWriteChar) ? "9999" : "BB15")}");
+        var writeChar = OConnectWriteChar ?? throw new InvalidOperationException("BLE: this link has no 0x9896 to write to");
         try
         {
-            // Experiment E: an ATT Write Command has no response to lose, so DCP-mode routing cannot leave it unanswered.
-            var option = ContactsExperiment.Mode == 'E' ? GattWriteOption.WriteWithoutResponse : GattWriteOption.WriteWithResponse;
+            // After a BB15 wake, a 17.x receiver answers 9896 write requests only on BB15, which has no 9896, so a write
+            // with response stalls the link for Windows' 30 s ATT timeout (device logs, Phase 0: experiments B/C/D). Its
+            // handler still processes a Write Command, which needs no response; the handshake's confirmation is the
+            // receiver connecting to our server. Older receivers (16.x) answer normally and keep the acknowledged write.
+            var option = WokeOnThisLink && _peerVersion >= 17000000 ? GattWriteOption.WriteWithoutResponse : GattWriteOption.WriteWithResponse;
             result = await writeChar.WriteValueAsync(ToBuffer(payload), option)
                 .AsTask(writeCts.Token).WaitAsync(TimeSpan.FromSeconds(4));
         }
@@ -1286,7 +1283,6 @@ public sealed partial class GattLink : IDisposable
             throw new LinkNotRespondingException(Address, "BLE: receiver not responding (write 9896 timed out)")
             { DuringHandshakeWrite = true };
         }
-        if (ContactsExperiment.Mode == 'E') Log.Info($"CONTACTS: experiment E: 9896 write without response -> {result}");
         if (result != GattCommunicationStatus.Success)
             throw new InvalidOperationException($"BLE: 9896 write failed ({result})");
     }

@@ -6,40 +6,6 @@ using Windows.Storage.Streams;
 
 namespace OShareSender;
 
-/// <summary>Phase 0 experiment switch of docs/contacts-connect-fix-guide.md, read once from the environment variable
-/// OSHARE_CONTACTS_EXPERIMENT (A, B or C; anything else = off). A: after a wake on the same link, read 9897 on 9999 and
-/// write 9896 on BB15. B: same, but write 9896 on 9999 (expected to time out, confirming the routing model). C: after
-/// the wake and the BB15 cancel, drop the link, reconnect and do everything on 9999. D: like C, but measures how long
-/// the link takes to go down after the release and whether dropping every WinRT reference (GC) is what lets it go.
-/// E: wake + BB15 cancel on the same link, then the 9896 handshake writes go out as ATT Write Commands (no response), so a
-/// receiver that answers them on the wrong service (DCP mode) cannot stall the link. Temporary: remove once Phase 1 lands.</summary>
-internal static class ContactsExperiment
-{
-    public static readonly char Mode = Read();
-    public static bool Active => Mode != '\0';
-
-    /// <summary>Env var first, else the first character of %LOCALAPPDATA%\OSharePC\experiment.txt (for launching the
-    /// GUI by double-click). Touched once at startup so the choice always shows in the log.</summary>
-    private static char Read()
-    {
-        var v = Environment.GetEnvironmentVariable("OSHARE_CONTACTS_EXPERIMENT");
-        var source = "OSHARE_CONTACTS_EXPERIMENT";
-        if (string.IsNullOrWhiteSpace(v))
-        {
-            try
-            {
-                var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OSharePC", "experiment.txt");
-                if (File.Exists(file)) { v = File.ReadAllText(file); source = "experiment.txt"; }
-            }
-            catch { }
-        }
-        v = v?.Trim().ToUpperInvariant();
-        var mode = v is "A" or "B" or "C" or "D" or "E" ? v[0] : '\0';
-        Log.Info(mode != '\0' ? $"CONTACTS: experiment {mode} enabled ({source})" : "CONTACTS: no experiment set");
-        return mode;
-    }
-}
-
 /// <summary>What the phone told us on the 0x9954 status read.</summary>
 public sealed partial class GattLink
 {
@@ -73,11 +39,11 @@ public sealed partial class GattLink
                 {
                     if (c.Uuid == WifiCharUuid) _dcpWifiChar = c;
                     else if (c.Uuid == CancelCharUuid) _dcpCancelChar = c;
-                    else if (c.Uuid == OConnectWriteUuid) _dcpHandshakeWriteChar = c;
                     else if (c.Uuid == IBeaconCharUuid) IBeaconChar ??= c;
                 }
-                // Logged on every Contacts connect for now (Phase 0): whether BB15 lists 9896 decides strategy S1 vs S2.
-                Log.Info($"BLE: DCP 0xBB15 characteristics: [{string.Join(", ", chars.Characteristics.Select(c => $"{ShortUuid(c.Uuid)}:{c.CharacteristicProperties}"))}]");
+                // Seen on 17.2.36 and 16.10.61: BB15 lists no 9896/9897 (docs/contacts-connect-fix-guide.md, Phase 0 results).
+                if (Log.Every("dcp-bb15-chars", TimeSpan.FromMinutes(10)))
+                    Log.Info($"BLE: DCP 0xBB15 characteristics: [{string.Join(", ", chars.Characteristics.Select(c => $"{ShortUuid(c.Uuid)}:{c.CharacteristicProperties}"))}]");
             }
         }
         catch (Exception ex) { Log.Info($"BLE: DCP 0xBB15 enumeration failed: {ex.GetType().Name} {ex.Message}"); }
@@ -94,6 +60,10 @@ public sealed partial class GattLink
         Failed,
     }
 
+    /// <summary>True once this connection sent a BB15 wake read. The receiver then routes its replies through the system
+    /// DCP service (docs/contacts-connect-fix-guide.md §1.2), so a 9896 write-with-response on 9999 goes unanswered.</summary>
+    public bool WokeOnThisLink { get; private set; }
+
     /// <summary>Starts the receiver's 9999 server over THIS link (no separate wake connection): read 0x9996 on the DCP
     /// service, then clear the receive task that read opens (the 9995 cancel is accepted right after our own read,
     /// otherwise the next handshake finds the receiver busy), then wait for 9999 to appear on the same link.</summary>
@@ -106,6 +76,7 @@ public sealed partial class GattLink
             return WakeOutcome.Failed;
         }
         SendTimeline.Mark("wake-read");
+        WokeOnThisLink = true;
         try
         {
             var r = await _dcpWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
@@ -243,52 +214,6 @@ public sealed partial class GattLink
         if (IsConnected) return WakeOutcome.Failed;
         SendTimeline.Mark("wake-link-dropped");
         return WakeOutcome.LinkDropped;
-    }
-
-    /// <summary>Experiment D (docs/contacts-connect-fix-guide.md): disposes this link, then polls how long Windows keeps the
-    /// LE link up. After 1.5 s still up, drops the remaining managed references (characteristic objects) and forces a GC,
-    /// to tell "someone in this process still holds the link" from "Windows is slow". Returns the time to link-down in
-    /// ms (-1 = still up at <paramref name="timeout"/>) and whether the GC step was needed.</summary>
-    public async Task<(long DownMs, bool NeededGc)> ReleaseAndMeasureAsync(TimeSpan timeout, CancellationToken ct)
-    {
-        var address = Address;
-        var addressType = AddressType;
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        Dispose();
-        SendTimeline.Mark("exp-d-disposed");
-        BluetoothLEDevice? dev = null;
-        try
-        {
-            using var openCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            openCts.CancelAfter(TimeSpan.FromSeconds(2));
-            dev = await BluetoothLEDevice.FromBluetoothAddressAsync(address, addressType).AsTask(openCts.Token);
-            if (dev is null) return (watch.ElapsedMilliseconds, false);
-            var gcDone = false;
-            while (dev.ConnectionStatus == BluetoothConnectionStatus.Connected)
-            {
-                if (watch.Elapsed >= timeout) return (-1, gcDone);
-                if (!gcDone && watch.ElapsedMilliseconds >= 1500)
-                {
-                    gcDone = true;
-                    OConnectReadChar = OConnectWriteChar = OConnectNotifyChar = OConnectWifiChar = OConnectCancelChar = null;
-                    _dcpWifiChar = _dcpCancelChar = _dcpHandshakeWriteChar = null;
-                    IBeaconChar = null;
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
-                    SendTimeline.Mark("exp-d-gc");
-                    Log.Info($"CONTACTS: experiment D: link still up {watch.ElapsedMilliseconds} ms after the release; forced a GC");
-                }
-                await Task.Delay(100, ct);
-            }
-            return (watch.ElapsedMilliseconds, gcDone);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-        {
-            Log.Info($"CONTACTS: experiment D: link state check failed: {ex.Message}");
-            return (-1, false);
-        }
-        finally { dev?.Dispose(); }
     }
 
     /// <summary>Waits until Windows no longer holds an LE link to this address. True = it is down (or unknown to

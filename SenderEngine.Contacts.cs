@@ -125,8 +125,6 @@ public sealed partial class SenderEngine
 
     private bool WakeClearViaDcp(PhoneDevice device)
     {
-        // Phase 0 experiments (docs/contacts-connect-fix-guide.md): the cancel goes to BB15, the one place a wake read is answered.
-        if (ContactsExperiment.Active) return true;
         lock (_wakeClearFlipped)
             return (device.LanDeviceType == PhoneBeaconType) != _wakeClearFlipped.Contains(device.LanPdid);
     }
@@ -486,44 +484,6 @@ public sealed partial class SenderEngine
                     if (outcome == GattLink.WakeOutcome.ServiceUp)
                     {
                         if (wakeTaskPending) await link.ClearWakeTaskAsync(ct, WakeClearViaDcp(device));
-                        if (ContactsExperiment.Mode == 'D')
-                        {
-                            Log.Info("CONTACTS: experiment D: releasing the wake link and timing how long it takes to go down");
-                            var (downMs, neededGc) = await link.ReleaseAndMeasureAsync(TimeSpan.FromSeconds(20), ct);
-                            link = null;
-                            Log.Info($"CONTACTS: experiment D RESULT: link down after {(downMs < 0 ? "NEVER (20 s)" : downMs + " ms")}, GC needed={neededGc}");
-                            SendTimeline.Mark(downMs < 0 ? "exp-d-never-down" : $"exp-d-down-{downMs}ms{(neededGc ? "-after-gc" : "")}");
-                            link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, status, ct, beacon.AddressType,
-                                fast: true, allowMissingTarget: true);
-                            if (!link.HasOConnect)
-                            {
-                                Log.Warn("CONTACTS: experiment D: no 9999 after the reconnect");
-                                link.DisposeInBackground();
-                                link = null;
-                                break;
-                            }
-                            SendTimeline.Mark("exp-d-reconnected");
-                        }
-                        else if (ContactsExperiment.Mode == 'C')
-                        {
-                            // Experiment C: the wake task is cancelled on BB15; release this link so the receiver leaves
-                            // DCP mode, then reconnect and run the whole handshake on 9999.
-                            Log.Info("CONTACTS: experiment C: releasing the wake link, then reconnecting");
-                            link.DisposeInBackground();
-                            link = null;
-                            var down = await GattLink.WaitForLinkDownAsync(beacon.Address, beacon.AddressType, TimeSpan.FromSeconds(3), ct);
-                            SendTimeline.Mark(down ? "exp-c-link-down" : "exp-c-link-still-up");
-                            link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, status, ct, beacon.AddressType,
-                                fast: true, allowMissingTarget: true);
-                            if (!link.HasOConnect)
-                            {
-                                Log.Warn("CONTACTS: experiment C: no 9999 after the reconnect");
-                                link.DisposeInBackground();
-                                link = null;
-                                break;
-                            }
-                            SendTimeline.Mark("exp-c-reconnected");
-                        }
                         Log.Info($"CONTACTS: connected to {device.Name} after waking it (attempt {attempt}.{hop})");
                         return TakeLink(ref link);
                     }

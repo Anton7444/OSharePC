@@ -35,8 +35,6 @@ internal static class Program
             return 0;
         }
 
-        _ = ContactsExperiment.Mode; // logs the Phase 0 experiment choice at startup
-
         try
         {
             if (args.Contains("--selftest"))

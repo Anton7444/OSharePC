@@ -337,18 +337,24 @@ implementation. Write a separate design doc first; do not start it inside this t
 
 ---
 
-## Phase 0 status
+## Phase 0 results (device logs: phone 17.2.36, tablet 16.10.61)
 
-Implemented (not yet device-tested; no Windows/.NET toolchain was available to build in the authoring environment):
-
-- `DCP 0xBB15 characteristics` and `service 9999 full characteristic list` are logged on every connect with each
-  characteristic's `CharacteristicProperties` (`uuid:Properties`).
-- `SendTimeline` marks: `wake-read-ok`, `wake-read-failed`, `wake-link-dropped`, `handshake-write-timeout`
-  (plus `wake-cancel-timeout`, `exp-c-link-down` / `exp-c-link-still-up`, `exp-c-reconnected`).
-- Experiment switch: environment variable `OSHARE_CONTACTS_EXPERIMENT=A|B|C` (read once at startup, logged).
-  In every experiment the wake-task cancel goes to BB15 9995.
-  - **A:** 9896 handshake writes go to BB15 `9896` (fails fast with a clear error if BB15 lists none); 9897 stays on 9999.
-  - **B:** unchanged routing (9896 on 9999) after a same-link wake; expected to stall ~30 s.
-  - **C:** after wake + BB15 cancel, the link is released, we wait for it to go down, reconnect, and run on 9999.
-
-Still UNVERIFIED until the device logs come back: whether BB15 lists 9896, and the outcomes of A/B/C.
+- **BB15 lists no 9896 and no 9897** (`9998 9996 9995 9981 9990 9989 9986 9997 9985 9892 9891 9890`). Experiment A
+  therefore cannot work (S1 is impossible); the §1.2 routing model is **confirmed** by B.
+- **B (wake, then 9896 write-with-response on 9999, phone 17.x):** 9897 is read fine, the 9896 write is never answered
+  (4 s local timeout; the link only dies ~30 s later at the ATT timeout). Cold send ~42 s.
+- **The BB15 9996 wake read never returns `Success`**: it ends in `OperationCanceledException` after ~0.2-0.4 s (the
+  receiver restarts its GATT server). The BB15 9995 cancel that follows is answered. Do not use "9996 read succeeded"
+  as the signal for DCP mode.
+- **C / D (release the wake link, reconnect): impossible.** Windows still holds the LE link 20 s after `Dispose()`, even
+  with no pending request and after dropping every WinRT reference and forcing a GC (6 of 6 cold sends). Something
+  outside this process keeps it up, so the receiver's selected device never disconnects and `p()` stays true. S2 does not work.
+- **Tablet 16.10.61 differs:** after the wake, its 9896 write-with-response on 9999 is answered normally. It needs no workaround.
+- **E (wake + BB15 cancel, then 9896 sent as an ATT Write Command, no response) works on the phone:** cold send
+  2.7-2.9 s, transfer completed, warm send ~0.7 s. The receiver's handler processes the command; only its reply was
+  misrouted. This is what the code now does: a write-without-response when the link did a wake read and the peer's
+  9897 `version` is >= 17000000 (`GattLink.WriteOConnectSingle`).
+- Trade-off: a write command gives no delivery confirmation; the receiver connecting back to our server is the
+  confirmation (already how the flow ends).
+- Still open: rare `ObjectDisposedException` on a parked link (retried successfully); Phases 2-3 are unchanged;
+  Phase 1's S1/S2 designs are obsolete.
