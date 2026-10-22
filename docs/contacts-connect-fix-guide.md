@@ -334,3 +334,21 @@ implementation. Write a separate design doc first; do not start it inside this t
 - Update this guide's "UNVERIFIED" notes with what Phase 0 found.
 - If any device result contradicts §1.2, stop, report the log lines, and do not work around it with more
   retries.
+
+---
+
+## Phase 0 status
+
+Implemented (not yet device-tested; no Windows/.NET toolchain was available to build in the authoring environment):
+
+- `DCP 0xBB15 characteristics` and `service 9999 full characteristic list` are logged on every connect with each
+  characteristic's `CharacteristicProperties` (`uuid:Properties`).
+- `SendTimeline` marks: `wake-read-ok`, `wake-read-failed`, `wake-link-dropped`, `handshake-write-timeout`
+  (plus `wake-cancel-timeout`, `exp-c-link-down` / `exp-c-link-still-up`, `exp-c-reconnected`).
+- Experiment switch: environment variable `OSHARE_CONTACTS_EXPERIMENT=A|B|C` (read once at startup, logged).
+  In every experiment the wake-task cancel goes to BB15 9995.
+  - **A:** 9896 handshake writes go to BB15 `9896` (fails fast with a clear error if BB15 lists none); 9897 stays on 9999.
+  - **B:** unchanged routing (9896 on 9999) after a same-link wake; expected to stall ~30 s.
+  - **C:** after wake + BB15 cancel, the link is released, we wait for it to go down, reconnect, and run on 9999.
+
+Still UNVERIFIED until the device logs come back: whether BB15 lists 9896, and the outcomes of A/B/C.

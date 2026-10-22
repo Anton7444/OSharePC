@@ -97,6 +97,9 @@ public sealed partial class GattLink : IDisposable
     // while its OShare app runs no 9999 server. OnePlus Share's own sender falls back to 0xBB15 for its Android
     // protocol (BleClient.s1()), but 0xBB15 carries no 9897/9896, so the OConnect handshake always needs 9999.
     private GattCharacteristic? _dcpWifiChar, _dcpCancelChar;
+    /// <summary>BB15 0x9896, if the system DCP service exposes one (Phase 0 of docs/contacts-connect-fix-guide.md; only
+    /// experiment A writes to it).</summary>
+    private GattCharacteristic? _dcpHandshakeWriteChar;
     private static readonly Guid DcpServiceUuid = new("0000bb15-0000-1000-8000-00805f9b34fb");
     private static readonly Guid WifiCharUuid = new("00009996-0000-1000-8000-00805f9b34fb");
     private static readonly Guid CancelCharUuid = new("00009995-0000-1000-8000-00805f9b34fb");
@@ -640,7 +643,7 @@ public sealed partial class GattLink : IDisposable
                     charsResult = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
                 if (charsResult.Status == GattCommunicationStatus.Success)
                 {
-                    Log.Info($"BLE: service 9999 full characteristic list: [{string.Join(", ", charsResult.Characteristics.Select(c => ShortUuid(c.Uuid)))}]");
+                    Log.Info($"BLE: service 9999 full characteristic list: [{string.Join(", ", charsResult.Characteristics.Select(c => $"{ShortUuid(c.Uuid)}:{c.CharacteristicProperties}"))}]");
                     foreach (var c in charsResult.Characteristics)
                     {
                         if (c.Uuid == OConnectReadUuid) OConnectReadChar = c;
@@ -1263,13 +1266,21 @@ public sealed partial class GattLink : IDisposable
         // the state-1 write timed out). Passing the token to AsTask aborts the operation so the link can drop.
         using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         GattCommunicationStatus result;
+        // Experiment A (docs/contacts-connect-fix-guide.md, Phase 0): the handshake write goes to BB15 0x9896.
+        var writeChar = ContactsExperiment.Mode == 'A' ? _dcpHandshakeWriteChar : OConnectWriteChar;
+        if (writeChar is null)
+            throw new InvalidOperationException(ContactsExperiment.Mode == 'A'
+                ? "CONTACTS: experiment A needs a 0x9896 on the DCP service 0xBB15, which this receiver does not list"
+                : "BLE: this link has no 0x9896 to write to");
+        Log.Info($"CONTACTS: 9896 write goes to {(ReferenceEquals(writeChar, OConnectWriteChar) ? "9999" : "BB15")}");
         try
         {
-            result = await OConnectWriteChar!.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse)
+            result = await writeChar.WriteValueAsync(ToBuffer(payload), GattWriteOption.WriteWithResponse)
                 .AsTask(writeCts.Token).WaitAsync(TimeSpan.FromSeconds(4));
         }
         catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
         {
+            SendTimeline.Mark("handshake-write-timeout");
             throw new LinkNotRespondingException(Address, "BLE: receiver not responding (write 9896 timed out)")
             { DuringHandshakeWrite = true };
         }

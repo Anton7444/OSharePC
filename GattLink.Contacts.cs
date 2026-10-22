@@ -6,6 +6,24 @@ using Windows.Storage.Streams;
 
 namespace OShareSender;
 
+/// <summary>Phase 0 experiment switch of docs/contacts-connect-fix-guide.md, read once from the environment variable
+/// OSHARE_CONTACTS_EXPERIMENT (A, B or C; anything else = off). A: after a wake on the same link, read 9897 on 9999 and
+/// write 9896 on BB15. B: same, but write 9896 on 9999 (expected to time out, confirming the routing model). C: after
+/// the wake and the BB15 cancel, drop the link, reconnect and do everything on 9999. Temporary: remove once Phase 1 lands.</summary>
+internal static class ContactsExperiment
+{
+    public static readonly char Mode = Read();
+    public static bool Active => Mode != '\0';
+
+    private static char Read()
+    {
+        var v = Environment.GetEnvironmentVariable("OSHARE_CONTACTS_EXPERIMENT")?.Trim().ToUpperInvariant();
+        var mode = v is "A" or "B" or "C" ? v[0] : '\0';
+        if (mode != '\0') Log.Info($"CONTACTS: experiment {mode} enabled (OSHARE_CONTACTS_EXPERIMENT)");
+        return mode;
+    }
+}
+
 /// <summary>What the phone told us on the 0x9954 status read.</summary>
 public sealed partial class GattLink
 {
@@ -39,10 +57,11 @@ public sealed partial class GattLink
                 {
                     if (c.Uuid == WifiCharUuid) _dcpWifiChar = c;
                     else if (c.Uuid == CancelCharUuid) _dcpCancelChar = c;
+                    else if (c.Uuid == OConnectWriteUuid) _dcpHandshakeWriteChar = c;
                     else if (c.Uuid == IBeaconCharUuid) IBeaconChar ??= c;
                 }
-                if (Log.Every("dcp-bb15-chars", TimeSpan.FromMinutes(10)))
-                    Log.Info($"BLE: DCP 0xBB15 characteristics: [{string.Join(", ", chars.Characteristics.Select(c => ShortUuid(c.Uuid)))}]");
+                // Logged on every Contacts connect for now (Phase 0): whether BB15 lists 9896 decides strategy S1 vs S2.
+                Log.Info($"BLE: DCP 0xBB15 characteristics: [{string.Join(", ", chars.Characteristics.Select(c => $"{ShortUuid(c.Uuid)}:{c.CharacteristicProperties}"))}]");
             }
         }
         catch (Exception ex) { Log.Info($"BLE: DCP 0xBB15 enumeration failed: {ex.GetType().Name} {ex.Message}"); }
@@ -75,6 +94,7 @@ public sealed partial class GattLink
         {
             var r = await _dcpWifiChar.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(ct).WaitAsync(TimeSpan.FromSeconds(4), ct);
             Log.Info($"CONTACTS: wake: 9996 read status {r.Status}");
+            SendTimeline.Mark(r.Status == GattCommunicationStatus.Success ? "wake-read-ok" : "wake-read-failed");
             // What an Android sender gets here ("p2pMac&version&name&randomPort&..."), kept to study that path.
             if (r.Status == GattCommunicationStatus.Success && r.Value is { Length: > 0 } v)
             {
@@ -94,7 +114,13 @@ public sealed partial class GattLink
         }
         catch (TimeoutException)
         {
-            if (!IsConnected) return WakeOutcome.LinkDropped;
+            if (!IsConnected)
+            {
+                SendTimeline.Mark("wake-read-failed");
+                SendTimeline.Mark("wake-link-dropped");
+                return WakeOutcome.LinkDropped;
+            }
+            SendTimeline.Mark("wake-read-failed");
             Log.Info("CONTACTS: wake: the receiver did not answer on this link");
             return WakeOutcome.NotResponding;
         }
@@ -104,7 +130,12 @@ public sealed partial class GattLink
             // may drop). The receiver still opened a receive task for the read.
             Log.Info($"CONTACTS: wake: 9996 read ended with {ex.GetType().Name}");
             _wakeTaskPending = true;
-            if (!IsConnected) return WakeOutcome.LinkDropped;
+            SendTimeline.Mark("wake-read-failed");
+            if (!IsConnected)
+            {
+                SendTimeline.Mark("wake-link-dropped");
+                return WakeOutcome.LinkDropped;
+            }
         }
         var outcome = await WaitForOConnectServiceAsync(TimeSpan.FromSeconds(4), ct);
         if (outcome == WakeOutcome.ServiceUp && _wakeTaskPending) await ClearWakeTaskAsync(ct, clearViaDcp);
@@ -148,6 +179,7 @@ public sealed partial class GattLink
         }
         catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
         {
+            SendTimeline.Mark("wake-cancel-timeout");
             throw new LinkNotRespondingException(Address, $"BLE: receiver not responding (cancelling the wake task via {via} 9995 timed out)")
             { DuringWakeClear = true };
         }
@@ -160,7 +192,11 @@ public sealed partial class GattLink
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            if (!IsConnected) return WakeOutcome.LinkDropped;
+            if (!IsConnected)
+            {
+                SendTimeline.Mark("wake-link-dropped");
+                return WakeOutcome.LinkDropped;
+            }
             try
             {
                 // Cancel the discovery on this iteration's timeout instead of only abandoning the wait, so a
@@ -188,7 +224,9 @@ public sealed partial class GattLink
             }
             await Task.Delay(250, ct);
         }
-        return IsConnected ? WakeOutcome.Failed : WakeOutcome.LinkDropped;
+        if (IsConnected) return WakeOutcome.Failed;
+        SendTimeline.Mark("wake-link-dropped");
+        return WakeOutcome.LinkDropped;
     }
 
     /// <summary>Waits until Windows no longer holds an LE link to this address. True = it is down (or unknown to
