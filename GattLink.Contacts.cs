@@ -15,11 +15,24 @@ internal static class ContactsExperiment
     public static readonly char Mode = Read();
     public static bool Active => Mode != '\0';
 
+    /// <summary>Env var first, else the first character of %LOCALAPPDATA%\OSharePC\experiment.txt (for launching the
+    /// GUI by double-click). Touched once at startup so the choice always shows in the log.</summary>
     private static char Read()
     {
-        var v = Environment.GetEnvironmentVariable("OSHARE_CONTACTS_EXPERIMENT")?.Trim().ToUpperInvariant();
+        var v = Environment.GetEnvironmentVariable("OSHARE_CONTACTS_EXPERIMENT");
+        var source = "OSHARE_CONTACTS_EXPERIMENT";
+        if (string.IsNullOrWhiteSpace(v))
+        {
+            try
+            {
+                var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OSharePC", "experiment.txt");
+                if (File.Exists(file)) { v = File.ReadAllText(file); source = "experiment.txt"; }
+            }
+            catch { }
+        }
+        v = v?.Trim().ToUpperInvariant();
         var mode = v is "A" or "B" or "C" ? v[0] : '\0';
-        if (mode != '\0') Log.Info($"CONTACTS: experiment {mode} enabled (OSHARE_CONTACTS_EXPERIMENT)");
+        Log.Info(mode != '\0' ? $"CONTACTS: experiment {mode} enabled ({source})" : "CONTACTS: no experiment set");
         return mode;
     }
 }
