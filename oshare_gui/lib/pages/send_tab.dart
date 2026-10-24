@@ -52,6 +52,9 @@ class _SendTabState extends State<SendTab> {
   }
 
   Future<void> _pickFiles() async {
+    // The file dialog takes a while; use that time to connect nearby Contacts devices so
+    // the send that follows goes out over an already-warm link (throttled client-side).
+    widget.client.prewarmContacts();
     final files = await FilePicker.pickFiles();
     if (files.isNotEmpty) {
       final paths = files.map((file) => file.path).whereType<String>().toList();
@@ -61,6 +64,7 @@ class _SendTabState extends State<SendTab> {
   }
 
   Future<void> _pickFolder() async {
+    widget.client.prewarmContacts();
     final dir = await FilePicker.getDirectoryPath();
     if (dir != null) {
       await widget.stagingController.addPaths([dir], language: widget.language);

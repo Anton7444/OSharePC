@@ -348,6 +348,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
         // Start Contact-mode preparation while the user is still choosing the
         // receiver.  Waiting until Send() makes the beacon interval part of
         // every first transfer and defeats the fast path.
+        _stagedKeepWarmUntil = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(5);
         PrewarmContactsDevices();
         return task;
     }
@@ -355,6 +356,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
     public void ClearStaged()
     {
         _staged = null;
+        _stagedKeepWarmUntil = default;
         Server.SetTask(null);
         Log.Info("staged transfer cleared");
     }
@@ -647,6 +649,7 @@ public sealed partial class SenderEngine : IDisposable, IAsyncDisposable
                             oppoSsoid: SettingsStore.Current.OppoSsoid,
                             stallAfter: contactsPath && busyTry == 1 ? TimeSpan.FromSeconds(4) : null);
                         SendTimeline.Mark("phone-connected");
+                        MarkContactsOk(device.LanPdid);   // the handshake answered: the receiver is warm now
                         sendLink = activeLink; // the link that worked (a retry may have replaced the first one)
                         break;
                     }

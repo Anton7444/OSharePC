@@ -60,6 +60,7 @@ public sealed partial class SenderEngine
             link.DisposeInBackground();
             return;
         }
+        MarkContactsOk(key);
         // A parked link does not need the fast interval; it is requested again when a send takes the link.
         link.RelaxConnectionParameters();
         lock (_warmLinks)
@@ -67,6 +68,24 @@ public sealed partial class SenderEngine
             if (_warmLinks.TryGetValue(key, out var old) && !ReferenceEquals(old.Link, link)) old.Link.DisposeInBackground();
             _warmLinks[key] = (link, DateTimeOffset.UtcNow);
         }
+    }
+
+    /// <summary>When this device last completed an OConnect handshake (link parked or send connected).
+    /// Idle receivers let their 9999 server drop and a fresh 9999 discovery then sits out its full timeout;
+    /// <see cref="IsContactsCold"/> uses this to wake-first instead.</summary>
+    private readonly Dictionary<string, DateTimeOffset> _lastContactsOk = new();
+
+    private void MarkContactsOk(string key)
+    {
+        lock (_lastContactsOk) _lastContactsOk[key] = DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>No completed handshake within ~a minute: expect the receiver's 9999 server to be down or
+    /// restarting (Phase 0: a fresh-looking connect then burns 7.7 s in Unreachable 9999 discovery).</summary>
+    private bool IsContactsCold(string key)
+    {
+        lock (_lastContactsOk)
+            return !_lastContactsOk.TryGetValue(key, out var at) || DateTimeOffset.UtcNow - at > TimeSpan.FromSeconds(60);
     }
 
     /// <summary>A still-open link left by the pre-warm (removed from the store when taken).</summary>
@@ -163,9 +182,15 @@ public sealed partial class SenderEngine
     private CancellationTokenSource? _keeperCts;
     private Task? _keeperTask;
     private DateTimeOffset _keepWarmUntil;
+    /// <summary>While files are staged the keeper stays alive (capped at 5 minutes from the staging), so the
+    /// first send after a pause finds a fresh link instead of an idle-cold receiver.</summary>
+    private DateTimeOffset _stagedKeepWarmUntil;
     private DateTimeOffset _lastContactsSendEnded;
-    /// <summary>Minimum gap between the end of one Contacts send and the start of the next.</summary>
-    private static readonly TimeSpan ContactsSendSettle = TimeSpan.FromSeconds(1);
+    /// <summary>Minimum gap between the end of one Contacts send and the start of the next. The receiver
+    /// tears its previous task down asynchronously; offering into that window once wedged it in TRANSITING
+    /// until force-stop (its 9995 cancel is ignored while TRANSITING) — observed at a 0.76 s gap on 16.10.61,
+    /// clean at ≥ 1.5 s. 2.5 s keeps clear of the window.</summary>
+    private static readonly TimeSpan ContactsSendSettle = TimeSpan.FromSeconds(2.5);
     private readonly Dictionary<string, (DateTimeOffset NextTry, int Failures)> _prewarmBackoff = new();
 
     /// <summary>Called when files get staged and after a Contacts send: keeps each nearby Contacts device connected
@@ -190,7 +215,8 @@ public sealed partial class SenderEngine
         Log.Info("CONTACTS: keeping Contacts devices warm");
         try
         {
-            while (!ct.IsCancellationRequested && DateTimeOffset.UtcNow < _keepWarmUntil &&
+            while (!ct.IsCancellationRequested &&
+                   (DateTimeOffset.UtcNow < _keepWarmUntil || DateTimeOffset.UtcNow < _stagedKeepWarmUntil) &&
                    !string.IsNullOrWhiteSpace(SettingsStore.Current.OppoSsoid))
             {
                 PruneWarmLinks();
@@ -469,8 +495,18 @@ public sealed partial class SenderEngine
                 // Up to three links to this address: the receiver may drop the link while it restarts its server.
                 for (var hop = 1; hop <= 3; hop++)
                 {
+                    // Cold start (no handshake for ~a minute): discover the system-hosted DCP service instead of
+                    // 9999 — an idle receiver answers BB15 while a 9999 discovery burns its whole timeout in
+                    // Unreachable — then wake 9999 over this link below (Phase 0 idle bucket, 7.7 s -> ~2 s).
+                    var coldStart = !woke && hop == 1 && IsContactsCold(device.LanPdid);
+                    if (coldStart)
+                    {
+                        status?.Invoke($"waking {device.Name}…");
+                        Log.Info("CONTACTS: cold start: connecting via DCP 0xBB15 and waking the receiver");
+                        SendTimeline.Mark("cold-start");
+                    }
                     link = await GattLink.ConnectAsync(beacon.Address, SendFlow.OConnectLan, 1, status, ct, beacon.AddressType,
-                        fast: true, allowMissingTarget: true);
+                        fast: true, allowMissingTarget: true, targetOverride: coldStart ? GattLink.DcpServiceUuid : null);
                     GattLink.WakeOutcome outcome;
                     if (link.HasOConnect && !(forceWake && !woke))
                     {

@@ -102,7 +102,10 @@ public sealed partial class GattLink : IDisposable
     /// <summary>Contacts-mode sends: write the 9896 handshake as ATT Write Commands to 17.x receivers (see
     /// <see cref="WriteOConnectSingle"/>). Set by the sender engine before the handshake.</summary>
     public bool HandshakeWriteCommands { get; set; }
-    private static readonly Guid DcpServiceUuid = new("0000bb15-0000-1000-8000-00805f9b34fb");
+    /// <summary>The receiver's system-hosted DCP service (0xBB15), public for the Contacts cold-start
+    /// flow: an idle receiver answers BB15 while its own 9999 server is restarting, so a cold connect
+    /// discovers this instead of 9999 and then wakes 9999 over the same link.</summary>
+    public static readonly Guid DcpServiceUuid = new("0000bb15-0000-1000-8000-00805f9b34fb");
     private static readonly Guid WifiCharUuid = new("00009996-0000-1000-8000-00805f9b34fb");
     private static readonly Guid CancelCharUuid = new("00009995-0000-1000-8000-00805f9b34fb");
 
@@ -282,9 +285,12 @@ public sealed partial class GattLink : IDisposable
     /// usually transient (address rotation, advertisement timing, RF).</summary>
     /// <param name="fast">Contacts (beacon) path: short timeouts, no pairing, fast connection parameters.</param>
     /// <param name="allowMissingTarget">Contacts path only: when 9999 is absent, still return the link (with the DCP
-    /// 0xBB15 characteristics enumerated) so the caller can use or wake the receiver over this same link instead
-    /// of opening another connection.</param>
-    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified, bool fast = false, bool allowMissingTarget = false)
+    /// 0xBB15 characteristics enumerated) so the caller can use or wake the receiver over this same link instead of
+    /// opening another connection.</param>
+    /// <param name="targetOverride">Discover this service UUID instead of the flow's usual target. The Contacts
+    /// cold-start flow passes the DCP service (BB15): an idle receiver answers its system-hosted BB15 while 9999
+    /// discovery would sit out the full timeout, and the 9996 wake then brings 9999 up on the same link.</param>
+    public static async Task<GattLink> ConnectAsync(ulong bluetoothAddress, SendFlow flow, int retries, Action<string>? status, CancellationToken ct = default, BluetoothAddressType addressType = BluetoothAddressType.Unspecified, bool fast = false, bool allowMissingTarget = false, Guid? targetOverride = null)
     {
         Exception? last = null;
         var sawPreExistingLink = false;
@@ -491,10 +497,13 @@ public sealed partial class GattLink : IDisposable
                 }
                 else
                 {
-                    Log.Info("BLE: discovering target OConnect service 9999 only");
-                    var oconnect = await DiscoverUuidAsync(OConnectServiceUuid);
+                    var targetUuid = targetOverride ?? OConnectServiceUuid;
+                    Log.Info(targetOverride is null
+                        ? "BLE: discovering target OConnect service 9999 only"
+                        : $"BLE: cold-start: discovering {ShortUuid(targetUuid)} instead of 9999 (wake to follow)");
+                    var oconnect = await DiscoverUuidAsync(targetUuid);
                     discoveryStatus = oconnect.Status;
-                    discoveryLabel = "9999";
+                    discoveryLabel = ShortUuid(targetUuid);
                     if (oconnect.Status == GattCommunicationStatus.Success)
                         discoveredServices.AddRange(oconnect.Services);
 
@@ -1006,7 +1015,30 @@ public sealed partial class GattLink : IDisposable
             if (state != 0 && OConnectWifiChar is not null && OConnectCancelChar is not null)
             {
                 // A stale receive task on the phone (left by an aborted/timed-out earlier session, or by a
-                // wake-up read) makes it answer "busy". Its own cancel command clears it: read 0x9996 first
+                // wake-up read) makes it answer "busy". Right after a completed transfer the same state means
+                // the receiver is still tearing the previous task down — a re-read after a beat settles that
+                // without touching the receiver (the cancel below is IGNORED while it is TRANSITING, and a
+                // task opened during the teardown window once wedged the receiver until force-stop).
+                if (state == 1)
+                {
+                    Log.Info("BLE: phone reports busy (state=1) — giving its task teardown a beat before clearing");
+                    SendTimeline.Mark("busy-settle");
+                    await Task.Delay(1200, ct);
+                    read = await ReadWithTimeoutAsync(OConnectReadChar, TimeSpan.FromSeconds(2.5), ct);
+                    if (read.Status == GattCommunicationStatus.Success)
+                    {
+                        hsJson = ReadString(read.Value);
+                        Log.Info($"BLE: 9897 status after settle: {hsJson}");
+                        using var hsDoc2 = JsonDocument.Parse(hsJson);
+                        state = hsDoc2.RootElement.TryGetProperty("state", out var st2) ? st2.GetInt32() : state;
+                    }
+                    if (state == 0)
+                    {
+                        SendTimeline.Mark("busy-settled");
+                        goto HandshakeReady;
+                    }
+                }
+                // Still busy: a genuinely stale receive task — clear it: read 0x9996 first
                 // (the phone only accepts writes from a device that has read), then write 02 to 0x9995.
                 Log.Info($"BLE: phone reports busy (state={state}) — clearing its stale receive task (9996 read + 9995=02)");
                 // Every step is bounded: a receiver that ignores one of these (it drops a 9995 write from a device
@@ -1039,6 +1071,7 @@ public sealed partial class GattLink : IDisposable
                     Log.Warn($"BLE: clearing the phone's stale receive task failed: {ex.Message}");
                 }
             }
+            HandshakeReady:
             if (state != 0 || string.IsNullOrEmpty(phonePub))
                 throw new InvalidOperationException($"BLE: phone busy (state={state}) - close other transfers and retry");
 
