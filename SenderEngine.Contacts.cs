@@ -16,14 +16,21 @@ public sealed partial class SenderEngine
     /// bounded (beacon wait 20 s), so the wait is too. Any other device's pre-warm is stopped at once.</summary>
     private async Task<bool> TakeContactsGateAsync(CancellationToken ct, string? deviceKey = null)
     {
+        var waitStart = DateTimeOffset.UtcNow;
         if (deviceKey is not null && string.Equals(Volatile.Read(ref _prewarmDeviceKey), deviceKey, StringComparison.Ordinal))
         {
             Log.Info("CONTACTS: a pre-warm of this device is running; waiting for its link");
-            if (await _contactsGate.WaitAsync(TimeSpan.FromSeconds(25), ct)) return true;
+            if (await _contactsGate.WaitAsync(TimeSpan.FromSeconds(25), ct))
+            {
+                SendTimeline.Mark($"send-waited-for-prewarm-{(long)(DateTimeOffset.UtcNow - waitStart).TotalMilliseconds}ms");
+                return true;
+            }
             Log.Info("CONTACTS: the pre-warm of this device is taking too long; stopping it");
         }
         try { _prewarmCts?.Cancel(); } catch (ObjectDisposedException) { }
-        return await _contactsGate.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        var got = await _contactsGate.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        SendTimeline.Mark($"send-waited-for-prewarm-{(long)(DateTimeOffset.UtcNow - waitStart).TotalMilliseconds}ms");
+        return got;
     }
 
     /// <summary>The device a running pre-warm is working on (null when none runs).</summary>
