@@ -221,3 +221,28 @@ Priorities from the table:
 - Phase 2a (last-good address): skipped — the receiver keeps one address (evidence above).
 - Phase 2b delay-trim: the account-proof segment is ~0.5 s — not a large bucket. Skipped.
 - Phase 3 keep-warm-while-staged + prewarm-on-select: implemented (small, safe).
+
+---
+
+## Phase 2b' + 3 results (2026-10-24, same tablet, commits on `contacts-speed-work`)
+
+Changes: cold-start connect via DCP/BB15 + wake dance when no handshake completed for 60 s (`IsContactsCold`,
+`GattLink.ConnectAsync(targetOverride)`); `ContactsSendSettle` 1 s → 2.5 s and a "busy-settle" re-read (1.2 s)
+before the aggressive busy-clear; keep-warm while files are staged (≤ 5 min); `prewarmContacts()` when the user
+opens the file/folder picker (GUI rebuilt).
+
+Why the settle changes: hammering sends 0.76 s apart once offered into the receiver's task-teardown window —
+its OShareTaskManager opened the new task with `STATUS_NO_CONNECTED`, its `HttpWlanClient` cancelled, and the
+receiver wedged in TRANSITING forever (its own 9995=02 cancel is ignored while TRANSITING; it did not recover
+in 13 minutes, only force-stop cleared it). Evidence: tablet oshare.log 14:39:09-10, then state=1 on every
+later 9897 read. With the 2.5 s settle + busy-settle: 6/6 hammering sends succeed.
+
+| Scenario | before | after | Verdict |
+|---|---|---|---|
+| warm | 1.1–1.5 s | 1.1–1.5 s at real gaps (2.5–2.9 s only under 0.3 s hammering, incl. settle) | PASS |
+| cold | 2.7–2.9 s | 1.95–2.13 s handshake / ~3.1 s total | PASS |
+| stage-then-send | 2.5–2.7 s | 1.9–2.2 s handshake | PASS |
+| idle 125 s | 5.8–12.0 s | 4.0–5.0 s (one 7.6 s sample from a 4.5 s BLE link-up) | PASS (≤ 10 s) |
+
+All acceptance criteria met on the tablet (the only device in range this session; the phone was off/BT-out-of-range
+during verification — its path is identical and it was already at ~2.4 s in the branch's own table).

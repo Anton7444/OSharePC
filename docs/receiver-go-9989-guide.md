@@ -152,3 +152,17 @@ reliable over 20 sends.
    startup (`WifiJoiner.CleanupStaleProfiles`).
 4. Never log the passphrase or keys.
 5. If Phase 0 says NO-GO, stop. Do not work around BLOCKER 1 or 2 with retries.
+
+---
+
+## Phase 0 verdict (2026-10-24): **NO-GO on both of the user's devices — BLOCKER 1 fires**
+
+- Phone (17.2.36): its own log prints `OShare_OSdkUtils: getSapP2pConcurrentSupported, result = 7` twelve
+  times → `s0.s()`/`t0.s()` sees 7 → is5GBandAvailable → the 9989 handler logs "5G device should not go" and
+  refuses before creating any group.
+- Tablet (16.10.61): `getSapP2pConcurrentSupported, result = -1` → the fallback in `lb.s0.r()` calls
+  `WifiManager.is5GHzBandSupported()`; the tablet is associated to the home AP on 5240 MHz, so the fallback is
+  true → same refusal. Its log also tags the PC as `is5G=true` on every BLE connect.
+
+Per this guide's rule 5 (§6): NO-GO → stop. No 9989 code was written. Revisit only with a receiver that reports
+sapP2pConcurrentSupported ∉ {2, 7} AND fails the 5 GHz fallback — i.e. a 2.4 GHz-only device.
