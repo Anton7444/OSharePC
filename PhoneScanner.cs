@@ -403,6 +403,12 @@ public sealed class PhoneScanner : IDisposable
     {
         try
         {
+            // No name to match against: adoption would just pick the first paired device the OS
+            // returns. Observed: every LAN identity whose SERVICE-PUBLISH carries no DN field
+            // adopted the OPPO Enco earbuds' address, so a send to the phone connected to the
+            // earbuds instead (they have no 9999 service — "Unreachable" x3, send failed).
+            if (string.IsNullOrWhiteSpace(nameHint)) return;
+
             var matches = new List<(ulong Address, BluetoothAddressType Type, string Name)>();
 
             // Paired classic Bluetooth (BR/EDR) devices — phones pair this way by
@@ -454,6 +460,14 @@ public sealed class PhoneScanner : IDisposable
             var (address, type, matchedName) = matches[0];
             lock (_gate)
             {
+                // Two LAN identities must never adopt the same physical address: they are
+                // different devices by definition, so a shared address is a mis-match.
+                if (_lanDevices.Values.Any(d =>
+                        !string.Equals(d.LanPdid, pdid, StringComparison.Ordinal) && d.Address == address))
+                {
+                    Log.Info($"SCAN: LAN device {pdid} skipping paired-address adoption of {PhoneDevice.FormatAddress(address)} ('{matchedName}') — another LAN device already uses that address");
+                    return;
+                }
                 if (_lanDevices.TryGetValue(pdid, out var device) && device.Address != address)
                 {
                     Log.Info($"SCAN: LAN device {pdid} adopting real paired-Bluetooth address {PhoneDevice.FormatAddress(address)} for '{matchedName}' (was synthetic {device.AddressStr})");
